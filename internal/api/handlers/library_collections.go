@@ -327,6 +327,7 @@ type importMDBListRequest struct {
 	URL               string `json:"url"`
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
+	SortOrder         int    `json:"sort_order,omitempty"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -345,6 +346,7 @@ type importTMDBRequest struct {
 	MediaType         string `json:"media_type"`
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
+	SortOrder         int    `json:"sort_order,omitempty"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -366,6 +368,7 @@ type importTMDBFranchiseRequest struct {
 	CollectionID      int    `json:"collection_id"`
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
+	SortOrder         int    `json:"sort_order,omitempty"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -389,6 +392,7 @@ type importTMDBDiscoverRequest struct {
 	Spec              importTMDBDiscoverSpecBody `json:"spec"`
 	Limit             *int                       `json:"limit,omitempty"`
 	Featured          bool                       `json:"featured"`
+	SortOrder         int                        `json:"sort_order,omitempty"`
 	PosterSourceURL   string                     `json:"poster_source_url"`
 	BackdropSourceURL string                     `json:"backdrop_source_url"`
 	SyncSchedule      string                     `json:"sync_schedule"`
@@ -1939,6 +1943,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			MediaType:        tmpl.TMDB.MediaType,
 			Limit:            limit,
 			Featured:         tmpl.Featured,
+			SortOrder:        tmpl.DefaultSortOrder,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -1955,6 +1960,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			URL:              tmpl.MDBList.URL,
 			Limit:            limit,
 			Featured:         tmpl.Featured,
+			SortOrder:        tmpl.DefaultSortOrder,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -1971,6 +1977,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			CollectionID:     tmpl.TMDBCollection.CollectionID,
 			Limit:            limit,
 			Featured:         tmpl.Featured,
+			SortOrder:        tmpl.DefaultSortOrder,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -2001,6 +2008,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			},
 			Limit:            limit,
 			Featured:         tmpl.Featured,
+			SortOrder:        tmpl.DefaultSortOrder,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -2041,6 +2049,7 @@ func (h *LibraryCollectionHandler) createMDBListCollection(
 		CollectionType:   "mdblist",
 		Visibility:       "visible",
 		Featured:         req.Featured,
+		SortOrder:        req.SortOrder,
 		SourceURL:        req.URL,
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2088,6 +2097,7 @@ func (h *LibraryCollectionHandler) createTMDBCollection(
 		CollectionType:   "tmdb",
 		Visibility:       "visible",
 		Featured:         req.Featured,
+		SortOrder:        req.SortOrder,
 		SourceURL:        buildTMDBSourceURL(preset, mediaType, timeWindow),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2144,6 +2154,7 @@ func (h *LibraryCollectionHandler) createTMDBFranchiseCollection(
 		CollectionType:   "tmdb",
 		Visibility:       "visible",
 		Featured:         req.Featured,
+		SortOrder:        req.SortOrder,
 		SourceURL:        buildTMDBCollectionSourceURL(req.CollectionID),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2194,6 +2205,7 @@ func (h *LibraryCollectionHandler) createTMDBDiscoverCollection(
 		CollectionType:   "tmdb",
 		Visibility:       "visible",
 		Featured:         req.Featured,
+		SortOrder:        req.SortOrder,
 		SourceURL:        buildTMDBDiscoverSourceURL(req.MediaType, req.Spec.SortBy),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
