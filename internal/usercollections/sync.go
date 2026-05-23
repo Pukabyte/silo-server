@@ -123,6 +123,9 @@ func (s *Service) syncMDBList(ctx context.Context, store userstore.UserStore, co
 	if err != nil {
 		return nil, nil, err
 	}
+	if fetchLimit := collectionutil.SourceFetchLimit(cfg.Limit); fetchLimit > 0 && len(entries) > fetchLimit {
+		entries = entries[:fetchLimit]
+	}
 
 	var movieBatch, seriesBatch catalog.ExternalIDBatch
 	for _, entry := range entries {

@@ -1737,11 +1737,17 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				continue
 			}
 			entry.CollectionID = collection.ID
-			pendingSyncs = append(pendingSyncs, pendingTemplateBundleSync{
-				CollectionID: collection.ID,
-				SyncSchedule: collection.SyncSchedule,
-				Entry:        entry,
-			})
+			rememberTemplateBundleExistingCollection(remainingByLibrarySlug, library.ID, collection)
+			if templateBundleTemplateCanInitialSync(tmpl) {
+				pendingSyncs = append(pendingSyncs, pendingTemplateBundleSync{
+					CollectionID: collection.ID,
+					SyncSchedule: collection.SyncSchedule,
+					Entry:        entry,
+				})
+			} else {
+				entry.Reason = "created_sync_skipped_unconfigured"
+				resp.Created = append(resp.Created, entry)
+			}
 		}
 	}
 
@@ -1835,6 +1841,13 @@ func shouldQueueTemplateBundleSyncs(bundle templates.Bundle, pendingCount int) b
 	return bundle.ID == "all_defaults" || pendingCount > templateBundleInlineSyncLimit
 }
 
+func templateBundleTemplateCanInitialSync(tmpl templates.Template) bool {
+	if tmpl.Source == templates.SourceTMDBCollection {
+		return tmpl.TMDBCollection != nil && tmpl.TMDBCollection.CollectionID > 0
+	}
+	return true
+}
+
 func templateBundleCreatedEntries(pending []pendingTemplateBundleSync) []templateBundleApplyEntry {
 	entries := make([]templateBundleApplyEntry, 0, len(pending))
 	for _, item := range pending {
@@ -1845,9 +1858,8 @@ func templateBundleCreatedEntries(pending []pendingTemplateBundleSync) []templat
 
 // templateBundleQueuedEntries marks each pending sync with a reason describing
 // what the background goroutine will do with it. Items without a cron schedule
-// (e.g. the tmdb_franchise_placeholder template) still receive an async sync
-// attempt, but the catalog scheduler won't re-fire them — surface that to the
-// admin so they know the placeholder still needs configuration.
+// can still receive one initial async sync attempt when their source config is
+// complete, but the catalog scheduler won't re-fire them.
 //
 // Deliberately does not touch next_sync_at: setting it to now would race with
 // the catalog sync daemon picking these rows up mid-flight; the async
@@ -2372,13 +2384,13 @@ func (h *LibraryCollectionHandler) createMDBListCollection(
 		return nil, requestValidationError{err: err}
 	}
 	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
-		LibraryID:        req.LibraryID,
-		LibraryIDs:       req.LibraryIDs,
-		Slug:             slugifyCollectionName(req.Title),
-		Title:            req.Title,
-		Description:      req.Description,
-		CollectionType:   "mdblist",
-		Visibility:       "visible",
+		LibraryID:          req.LibraryID,
+		LibraryIDs:         req.LibraryIDs,
+		Slug:               slugifyCollectionName(req.Title),
+		Title:              req.Title,
+		Description:        req.Description,
+		CollectionType:     "mdblist",
+		Visibility:         "visible",
 		Featured:           req.Featured,
 		SortOrder:          req.SortOrder,
 		PosterURL:          req.PosterURL,
@@ -2422,13 +2434,13 @@ func (h *LibraryCollectionHandler) createTMDBCollection(
 		return nil, requestValidationError{err: err}
 	}
 	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
-		LibraryID:        req.LibraryID,
-		LibraryIDs:       req.LibraryIDs,
-		Slug:             slugifyCollectionName(req.Title),
-		Title:            req.Title,
-		Description:      req.Description,
-		CollectionType:   "tmdb",
-		Visibility:       "visible",
+		LibraryID:          req.LibraryID,
+		LibraryIDs:         req.LibraryIDs,
+		Slug:               slugifyCollectionName(req.Title),
+		Title:              req.Title,
+		Description:        req.Description,
+		CollectionType:     "tmdb",
+		Visibility:         "visible",
 		Featured:           req.Featured,
 		SortOrder:          req.SortOrder,
 		PosterURL:          req.PosterURL,
@@ -2481,13 +2493,13 @@ func (h *LibraryCollectionHandler) createTMDBFranchiseCollection(
 		return nil, requestValidationError{err: err}
 	}
 	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
-		LibraryID:        req.LibraryID,
-		LibraryIDs:       req.LibraryIDs,
-		Slug:             slugifyCollectionName(req.Title),
-		Title:            req.Title,
-		Description:      req.Description,
-		CollectionType:   "tmdb",
-		Visibility:       "visible",
+		LibraryID:          req.LibraryID,
+		LibraryIDs:         req.LibraryIDs,
+		Slug:               slugifyCollectionName(req.Title),
+		Title:              req.Title,
+		Description:        req.Description,
+		CollectionType:     "tmdb",
+		Visibility:         "visible",
 		Featured:           req.Featured,
 		SortOrder:          req.SortOrder,
 		PosterURL:          req.PosterURL,
@@ -2534,13 +2546,13 @@ func (h *LibraryCollectionHandler) createTMDBDiscoverCollection(
 		return nil, requestValidationError{err: err}
 	}
 	collection, err := h.repo.Create(ctx, catalog.CreateLibraryCollectionInput{
-		LibraryID:        req.LibraryID,
-		LibraryIDs:       req.LibraryIDs,
-		Slug:             slugifyCollectionName(req.Title),
-		Title:            req.Title,
-		Description:      req.Description,
-		CollectionType:   "tmdb",
-		Visibility:       "visible",
+		LibraryID:          req.LibraryID,
+		LibraryIDs:         req.LibraryIDs,
+		Slug:               slugifyCollectionName(req.Title),
+		Title:              req.Title,
+		Description:        req.Description,
+		CollectionType:     "tmdb",
+		Visibility:         "visible",
 		Featured:           req.Featured,
 		SortOrder:          req.SortOrder,
 		PosterURL:          req.PosterURL,
