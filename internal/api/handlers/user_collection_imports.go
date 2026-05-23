@@ -57,6 +57,7 @@ type userImportSharedFields struct {
 	Limit        *int   `json:"limit,omitempty"`
 	SyncSchedule string `json:"sync_schedule"`
 	IsShared     bool   `json:"is_shared"`
+	PosterURL    string `json:"poster_url"`
 	LibraryIDs   []int  `json:"library_ids,omitempty"`
 }
 
@@ -205,6 +206,7 @@ func (h *UserCollectionImportHandler) createImportedCollection(
 		SourceConfig:     sourceConfigJSON,
 		SyncSchedule:     schedule,
 		NextSyncAt:       usercollections.InitialNextSyncAt(schedule),
+		PosterURL:        strings.TrimSpace(shared.PosterURL),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create collection")

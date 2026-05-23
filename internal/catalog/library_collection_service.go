@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/collage"
+	"github.com/Silo-Server/silo-server/internal/collectionutil"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -245,7 +246,6 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 	if err != nil {
 		return nil, err
 	}
-	entries = limitMDBListEntries(entries, limit)
 
 	// Pre-fetch all external-ID lookups grouped by item type (movie vs series)
 	// in two batched queries instead of up to 3×N GetByExternalID calls
@@ -308,7 +308,6 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 		}
 		candidates := pickCandidatesByPriority(lookup, entry, itemType)
 		if len(candidates) == 0 {
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
 			continue
 		}
 		sourceRank := entry.Rank
@@ -332,7 +331,19 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 		return nil, err
 	}
 
+	resolvedByIndex := make(map[int]resolvedEntry, len(resolved))
 	for _, r := range resolved {
+		resolvedByIndex[r.entryIndex] = r
+	}
+
+	scannedEntries := 0
+	for index, entry := range entries {
+		scannedEntries = index + 1
+		r, ok := resolvedByIndex[index]
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			continue
+		}
 		var chosen string
 		for _, candidate := range r.candidates {
 			if libraryMembers[candidate] {
@@ -341,7 +352,7 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 			}
 		}
 		if chosen == "" {
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entries[r.entryIndex].Title))
+			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
 			continue
 		}
 		matchedItems = append(matchedItems, LibraryCollectionItemInput{
@@ -349,6 +360,9 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 			Position:    len(matchedItems),
 			SourceRank:  r.sourceRank,
 		})
+		if collectionutil.ItemLimitReached(len(matchedItems), limit) {
+			break
+		}
 	}
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -368,11 +382,11 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 	run, err := s.collections.RecordSyncRun(ctx, RecordLibraryCollectionSyncRunInput{
 		CollectionID:   collection.ID,
 		Status:         status,
-		Message:        fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(entries)),
+		Message:        fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries),
 		ItemsAdded:     len(matchedItems),
 		ItemsRemoved:   0,
 		ItemsMatched:   len(matchedItems),
-		ItemsUnmatched: len(entries) - len(matchedItems),
+		ItemsUnmatched: scannedEntries - len(matchedItems),
 		Warnings:       warningsJSON,
 		StartedAt:      startedAt,
 		CompletedAt:    completedAt,
@@ -386,13 +400,6 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 	}
 
 	return run, nil
-}
-
-func limitMDBListEntries(entries []mdblistEntry, limit *int) []mdblistEntry {
-	if limit == nil || *limit <= 0 || len(entries) <= *limit {
-		return entries
-	}
-	return entries[:*limit]
 }
 
 func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context, collection *models.LibraryCollection, cfg libraryCollectionSourceConfig, opts SyncCollectionOptions) (*models.LibraryCollectionSyncRun, error) {
@@ -419,17 +426,10 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 		}
 	}
 
-	fetchLimit := 0
-	if cfg.Limit != nil {
-		fetchLimit = *cfg.Limit
-	}
+	fetchLimit := collectionutil.SourceFetchLimit(cfg.Limit)
 	results, err := s.TMDBCollections.GetCollectionPreset(ctx, preset, mediaType, timeWindow, fetchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("fetching TMDB preset: %w", err)
-	}
-
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(results) > *cfg.Limit {
-		results = results[:*cfg.Limit]
 	}
 
 	slog.Info("TMDB preset sync: fetched results",
@@ -445,8 +445,10 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 	warnings := make([]string, 0)
 	unmatchedCount := 0
 	duplicateCount := 0
+	scannedEntries := 0
 
 	for i, entry := range results {
+		scannedEntries = i + 1
 		item, err := s.resolveTMDBEntry(ctx, collection.LibraryID, entry)
 		if err != nil {
 			return nil, err
@@ -495,6 +497,9 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 			Position:    len(matchedItems),
 			SourceRank:  i + 1,
 		})
+		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			break
+		}
 	}
 
 	slog.Info("TMDB preset sync: complete",
@@ -503,7 +508,7 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 		"matched", len(matchedItems),
 		"unmatched", unmatchedCount,
 		"duplicates", duplicateCount,
-		"total", len(results),
+		"total", scannedEntries,
 	)
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -514,7 +519,7 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}
@@ -587,14 +592,6 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 		return nil, fmt.Errorf("fetching TMDB collection: %w", err)
 	}
 
-	// `limit` is intentionally applied AFTER the fetch — TMDB collection
-	// payloads are tiny (~1 page per franchise) and the order is curated, so
-	// truncating beforehand would drop the canonical tail (e.g. the last few
-	// MCU entries) without ever consulting the library.
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(results) > *cfg.Limit {
-		results = results[:*cfg.Limit]
-	}
-
 	slog.Info("TMDB franchise sync: fetched results",
 		"collection_id", collection.ID,
 		"tmdb_collection_id", cfg.CollectionID,
@@ -606,8 +603,10 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 	warnings := make([]string, 0)
 	unmatchedCount := 0
 	duplicateCount := 0
+	scannedEntries := 0
 
 	for i, entry := range results {
+		scannedEntries = i + 1
 		item, err := s.resolveTMDBEntry(ctx, collection.LibraryID, entry)
 		if err != nil {
 			return nil, err
@@ -647,6 +646,9 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 			Position:    len(matchedItems),
 			SourceRank:  i + 1,
 		})
+		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			break
+		}
 	}
 
 	slog.Info("TMDB franchise sync: complete",
@@ -655,7 +657,7 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 		"matched", len(matchedItems),
 		"unmatched", unmatchedCount,
 		"duplicates", duplicateCount,
-		"total", len(results),
+		"total", scannedEntries,
 	)
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -666,7 +668,7 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}
@@ -752,17 +754,10 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 		OriginalLanguage: cfg.Discover.OriginalLanguage,
 	}
 
-	fetchLimit := 0
-	if cfg.Limit != nil {
-		fetchLimit = *cfg.Limit
-	}
+	fetchLimit := collectionutil.SourceFetchLimit(cfg.Limit)
 	results, err := s.TMDBDiscovers.Discover(ctx, mediaType, params, fetchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("fetching TMDB discover: %w", err)
-	}
-
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(results) > *cfg.Limit {
-		results = results[:*cfg.Limit]
 	}
 
 	slog.Info("TMDB discover sync: fetched results",
@@ -777,8 +772,10 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 	warnings := make([]string, 0)
 	unmatchedCount := 0
 	duplicateCount := 0
+	scannedEntries := 0
 
 	for i, entry := range results {
+		scannedEntries = i + 1
 		item, err := s.resolveTMDBEntry(ctx, collection.LibraryID, entry)
 		if err != nil {
 			return nil, err
@@ -814,6 +811,9 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 			Position:    len(matchedItems),
 			SourceRank:  i + 1,
 		})
+		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			break
+		}
 	}
 
 	slog.Info("TMDB discover sync: complete",
@@ -822,7 +822,7 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 		"matched", len(matchedItems),
 		"unmatched", unmatchedCount,
 		"duplicates", duplicateCount,
-		"total", len(results),
+		"total", scannedEntries,
 	)
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -833,7 +833,7 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}
@@ -910,16 +910,10 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 		accessToken = token
 	}
 
-	fetchLimit := 0
-	if cfg.Limit != nil {
-		fetchLimit = *cfg.Limit
-	}
+	fetchLimit := collectionutil.SourceFetchLimit(cfg.Limit)
 	results, err := s.TraktCollections.GetCollectionPreset(ctx, preset, mediaType, fetchLimit, accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("fetching Trakt preset: %w", err)
-	}
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(results) > *cfg.Limit {
-		results = results[:*cfg.Limit]
 	}
 
 	slog.Info("Trakt preset sync: fetched results",
@@ -934,8 +928,10 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 	warnings := make([]string, 0)
 	unmatchedCount := 0
 	duplicateCount := 0
+	scannedEntries := 0
 
 	for i, entry := range results {
+		scannedEntries = i + 1
 		item, err := s.resolveTraktEntry(ctx, collection.LibraryID, entry)
 		if err != nil {
 			return nil, err
@@ -966,6 +962,9 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 			Position:    len(matchedItems),
 			SourceRank:  sourceRank,
 		})
+		if collectionutil.ItemLimitReached(len(matchedItems), cfg.Limit) {
+			break
+		}
 	}
 
 	if err := s.collections.ReplaceItems(ctx, collection.ID, matchedItems); err != nil {
@@ -976,7 +975,7 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 	if len(warnings) > 0 {
 		status = "warning"
 	}
-	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), len(results))
+	message := fmt.Sprintf("Matched %d of %d entries", len(matchedItems), scannedEntries)
 	if duplicateCount > 0 {
 		message = fmt.Sprintf("%s (%d duplicates skipped)", message, duplicateCount)
 	}

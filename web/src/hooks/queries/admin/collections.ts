@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { api } from "@/api/client";
+import { ApiClientError, api } from "@/api/client";
 import type {
   CreateLibraryCollectionRequest,
   ImportMDBListCollectionRequest,
@@ -23,6 +23,22 @@ import { adminKeys, sectionKeys } from "../keys";
 import { invalidateAdminCollectionQueries } from "../collectionSurfaceRefresh";
 
 const ADMIN_STALE_TIME = 30_000;
+
+function isLikelyRequestTimeout(error: unknown): boolean {
+  if (error instanceof ApiClientError) {
+    return (
+      error.status === 408 || error.status === 502 || error.status === 503 || error.status === 504
+    );
+  }
+  return error instanceof TypeError;
+}
+
+function applyTemplateBundleErrorMessage(error: unknown): string {
+  if (isLikelyRequestTimeout(error)) {
+    return "The apply request timed out. Silo may still be creating collections; refresh in a minute.";
+  }
+  return error instanceof Error ? error.message : "Failed to apply defaults";
+}
 
 function buildCollectionFormData(
   data: Record<string, unknown>,
@@ -123,13 +139,15 @@ export function useApplyCollectionTemplateBundle() {
       if (!result.dry_run) {
         const created = result.created.length;
         const deleted = result.deleted?.length ?? 0;
+        const syncQueued = result.sync_queued?.length ?? 0;
         const failed = result.failed.length;
         const deleteFailed = result.delete_failed?.length ?? 0;
         const failureCount = failed + deleteFailed;
-        if (created > 0 || deleted > 0) {
+        if (created > 0 || deleted > 0 || syncQueued > 0) {
           const message = [
             deleted > 0 ? `Deleted ${deleted}` : "",
             created > 0 ? `created ${created}` : "",
+            syncQueued > 0 ? `queued ${syncQueued} syncs` : "",
             failureCount > 0 ? `${failureCount} failed` : "",
           ]
             .filter(Boolean)
@@ -141,7 +159,7 @@ export function useApplyCollectionTemplateBundle() {
       }
     },
     onError: (error) => {
-      toast.error(error instanceof Error ? error.message : "Failed to apply defaults");
+      toast.error(applyTemplateBundleErrorMessage(error));
     },
   });
 }

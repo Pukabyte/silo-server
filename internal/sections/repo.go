@@ -199,8 +199,8 @@ func (r *Repository) GetGeneratedTemplateBundleFeaturedSection(ctx context.Conte
 
 // DeleteGeneratedTemplateBundleFeaturedSections removes generated featured
 // sections tied to selected libraries so bundle collection replacement is not
-// blocked by stale generated section references.
-func (r *Repository) DeleteGeneratedTemplateBundleFeaturedSections(ctx context.Context, bundleID string, libraryIDs []int) error {
+// blocked by stale generated section references from any previous bundle.
+func (r *Repository) DeleteGeneratedTemplateBundleFeaturedSections(ctx context.Context, libraryIDs []int) error {
 	if len(libraryIDs) == 0 {
 		return nil
 	}
@@ -208,16 +208,15 @@ func (r *Repository) DeleteGeneratedTemplateBundleFeaturedSections(ctx context.C
 		DELETE FROM page_sections
 		WHERE section_type = $1
 		  AND config->>'generated_source' = 'template_bundle_featured'
-		  AND config->>'template_bundle' = $2
 		  AND (
-		    (scope = 'library' AND library_id = ANY($3::int[]))
+		    (scope = 'library' AND library_id = ANY($2::int[]))
 		    OR (
 		      scope = 'home'
 		      AND config->>'library_id' ~ '^[0-9]+$'
-		      AND (config->>'library_id')::int = ANY($3::int[])
+		      AND (config->>'library_id')::int = ANY($2::int[])
 		    )
 		  )
-	`, SectionCollection, bundleID, libraryIDs)
+	`, SectionCollection, libraryIDs)
 	if err != nil {
 		return fmt.Errorf("deleting generated template bundle featured sections: %w", err)
 	}

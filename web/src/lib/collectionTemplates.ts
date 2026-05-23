@@ -162,6 +162,7 @@ export interface ApplyCollectionTemplateBundleResponse {
   created: CollectionTemplateBundleApplyEntry[];
   skipped: CollectionTemplateBundleApplyEntry[];
   failed: CollectionTemplateBundleApplyEntry[];
+  sync_queued?: CollectionTemplateBundleApplyEntry[];
   featured: CollectionTemplateBundleFeaturedEntry[];
   featured_failed: CollectionTemplateBundleFeaturedEntry[];
 }

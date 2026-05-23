@@ -1688,7 +1688,7 @@ var builtinTemplates = []Template{
 	},
 }
 
-var builtinBundles = []Bundle{
+var builtinBundles = withAllDefaultsBundle([]Bundle{
 	{
 		ID:          "core_defaults",
 		Title:       "Core Defaults",
@@ -1711,6 +1711,156 @@ var builtinBundles = []Bundle{
 			"mdblist_imdb_top_250_shows",
 		},
 	},
+	{
+		ID:          "streaming_expanded",
+		Title:       "Streaming Originals",
+		Description: "Provider-specific originals and specialty streaming shelves.",
+		TemplateIDs: []string{
+			"mdblist_streaming_apple_tv_plus",
+			"mdblist_streaming_disney_plus_originals",
+			"mdblist_streaming_hbo_max_originals",
+			"mdblist_streaming_hulu_originals",
+			"mdblist_streaming_netflix_originals",
+			"mdblist_streaming_peacock_originals",
+			"mdblist_streaming_prime_video_originals",
+			"mdblist_streaming_shudder",
+		},
+	},
+	{
+		ID:          "awards_and_years",
+		Title:       "Awards & Yearly Picks",
+		Description: "Oscar, Golden Globe, yearly best-of, and movie chart collections.",
+		TemplateIDs: []string{
+			"mdblist_awards_oscar_winners",
+			"mdblist_awards_golden_globes_winners",
+			"mdblist_best_of_2023",
+			"mdblist_best_of_2024",
+			"mdblist_best_of_2025",
+			"mdblist_charts_popular_movies",
+		},
+	},
+	{
+		ID:          "seasonal_collections",
+		Title:       "Seasonal Collections",
+		Description: "Holiday, observance, and calendar-driven collection shelves.",
+		TemplateIDs: []string{
+			"mdblist_seasonal_halloween",
+			"mdblist_seasonal_christmas",
+			"mdblist_seasonal_valentines_day",
+			"mdblist_seasonal_easter",
+			"mdblist_seasonal_thanksgiving",
+			"mdblist_seasonal_new_year",
+			"mdblist_seasonal_aapi_heritage_month",
+			"mdblist_seasonal_latinx_heritage_month",
+			"mdblist_seasonal_pride_month",
+		},
+	},
+	{
+		ID:          "studio_collections",
+		Title:       "Studios & Labels",
+		Description: "Curated studio, label, and collection-brand shelves.",
+		TemplateIDs: []string{
+			"mdblist_misc_criterion_collection",
+			"mdblist_misc_a24",
+			"mdblist_misc_ifc_films",
+			"mdblist_misc_studio_ghibli",
+		},
+	},
+	{
+		ID:          "popular_genres",
+		Title:       "Popular Genres",
+		Description: "TMDB Discover genre shelves sorted by current popularity.",
+		TemplateIDs: []string{
+			"tmdb_discover_popular_action",
+			"tmdb_discover_popular_adventure",
+			"tmdb_discover_popular_animation",
+			"tmdb_discover_popular_comedy",
+			"tmdb_discover_popular_crime",
+			"tmdb_discover_popular_documentary",
+			"tmdb_discover_popular_drama",
+			"tmdb_discover_popular_family",
+			"tmdb_discover_popular_fantasy",
+			"tmdb_discover_popular_history",
+			"tmdb_discover_popular_horror",
+			"tmdb_discover_popular_music",
+			"tmdb_discover_popular_mystery",
+			"tmdb_discover_popular_romance",
+			"tmdb_discover_popular_science_fiction",
+			"tmdb_discover_popular_thriller",
+			"tmdb_discover_popular_war",
+			"tmdb_discover_popular_western",
+			"tmdb_discover_kids_movies",
+		},
+	},
+	{
+		ID:          "top_rated_genres",
+		Title:       "Top Rated Genres",
+		Description: "TMDB Discover genre shelves sorted by vote average with vote floors.",
+		TemplateIDs: []string{
+			"tmdb_discover_top_rated_action",
+			"tmdb_discover_top_rated_adventure",
+			"tmdb_discover_top_rated_animation",
+			"tmdb_discover_top_rated_comedy",
+			"tmdb_discover_top_rated_crime",
+			"tmdb_discover_top_rated_documentary",
+			"tmdb_discover_top_rated_drama",
+			"tmdb_discover_top_rated_family",
+			"tmdb_discover_top_rated_fantasy",
+			"tmdb_discover_top_rated_history",
+			"tmdb_discover_top_rated_horror",
+			"tmdb_discover_top_rated_music",
+			"tmdb_discover_top_rated_mystery",
+			"tmdb_discover_top_rated_romance",
+			"tmdb_discover_top_rated_science_fiction",
+			"tmdb_discover_top_rated_thriller",
+			"tmdb_discover_top_rated_war",
+			"tmdb_discover_top_rated_western",
+		},
+	},
+	{
+		ID:          "franchise_collections",
+		Title:       "Franchise Collections",
+		Description: "TMDB franchise and saga collections for major movie series.",
+		TemplateIDs: []string{
+			"tmdb_franchise_star_wars",
+			"tmdb_franchise_james_bond",
+			"tmdb_franchise_wizarding_world",
+			"tmdb_franchise_fast_furious",
+			"tmdb_franchise_lord_of_the_rings",
+			"tmdb_franchise_hobbit",
+			"tmdb_franchise_jurassic_park",
+			"tmdb_franchise_pirates_of_the_caribbean",
+			"tmdb_franchise_mission_impossible",
+			"tmdb_franchise_monsterverse",
+			"tmdb_franchise_placeholder",
+		},
+	},
+})
+
+func withAllDefaultsBundle(bundles []Bundle) []Bundle {
+	seen := make(map[string]struct{})
+	allTemplateIDs := make([]string, 0)
+	for _, bundle := range bundles {
+		for _, id := range bundle.TemplateIDs {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			allTemplateIDs = append(allTemplateIDs, id)
+		}
+	}
+
+	allDefaults := Bundle{
+		ID:          "all_defaults",
+		Title:       "All Defaults",
+		Description: "Every default bulk-add template, including core, streaming, awards, seasonal, genre, and franchise collections.",
+		TemplateIDs: allTemplateIDs,
+	}
+
+	out := make([]Bundle, 0, len(bundles)+1)
+	out = append(out, allDefaults)
+	out = append(out, bundles...)
+	return out
 }
 
 func init() {

@@ -1,6 +1,8 @@
 package templates
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,8 +28,27 @@ func TestBuiltinCatalog(t *testing.T) {
 			if strings.TrimSpace(tmpl.PosterPath) == "" {
 				t.Errorf("template %q has empty poster path", tmpl.ID)
 			}
+			if tmpl.PosterPath != "" && !strings.HasPrefix(tmpl.PosterPath, "/images/collection-templates/") {
+				t.Errorf("template %q has invalid poster path %q", tmpl.ID, tmpl.PosterPath)
+			}
 			seenIDs[tmpl.ID] = true
 		}
+	}
+}
+
+func TestBuiltinTemplatePosterAssetsExist(t *testing.T) {
+	assetRoot := filepath.Join("..", "..", "..", "web", "public", "images", "collection-templates")
+	rawRoot := filepath.Join(assetRoot, "raw")
+
+	for _, tmpl := range List() {
+		t.Run(tmpl.ID, func(t *testing.T) {
+			if _, err := os.Stat(filepath.Join(assetRoot, tmpl.ID+".jpg")); err != nil {
+				t.Fatalf("final poster asset missing: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(rawRoot, tmpl.ID+".png")); err != nil {
+				t.Fatalf("raw poster plate missing: %v", err)
+			}
+		})
 	}
 }
 
@@ -84,6 +105,54 @@ func TestCoreDefaultsBundleReferencesValidProfileFreeTemplates(t *testing.T) {
 		}
 		if tmpl.RequiresProfile {
 			t.Fatalf("template %q requires profile and must not be in core defaults", id)
+		}
+	}
+}
+
+func TestBundleOnlyTemplatesAreReachableFromBundles(t *testing.T) {
+	bundled := make(map[string]bool)
+	for _, bundle := range ListBundles() {
+		for _, id := range bundle.TemplateIDs {
+			bundled[id] = true
+		}
+	}
+
+	for _, tmpl := range List() {
+		switch tmpl.Source {
+		case SourceTMDBDiscover, SourceTMDBCollection:
+			if !bundled[tmpl.ID] {
+				t.Errorf("bundle-only template %q is not referenced by any bundle", tmpl.ID)
+			}
+		}
+	}
+}
+
+func TestAllDefaultsBundleIncludesEveryOtherDefaultBundle(t *testing.T) {
+	allDefaults, ok := GetBundle("all_defaults")
+	if !ok {
+		t.Fatal("all_defaults bundle is not registered")
+	}
+	bundles := ListBundles()
+	if len(bundles) == 0 || bundles[0].ID != allDefaults.ID {
+		t.Fatal("all_defaults should be the first displayed bundle")
+	}
+
+	seen := make(map[string]struct{}, len(allDefaults.TemplateIDs))
+	for _, id := range allDefaults.TemplateIDs {
+		if _, exists := seen[id]; exists {
+			t.Fatalf("all_defaults contains duplicate template %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+
+	for _, bundle := range bundles {
+		if bundle.ID == allDefaults.ID {
+			continue
+		}
+		for _, id := range bundle.TemplateIDs {
+			if _, ok := seen[id]; !ok {
+				t.Fatalf("all_defaults is missing %q from bundle %q", id, bundle.ID)
+			}
 		}
 	}
 }

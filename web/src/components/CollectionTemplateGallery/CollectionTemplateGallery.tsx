@@ -341,6 +341,7 @@ function TemplateBundleApplyView({
   const [result, setResult] = useState<ApplyCollectionTemplateBundleResponse | null>(null);
   const applyBundle = useApplyCollectionTemplateBundle();
   const disabled = libraryIds.length === 0 || applyBundle.isPending;
+  const queuesInitialSyncs = bundle.id === "all_defaults";
   const selectedLibraries = useMemo(
     () => libraries.filter((library) => libraryIds.includes(library.id)),
     [libraries, libraryIds],
@@ -403,6 +404,12 @@ function TemplateBundleApplyView({
       <div className="rounded-md border p-3">
         <div className="text-sm font-semibold">{bundle.title}</div>
         <p className="text-muted-foreground mt-1 text-xs leading-snug">{bundle.description}</p>
+        {queuesInitialSyncs ? (
+          <p className="text-muted-foreground mt-2 text-xs leading-snug">
+            Collections are created first; initial syncs are queued so this large bundle can finish
+            without waiting on every source.
+          </p>
+        ) : null}
       </div>
 
       <div className="space-y-2">
@@ -488,7 +495,7 @@ function TemplateBundleApplyView({
           Preview
         </Button>
         <Button type="button" disabled={disabled} onClick={() => run(false)}>
-          Apply Defaults
+          {applyBundle.isPending ? "Applying..." : "Apply Defaults"}
         </Button>
       </div>
 
@@ -594,8 +601,13 @@ function buildFeaturedBundleRequest(
 function BundleApplyResult({ result }: { result: ApplyCollectionTemplateBundleResponse }) {
   const actionLabel = result.dry_run ? "Would create" : "Created";
   const deleteActionLabel = result.dry_run ? "Would delete" : "Deleted";
+  const created = result.created ?? [];
+  const skipped = result.skipped ?? [];
+  const failed = result.failed ?? [];
+  const deleted = result.deleted ?? [];
   const deleteFailed = result.delete_failed ?? [];
   const deleteSkipped = result.delete_skipped ?? [];
+  const syncQueued = result.sync_queued ?? [];
   const featured = result.featured ?? [];
   const featuredFailed = result.featured_failed ?? [];
   return (
@@ -603,13 +615,20 @@ function BundleApplyResult({ result }: { result: ApplyCollectionTemplateBundleRe
       <div className="font-medium">
         {result.delete_existing ? (
           <>
-            {deleteActionLabel} {result.deleted.length}; delete skipped {deleteSkipped.length};
-            delete failed {deleteFailed.length};{" "}
+            {deleteActionLabel} {deleted.length}; delete skipped {deleteSkipped.length}; delete
+            failed {deleteFailed.length};{" "}
           </>
         ) : null}
-        {actionLabel} {result.created.length}; skipped {result.skipped.length}; failed{" "}
-        {result.failed.length}; featured {featured.length}; featured failed {featuredFailed.length}
+        {actionLabel} {created.length}; skipped {skipped.length}; failed {failed.length}
+        {syncQueued.length > 0 ? `; sync queued ${syncQueued.length}` : ""}; featured{" "}
+        {featured.length}; featured failed {featuredFailed.length}
       </div>
+      {syncQueued.length > 0 ? (
+        <div className="text-muted-foreground text-xs leading-snug">
+          Initial syncs are running in the background. Collections are available now; items appear
+          as each sync finishes.
+        </div>
+      ) : null}
       {deleteFailed.length > 0 ? (
         <div className="text-destructive space-y-1 text-xs">
           {deleteFailed.slice(0, 5).map((entry) => (
@@ -620,9 +639,9 @@ function BundleApplyResult({ result }: { result: ApplyCollectionTemplateBundleRe
           ))}
         </div>
       ) : null}
-      {result.failed.length > 0 ? (
+      {failed.length > 0 ? (
         <div className="text-destructive space-y-1 text-xs">
-          {result.failed.slice(0, 5).map((entry) => (
+          {failed.slice(0, 5).map((entry) => (
             <div key={`${entry.library_id}:${entry.template_id}`}>
               {entry.library_name} / {entry.template_title}: {entry.reason ?? "failed"}
             </div>

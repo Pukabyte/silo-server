@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/collectionutil"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
@@ -122,9 +123,6 @@ func (s *Service) syncMDBList(ctx context.Context, store userstore.UserStore, co
 	if err != nil {
 		return nil, nil, err
 	}
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(entries) > *cfg.Limit {
-		entries = entries[:*cfg.Limit]
-	}
 
 	var movieBatch, seriesBatch catalog.ExternalIDBatch
 	for _, entry := range entries {
@@ -152,7 +150,8 @@ func (s *Service) syncMDBList(ctx context.Context, store userstore.UserStore, co
 		return nil, nil, err
 	}
 
-	matched, unmatched := resolveMatched(len(entries), func(i int) string {
+	resolveLimit := collectionResolveLimit(cfg)
+	matched, unmatched, scanned := resolveMatchedWithLimit(len(entries), resolveLimit, func(i int) string {
 		entry := entries[i]
 		itemType := mdbListItemType(entry)
 		lookup := movieLookup
@@ -173,7 +172,8 @@ func (s *Service) syncMDBList(ctx context.Context, store userstore.UserStore, co
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.applyResult(ctx, store, collection, startedAt, matched, len(entries), unmatched+droppedByLib)
+	matched = limitCollectionItems(matched, cfg.Limit)
+	return s.applyResult(ctx, store, collection, startedAt, matched, scanned, unmatched+droppedByLib)
 }
 
 func mdbListItemType(entry mdblistEntry) string {
@@ -239,11 +239,13 @@ func (s *Service) filterByLibraries(ctx context.Context, matched []userstore.Col
 // resolveMatched walks `total` entries, calls `resolve` to get the candidate
 // content_id for each, and produces deduped, position-numbered replacements
 // plus an unmatched count. Shared by all three source backends.
-func resolveMatched(total int, resolve func(i int) string) ([]userstore.CollectionItemReplacement, int) {
+func resolveMatchedWithLimit(total int, limit *int, resolve func(i int) string) ([]userstore.CollectionItemReplacement, int, int) {
 	matched := make([]userstore.CollectionItemReplacement, 0, total)
 	seen := make(map[string]struct{}, total)
 	unmatched := 0
+	scanned := 0
 	for i := 0; i < total; i++ {
+		scanned = i + 1
 		contentID := resolve(i)
 		if contentID == "" {
 			unmatched++
@@ -257,8 +259,29 @@ func resolveMatched(total int, resolve func(i int) string) ([]userstore.Collecti
 			MediaItemID: contentID,
 			Position:    len(matched),
 		})
+		if collectionutil.ItemLimitReached(len(matched), limit) {
+			break
+		}
 	}
-	return matched, unmatched
+	return matched, unmatched, scanned
+}
+
+func collectionResolveLimit(cfg SourceConfig) *int {
+	if len(cfg.LibraryIDs) > 0 {
+		return nil
+	}
+	return cfg.Limit
+}
+
+func limitCollectionItems(items []userstore.CollectionItemReplacement, limit *int) []userstore.CollectionItemReplacement {
+	if limit == nil || *limit <= 0 || len(items) <= *limit {
+		return items
+	}
+	items = items[:*limit]
+	for i := range items {
+		items[i].Position = i
+	}
+	return items
 }
 
 func (s *Service) fetchMDBListEntries(ctx context.Context, url string) ([]mdblistEntry, error) {
@@ -298,16 +321,10 @@ func (s *Service) syncTMDB(ctx context.Context, store userstore.UserStore, colle
 	if timeWindow == "" && preset == "trending" {
 		timeWindow = "day"
 	}
-	limit := 0
-	if cfg.Limit != nil {
-		limit = *cfg.Limit
-	}
+	limit := collectionutil.SourceFetchLimit(cfg.Limit)
 	results, err := s.TMDBCollections.GetCollectionPreset(ctx, preset, mediaType, timeWindow, limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetching TMDB preset: %w", err)
-	}
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(results) > *cfg.Limit {
-		results = results[:*cfg.Limit]
 	}
 
 	// TMDB returns mixed-media-type results (the "trending all" preset can
@@ -338,7 +355,8 @@ func (s *Service) syncTMDB(ctx context.Context, store userstore.UserStore, colle
 		return nil, nil, err
 	}
 
-	matched, unmatched := resolveMatched(len(results), func(i int) string {
+	resolveLimit := collectionResolveLimit(cfg)
+	matched, unmatched, scanned := resolveMatchedWithLimit(len(results), resolveLimit, func(i int) string {
 		entry := results[i]
 		itemType := "movie"
 		lookup := movieLookup
@@ -360,7 +378,8 @@ func (s *Service) syncTMDB(ctx context.Context, store userstore.UserStore, colle
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.applyResult(ctx, store, collection, startedAt, matched, len(results), unmatched+droppedByLib)
+	matched = limitCollectionItems(matched, cfg.Limit)
+	return s.applyResult(ctx, store, collection, startedAt, matched, scanned, unmatched+droppedByLib)
 }
 
 // ── Trakt presets ────────────────────────────────────────────────────────────
@@ -394,16 +413,10 @@ func (s *Service) syncTrakt(ctx context.Context, store userstore.UserStore, coll
 		accessToken = token
 	}
 
-	limit := 0
-	if cfg.Limit != nil {
-		limit = *cfg.Limit
-	}
+	limit := collectionutil.SourceFetchLimit(cfg.Limit)
 	results, err := s.TraktCollections.GetCollectionPreset(ctx, preset, mediaType, limit, accessToken)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetching Trakt preset: %w", err)
-	}
-	if cfg.Limit != nil && *cfg.Limit > 0 && len(results) > *cfg.Limit {
-		results = results[:*cfg.Limit]
 	}
 
 	itemType := "movie"
@@ -427,7 +440,8 @@ func (s *Service) syncTrakt(ctx context.Context, store userstore.UserStore, coll
 		return nil, nil, err
 	}
 
-	matched, unmatched := resolveMatched(len(results), func(i int) string {
+	resolveLimit := collectionResolveLimit(cfg)
+	matched, unmatched, scanned := resolveMatchedWithLimit(len(results), resolveLimit, func(i int) string {
 		entry := results[i]
 		var tmdb, tvdb string
 		if entry.TMDBID > 0 {
@@ -442,7 +456,8 @@ func (s *Service) syncTrakt(ctx context.Context, store userstore.UserStore, coll
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.applyResult(ctx, store, collection, startedAt, matched, len(results), unmatched+droppedByLib)
+	matched = limitCollectionItems(matched, cfg.Limit)
+	return s.applyResult(ctx, store, collection, startedAt, matched, scanned, unmatched+droppedByLib)
 }
 
 // ── Result application ───────────────────────────────────────────────────────

@@ -52,8 +52,10 @@ var errLibraryCollectionInUse = errors.New("collection is used by one or more se
 
 const (
 	templateBundleSyncConcurrency    = 4
+	templateBundleInlineSyncLimit    = 20
 	templateBundleCollageConcurrency = 2
 	templateBundleCollageTimeout     = 5 * time.Minute
+	templateBundleAsyncSyncTimeout   = 30 * time.Minute
 
 	collectionManagementModeManual         = "manual"
 	collectionManagementModeSection        = "section"
@@ -328,6 +330,7 @@ type importMDBListRequest struct {
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
 	SortOrder         int    `json:"sort_order,omitempty"`
+	PosterURL         string `json:"poster_url"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -347,6 +350,7 @@ type importTMDBRequest struct {
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
 	SortOrder         int    `json:"sort_order,omitempty"`
+	PosterURL         string `json:"poster_url"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -369,6 +373,7 @@ type importTMDBFranchiseRequest struct {
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
 	SortOrder         int    `json:"sort_order,omitempty"`
+	PosterURL         string `json:"poster_url"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -393,6 +398,7 @@ type importTMDBDiscoverRequest struct {
 	Limit             *int                       `json:"limit,omitempty"`
 	Featured          bool                       `json:"featured"`
 	SortOrder         int                        `json:"sort_order,omitempty"`
+	PosterURL         string                     `json:"poster_url"`
 	PosterSourceURL   string                     `json:"poster_source_url"`
 	BackdropSourceURL string                     `json:"backdrop_source_url"`
 	SyncSchedule      string                     `json:"sync_schedule"`
@@ -428,6 +434,7 @@ type importTraktRequest struct {
 	ProfileID         string `json:"profile_id,omitempty"`
 	Limit             *int   `json:"limit,omitempty"`
 	Featured          bool   `json:"featured"`
+	PosterURL         string `json:"poster_url"`
 	PosterSourceURL   string `json:"poster_source_url"`
 	BackdropSourceURL string `json:"backdrop_source_url"`
 	SyncSchedule      string `json:"sync_schedule"`
@@ -496,12 +503,14 @@ type applyTemplateBundleResponse struct {
 	Created        []templateBundleApplyEntry      `json:"created"`
 	Skipped        []templateBundleApplyEntry      `json:"skipped"`
 	Failed         []templateBundleApplyEntry      `json:"failed"`
+	SyncQueued     []templateBundleApplyEntry      `json:"sync_queued"`
 	Featured       []templateBundleFeaturedEntry   `json:"featured"`
 	FeaturedFailed []templateBundleFeaturedEntry   `json:"featured_failed"`
 }
 
 type pendingTemplateBundleSync struct {
 	CollectionID string
+	SyncSchedule *string
 	Entry        templateBundleApplyEntry
 }
 
@@ -514,6 +523,11 @@ type templateBundleCollectionRef struct {
 type templateBundleCollectionRefKey struct {
 	LibraryID  int
 	TemplateID string
+}
+
+type templateBundleExistingCollectionKey struct {
+	LibraryID int
+	Slug      string
 }
 
 type requestValidationError struct {
@@ -545,6 +559,44 @@ func uniquePositiveInts(values []int) []int {
 
 func templateBundleManagementKey(bundleID, templateID string, libraryID int) string {
 	return fmt.Sprintf("%s:%s:library:%d", bundleID, templateID, libraryID)
+}
+
+func rememberTemplateBundleExistingCollection(
+	collections map[templateBundleExistingCollectionKey]*models.LibraryCollection,
+	libraryID int,
+	collection *models.LibraryCollection,
+) {
+	if collection == nil || strings.TrimSpace(collection.Slug) == "" {
+		return
+	}
+	collections[templateBundleExistingCollectionKey{
+		LibraryID: libraryID,
+		Slug:      collection.Slug,
+	}] = collection
+}
+
+func forgetTemplateBundleExistingCollection(
+	collections map[templateBundleExistingCollectionKey]*models.LibraryCollection,
+	selectedLibraryIDs map[int]struct{},
+	collection *models.LibraryCollection,
+) {
+	if collection == nil || strings.TrimSpace(collection.Slug) == "" {
+		return
+	}
+	for _, libraryID := range collection.LibraryIDs {
+		if _, ok := selectedLibraryIDs[libraryID]; ok {
+			delete(collections, templateBundleExistingCollectionKey{
+				LibraryID: libraryID,
+				Slug:      collection.Slug,
+			})
+		}
+	}
+	if len(collection.LibraryIDs) == 0 {
+		delete(collections, templateBundleExistingCollectionKey{
+			LibraryID: collection.LibraryID,
+			Slug:      collection.Slug,
+		})
+	}
 }
 
 func templateLimitPtr(tmpl templates.Template) *int {
@@ -1499,6 +1551,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 		Created:        []templateBundleApplyEntry{},
 		Skipped:        []templateBundleApplyEntry{},
 		Failed:         []templateBundleApplyEntry{},
+		SyncQueued:     []templateBundleApplyEntry{},
 		Featured:       []templateBundleFeaturedEntry{},
 		FeaturedFailed: []templateBundleFeaturedEntry{},
 	}
@@ -1507,13 +1560,41 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 	for _, libraryID := range libraryIDs {
 		selectedLibraryIDs[libraryID] = struct{}{}
 	}
+
+	collectionsByLibraryID := make(map[int][]*models.LibraryCollection, len(libraryIDs))
+	remainingByLibrarySlug := make(map[templateBundleExistingCollectionKey]*models.LibraryCollection)
+	for _, libraryID := range libraryIDs {
+		collections, err := h.repo.ListByLibrary(workCtx, libraryID, catalog.ListLibraryCollectionsOptions{IncludeHidden: true})
+		if err != nil {
+			library := librariesByID[libraryID]
+			if req.DeleteExisting {
+				resp.DeleteFailed = append(resp.DeleteFailed, templateBundleCollectionEntry{
+					LibraryID:   library.ID,
+					LibraryName: library.Name,
+					Reason:      err.Error(),
+				})
+			} else {
+				slog.Warn("listing existing collections before template bundle apply",
+					"bundle_id", bundle.ID,
+					"library_id", library.ID,
+					"error", err,
+				)
+			}
+			continue
+		}
+		collectionsByLibraryID[libraryID] = collections
+		for _, collection := range collections {
+			rememberTemplateBundleExistingCollection(remainingByLibrarySlug, libraryID, collection)
+		}
+	}
+
 	if req.DeleteExisting {
 		if !req.DryRun && h.SectionRepo != nil {
 			// Generated featured sections must go before we delete the
 			// collections they reference; otherwise every following delete
 			// trips the in-use guard and the admin sees a misleading wall of
 			// "collection_in_use" errors.
-			if err := h.SectionRepo.DeleteGeneratedTemplateBundleFeaturedSections(workCtx, bundle.ID, libraryIDs); err != nil {
+			if err := h.SectionRepo.DeleteGeneratedTemplateBundleFeaturedSections(workCtx, libraryIDs); err != nil {
 				slog.Error("deleting generated template bundle featured sections", "bundle_id", bundle.ID, "error", err)
 				writeError(w, http.StatusInternalServerError, "delete_setup_failed", "Failed to clear generated featured sections before delete")
 				return
@@ -1522,16 +1603,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 		seenCollections := make(map[string]struct{})
 		for _, libraryID := range libraryIDs {
 			library := librariesByID[libraryID]
-			collections, err := h.repo.ListByLibrary(workCtx, libraryID, catalog.ListLibraryCollectionsOptions{IncludeHidden: true})
-			if err != nil {
-				resp.DeleteFailed = append(resp.DeleteFailed, templateBundleCollectionEntry{
-					LibraryID:   library.ID,
-					LibraryName: library.Name,
-					Reason:      err.Error(),
-				})
-				continue
-			}
-			for _, collection := range collections {
+			for _, collection := range collectionsByLibraryID[libraryID] {
 				if _, ok := seenCollections[collection.ID]; ok {
 					continue
 				}
@@ -1549,9 +1621,15 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				}
 				if err := h.deleteServerCollection(workCtx, collection.ID); err != nil {
 					entry.Reason = err.Error()
-					resp.DeleteFailed = append(resp.DeleteFailed, entry)
+					if errors.Is(err, errLibraryCollectionInUse) {
+						entry.Reason = "in_use_by_section"
+						resp.DeleteSkipped = append(resp.DeleteSkipped, entry)
+					} else {
+						resp.DeleteFailed = append(resp.DeleteFailed, entry)
+					}
 					continue
 				}
+				forgetTemplateBundleExistingCollection(remainingByLibrarySlug, selectedLibraryIDs, collection)
 				entry.Reason = "deleted"
 				resp.Deleted = append(resp.Deleted, entry)
 			}
@@ -1577,6 +1655,9 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 			key := templateBundleManagementKey(bundle.ID, templateID, library.ID)
 			existing, err := h.repo.GetByManagementKey(workCtx, collectionManagementModeTemplateBundle, bundle.ID, key)
 			if err == nil {
+				if !req.DryRun {
+					h.ensureTemplatePoster(workCtx, existing, tmpl)
+				}
 				entry.CollectionID = existing.ID
 				entry.Reason = "already_exists"
 				resp.Skipped = append(resp.Skipped, entry)
@@ -1591,6 +1672,26 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				entry.Reason = err.Error()
 				resp.Failed = append(resp.Failed, entry)
 				continue
+			}
+			if !(req.DryRun && req.DeleteExisting) {
+				existingBySlug := remainingByLibrarySlug[templateBundleExistingCollectionKey{
+					LibraryID: library.ID,
+					Slug:      slugifyCollectionName(tmpl.Title),
+				}]
+				if existingBySlug != nil {
+					if !req.DryRun {
+						h.ensureTemplatePoster(workCtx, existingBySlug, tmpl)
+					}
+					entry.CollectionID = existingBySlug.ID
+					entry.Reason = "already_exists"
+					resp.Skipped = append(resp.Skipped, entry)
+					collectionRefs[templateBundleCollectionRefKey{LibraryID: library.ID, TemplateID: tmpl.ID}] = templateBundleCollectionRef{
+						CollectionID: existingBySlug.ID,
+						Template:     tmpl,
+						Library:      library,
+					}
+					continue
+				}
 			}
 			if req.DryRun {
 				entry.Reason = "would_create"
@@ -1611,15 +1712,28 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 			entry.CollectionID = collection.ID
 			pendingSyncs = append(pendingSyncs, pendingTemplateBundleSync{
 				CollectionID: collection.ID,
+				SyncSchedule: collection.SyncSchedule,
 				Entry:        entry,
 			})
 		}
 	}
 
 	if len(pendingSyncs) > 0 {
-		created, failed := h.syncTemplateBundleCollections(workCtx, pendingSyncs)
-		resp.Created = append(resp.Created, created...)
-		resp.Failed = append(resp.Failed, failed...)
+		var created []templateBundleApplyEntry
+		if shouldQueueTemplateBundleSyncs(bundle, len(pendingSyncs)) {
+			created = templateBundleCreatedEntries(pendingSyncs)
+			queued, failed := h.queueTemplateBundleSyncs(workCtx, pendingSyncs)
+			resp.Created = append(resp.Created, created...)
+			resp.SyncQueued = append(resp.SyncQueued, queued...)
+			resp.Failed = append(resp.Failed, failed...)
+			h.syncTemplateBundleCollectionsAsync(bundle.ID, pendingSyncs)
+		} else {
+			var failed []templateBundleApplyEntry
+			created, failed = h.syncTemplateBundleCollections(workCtx, pendingSyncs)
+			resp.Created = append(resp.Created, created...)
+			resp.Failed = append(resp.Failed, failed...)
+			h.generateTemplateBundleCollagesAsync(created)
+		}
 		for _, entry := range created {
 			library := librariesByID[entry.LibraryID]
 			tmpl, _ := h.templateRegistry().Get(entry.TemplateID)
@@ -1629,7 +1743,6 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				Library:      library,
 			}
 		}
-		h.generateTemplateBundleCollagesAsync(created)
 	}
 
 	if req.Featured != nil {
@@ -1646,6 +1759,127 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *LibraryCollectionHandler) ensureTemplatePoster(
+	ctx context.Context,
+	collection *models.LibraryCollection,
+	tmpl templates.Template,
+) {
+	posterPath := strings.TrimSpace(tmpl.PosterPath)
+	if posterPath == "" || collection == nil {
+		return
+	}
+	if collection.PosterURL != "" && !collection.PosterAutoGenerated {
+		return
+	}
+	emptyThumbhash := ""
+	notAutoGenerated := false
+	if err := h.repo.Update(ctx, catalog.UpdateLibraryCollectionInput{
+		ID:                  collection.ID,
+		PosterURL:           &posterPath,
+		PosterThumbhash:     &emptyThumbhash,
+		PosterAutoGenerated: &notAutoGenerated,
+	}); err != nil {
+		slog.Warn("failed to apply template poster",
+			"collection_id", collection.ID,
+			"template_id", tmpl.ID,
+			"poster_path", posterPath,
+			"error", err,
+		)
+	}
+}
+
+func shouldQueueTemplateBundleSyncs(bundle templates.Bundle, pendingCount int) bool {
+	return bundle.ID == "all_defaults" || pendingCount > templateBundleInlineSyncLimit
+}
+
+func templateBundleCreatedEntries(pending []pendingTemplateBundleSync) []templateBundleApplyEntry {
+	entries := make([]templateBundleApplyEntry, 0, len(pending))
+	for _, item := range pending {
+		entries = append(entries, item.Entry)
+	}
+	return entries
+}
+
+func (h *LibraryCollectionHandler) queueTemplateBundleSyncs(
+	ctx context.Context,
+	pending []pendingTemplateBundleSync,
+) ([]templateBundleApplyEntry, []templateBundleApplyEntry) {
+	now := time.Now()
+	queued := make([]templateBundleApplyEntry, 0, len(pending))
+	failed := make([]templateBundleApplyEntry, 0)
+	for _, item := range pending {
+		if item.SyncSchedule == nil || strings.TrimSpace(*item.SyncSchedule) == "" {
+			continue
+		}
+		if err := h.repo.UpdateNextSyncAt(ctx, item.CollectionID, &now); err != nil {
+			entry := item.Entry
+			entry.Reason = fmt.Sprintf("queue sync: %v", err)
+			failed = append(failed, entry)
+			continue
+		}
+		entry := item.Entry
+		entry.Reason = "sync_queued"
+		queued = append(queued, entry)
+	}
+	return queued, failed
+}
+
+func (h *LibraryCollectionHandler) syncTemplateBundleCollectionsAsync(
+	bundleID string,
+	pending []pendingTemplateBundleSync,
+) {
+	if h.service == nil || len(pending) == 0 {
+		return
+	}
+	pending = append([]pendingTemplateBundleSync(nil), pending...)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), templateBundleAsyncSyncTimeout)
+		defer cancel()
+
+		startedAt := time.Now()
+		created, failed := h.syncTemplateBundleCollections(ctx, pending)
+		h.generateTemplateBundleCollagesAsync(created)
+		h.advanceTemplateBundleSyncSchedules(ctx, pending)
+
+		slog.Info("template bundle async sync complete",
+			"bundle_id", bundleID,
+			"pending", len(pending),
+			"synced", len(created),
+			"failed", len(failed),
+			"duration", time.Since(startedAt).Round(time.Millisecond),
+		)
+		for _, entry := range failed {
+			slog.Warn("template bundle async sync failed",
+				"bundle_id", bundleID,
+				"collection_id", entry.CollectionID,
+				"template_id", entry.TemplateID,
+				"library_id", entry.LibraryID,
+				"reason", entry.Reason,
+			)
+		}
+	}()
+}
+
+func (h *LibraryCollectionHandler) advanceTemplateBundleSyncSchedules(
+	ctx context.Context,
+	pending []pendingTemplateBundleSync,
+) {
+	now := time.Now()
+	for _, item := range pending {
+		if item.SyncSchedule == nil || strings.TrimSpace(*item.SyncSchedule) == "" {
+			continue
+		}
+		next := catalog.ComputeNextSyncAtFrom(*item.SyncSchedule, now)
+		if err := h.repo.UpdateNextSyncAt(ctx, item.CollectionID, next); err != nil {
+			slog.Warn("template bundle async sync: failed to advance schedule",
+				"collection_id", item.CollectionID,
+				"template_id", item.Entry.TemplateID,
+				"error", err,
+			)
+		}
+	}
 }
 
 func (h *LibraryCollectionHandler) syncTemplateBundleCollections(
@@ -1707,6 +1941,14 @@ func (h *LibraryCollectionHandler) generateTemplateBundleCollagesAsync(entries [
 		for _, collectionID := range collectionIDs {
 			collectionID := collectionID
 			eg.Go(func() error {
+				collection, err := h.repo.GetByID(ctx, collectionID)
+				if err != nil {
+					slog.Warn("collage: failed to load collection", "collection_id", collectionID, "error", err)
+					return nil
+				}
+				if collection.PosterURL != "" && !collection.PosterAutoGenerated {
+					return nil
+				}
 				if err := h.service.CollageGen.GenerateCollectionPoster(ctx, collectionID); err != nil {
 					if errors.Is(err, collage.ErrNotEnoughImages) {
 						slog.Debug("collage: not enough images", "collection_id", collectionID)
@@ -1944,6 +2186,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			Limit:            limit,
 			Featured:         tmpl.Featured,
 			SortOrder:        tmpl.DefaultSortOrder,
+			PosterURL:        tmpl.PosterPath,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -1961,6 +2204,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			Limit:            limit,
 			Featured:         tmpl.Featured,
 			SortOrder:        tmpl.DefaultSortOrder,
+			PosterURL:        tmpl.PosterPath,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -1978,6 +2222,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			Limit:            limit,
 			Featured:         tmpl.Featured,
 			SortOrder:        tmpl.DefaultSortOrder,
+			PosterURL:        tmpl.PosterPath,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -2009,6 +2254,7 @@ func (h *LibraryCollectionHandler) createCollectionFromTemplate(
 			Limit:            limit,
 			Featured:         tmpl.Featured,
 			SortOrder:        tmpl.DefaultSortOrder,
+			PosterURL:        tmpl.PosterPath,
 			SyncSchedule:     tmpl.DefaultSyncSchedule,
 			ManagementMode:   collectionManagementModeTemplateBundle,
 			ManagementSource: bundleID,
@@ -2050,6 +2296,7 @@ func (h *LibraryCollectionHandler) createMDBListCollection(
 		Visibility:       "visible",
 		Featured:         req.Featured,
 		SortOrder:        req.SortOrder,
+		PosterURL:        req.PosterURL,
 		SourceURL:        req.URL,
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2098,6 +2345,7 @@ func (h *LibraryCollectionHandler) createTMDBCollection(
 		Visibility:       "visible",
 		Featured:         req.Featured,
 		SortOrder:        req.SortOrder,
+		PosterURL:        req.PosterURL,
 		SourceURL:        buildTMDBSourceURL(preset, mediaType, timeWindow),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2155,6 +2403,7 @@ func (h *LibraryCollectionHandler) createTMDBFranchiseCollection(
 		Visibility:       "visible",
 		Featured:         req.Featured,
 		SortOrder:        req.SortOrder,
+		PosterURL:        req.PosterURL,
 		SourceURL:        buildTMDBCollectionSourceURL(req.CollectionID),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2206,6 +2455,7 @@ func (h *LibraryCollectionHandler) createTMDBDiscoverCollection(
 		Visibility:       "visible",
 		Featured:         req.Featured,
 		SortOrder:        req.SortOrder,
+		PosterURL:        req.PosterURL,
 		SourceURL:        buildTMDBDiscoverSourceURL(req.MediaType, req.Spec.SortBy),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2394,6 +2644,7 @@ func (h *LibraryCollectionHandler) HandleImportTraktCollection(w http.ResponseWr
 		CollectionType:   "trakt",
 		Visibility:       "visible",
 		Featured:         req.Featured,
+		PosterURL:        req.PosterURL,
 		SourceURL:        buildTraktSourceURL(preset, mediaType, profileID),
 		SourceConfig:     sourceConfig,
 		ManagementMode:   managementMode,
@@ -2590,6 +2841,9 @@ func (h *LibraryCollectionHandler) presignGPURL(r *http.Request, path string) st
 		return ""
 	}
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	if strings.HasPrefix(path, "/") {
 		return path
 	}
 	if h.s3GP == nil {
