@@ -403,7 +403,11 @@ func (r *Runner) executeTemplateBundleApply(job *models.AdminJob) {
 		r.publishJobByID(ctx, notifications.TypeJobProgress, job.ID)
 	}
 
+	lastCurrent := job.ProgressCurrent
+	lastTotal := job.ProgressTotal
 	result, err := r.templateBundleApply.ExecuteTemplateBundleApply(ctx, req, func(current, total int, message string) {
+		lastCurrent = current
+		lastTotal = total
 		if updateErr := r.repo.UpdateProgress(ctx, job.ID, current, total, message); updateErr != nil {
 			slog.Warn("admin jobs: failed to update template bundle apply progress",
 				"job_id", job.ID,
@@ -420,15 +424,15 @@ func (r *Runner) executeTemplateBundleApply(job *models.AdminJob) {
 		if ctx.Err() != nil {
 			msg = fmt.Sprintf("timed out after %s: %s", templateBundleApplyTimeout, msg)
 		}
-		r.failJob(job.ID, 0, 0, "Collection defaults apply failed", msg)
+		r.failJob(job.ID, lastCurrent, lastTotal, "Collection defaults apply failed", msg)
 		return
 	}
 
 	if err := r.repo.Complete(ctx, job.ID, CompleteJobInput{
 		ResultPayload:   result,
 		Message:         "Collection defaults applied",
-		ProgressCurrent: 0,
-		ProgressTotal:   0,
+		ProgressCurrent: lastCurrent,
+		ProgressTotal:   lastTotal,
 		ExpiresAt:       time.Now().UTC().Add(r.retention),
 	}); err != nil {
 		slog.Warn("admin jobs: failed to complete template bundle apply", "job_id", job.ID, "error", err)

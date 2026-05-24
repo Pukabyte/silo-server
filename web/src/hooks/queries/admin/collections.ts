@@ -208,6 +208,8 @@ export function useTemplateBundleApplyJobs() {
         (data) => data.jobs ?? [],
       ),
     staleTime: 0,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
   });
 }
 
