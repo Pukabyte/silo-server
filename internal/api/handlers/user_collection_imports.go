@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -270,7 +271,14 @@ func (h *UserCollectionImportHandler) storeBundledTemplatePoster(
 		posterPath,
 	)
 	if err != nil || !stored {
-		return err
+		if err != nil {
+			slog.Warn("failed to store bundled user collection poster",
+				"collection_id", collection.ID,
+				"poster_path", posterPath,
+				"error", err,
+			)
+		}
+		return nil
 	}
 
 	if err := store.UpdateCollection(r.Context(), userstore.UpdateCollectionInput{
@@ -279,7 +287,13 @@ func (h *UserCollectionImportHandler) storeBundledTemplatePoster(
 		PosterURL:        &storedPath,
 		PosterThumbhash:  &thumbhash,
 	}); err != nil {
-		return fmt.Errorf("persisting template poster: %w", err)
+		slog.Warn("failed to persist bundled user collection poster",
+			"collection_id", collection.ID,
+			"poster_path", posterPath,
+			"stored_path", storedPath,
+			"error", err,
+		)
+		return nil
 	}
 	collection.PosterURL = storedPath
 	collection.PosterThumbhash = thumbhash

@@ -243,8 +243,12 @@ func (s *Service) filterByLibraries(ctx context.Context, matched []userstore.Col
 // content_id for each, and produces deduped, position-numbered replacements
 // plus an unmatched count. Shared by all three source backends.
 func resolveMatchedWithLimit(total int, limit *int, resolve func(i int) string) ([]userstore.CollectionItemReplacement, int, int) {
-	matched := make([]userstore.CollectionItemReplacement, 0, total)
-	seen := make(map[string]struct{}, total)
+	capacity := total
+	if limit != nil && *limit > 0 && *limit < total {
+		capacity = *limit
+	}
+	matched := make([]userstore.CollectionItemReplacement, 0, capacity)
+	seen := make(map[string]struct{}, capacity)
 	unmatched := 0
 	scanned := 0
 	for i := 0; i < total; i++ {
