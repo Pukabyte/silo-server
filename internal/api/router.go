@@ -849,6 +849,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		libraryCollectionHandler.Executor = &catalog.QueryExecutor{Pool: deps.DB}
 		libraryCollectionHandler.SectionRepo = sectionRepo
 		libraryCollectionHandler.UserCollectionPool = deps.DB
+		libraryCollectionHandler.EventsHub = deps.EventsHub
 		if deps.FolderRepo != nil {
 			libraryCollectionHandler.FolderRepo = deps.FolderRepo
 		} else {
@@ -856,6 +857,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 		libraryCollectionGroupRepo := catalog.NewLibraryCollectionGroupRepository(deps.DB)
 		libraryCollectionHandler.GroupRepo = libraryCollectionGroupRepo
+		if deps.DB != nil {
+			libraryCollectionHandler.JobRepo = adminjob.NewRepository(deps.DB)
+		}
 		libraryCollectionGroupHandler = handlers.NewLibraryCollectionGroupHandler(
 			libraryCollectionGroupRepo,
 			libraryCollectionRepo,
@@ -1741,6 +1745,7 @@ func NewRouter(deps Dependencies) chi.Router {
 								r.Get("/templates", collectionTemplateHandler.HandleListTemplates)
 								r.Get("/template-bundles", libraryCollectionHandler.HandleListTemplateBundles)
 								r.Post("/template-bundles/{bundleID}/apply", libraryCollectionHandler.HandleApplyTemplateBundle)
+								r.Post("/template-bundles/{bundleID}/apply-job", libraryCollectionHandler.HandleApplyTemplateBundleJob)
 								r.Post("/", libraryCollectionHandler.HandleCreateAdminCollection)
 								r.Post("/preview", libraryCollectionHandler.HandlePreviewAdminCollection)
 								r.Put("/order", libraryCollectionHandler.HandleReorderAdminCollections)

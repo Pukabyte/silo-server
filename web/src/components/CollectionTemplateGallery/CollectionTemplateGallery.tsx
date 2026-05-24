@@ -33,7 +33,10 @@ import {
   type CollectionTemplateGroup,
 } from "@/lib/collectionTemplates";
 import LibraryMultiSelect from "@/components/LibraryMultiSelect";
-import { useApplyCollectionTemplateBundle } from "@/hooks/queries/admin/collections";
+import {
+  useApplyCollectionTemplateBundle,
+  useQueueCollectionTemplateBundleApply,
+} from "@/hooks/queries/admin/collections";
 import { useUserCollectionTemplates } from "@/hooks/queries/userCollectionImports";
 import { CollectionTemplateCard } from "./CollectionTemplateCard";
 import { CollectionTemplateConfigForm } from "./CollectionTemplateConfigForm";
@@ -168,7 +171,10 @@ export function CollectionTemplateGallery(props: Props) {
             libraries={(props as AdminProps).libraries}
             initialLibraryId={(props as AdminProps).initialLibraryId}
             groups={groups}
-            onApplied={onCreated}
+            onApplied={() => {
+              handleOpenChange(false);
+              onCreated?.();
+            }}
           />
         ) : (
           <GalleryView
@@ -340,7 +346,8 @@ function TemplateBundleApplyView({
   const [libraryFeatured, setLibraryFeatured] = useState<Record<number, string>>({});
   const [result, setResult] = useState<ApplyCollectionTemplateBundleResponse | null>(null);
   const applyBundle = useApplyCollectionTemplateBundle();
-  const disabled = libraryIds.length === 0 || applyBundle.isPending;
+  const queueBundleApply = useQueueCollectionTemplateBundleApply();
+  const disabled = libraryIds.length === 0 || applyBundle.isPending || queueBundleApply.isPending;
   const queuesInitialSyncs = bundle.id === "all_defaults";
   const selectedLibraries = useMemo(
     () => libraries.filter((library) => libraryIds.includes(library.id)),
@@ -378,14 +385,14 @@ function TemplateBundleApplyView({
     return defaultHomeFeaturedValue(bundle, templatesById, selectedLibraries);
   }, [bundle, homeFeatured, selectedLibraries, templatesById]);
 
-  const run = (dryRun: boolean) => {
+  const preview = () => {
     const featured = buildFeaturedBundleRequest(effectiveHomeFeatured, effectiveLibraryFeatured);
     applyBundle.mutate(
       {
         bundleId: bundle.id,
         body: {
           library_ids: libraryIds,
-          dry_run: dryRun,
+          dry_run: true,
           delete_existing: deleteExisting,
           featured,
         },
@@ -393,8 +400,24 @@ function TemplateBundleApplyView({
       {
         onSuccess: (nextResult) => {
           setResult(nextResult);
-          if (!nextResult.dry_run) onApplied?.();
         },
+      },
+    );
+  };
+
+  const apply = () => {
+    const featured = buildFeaturedBundleRequest(effectiveHomeFeatured, effectiveLibraryFeatured);
+    queueBundleApply.mutate(
+      {
+        bundleId: bundle.id,
+        body: {
+          library_ids: libraryIds,
+          delete_existing: deleteExisting,
+          featured,
+        },
+      },
+      {
+        onSuccess: () => onApplied?.(),
       },
     );
   };
@@ -491,11 +514,11 @@ function TemplateBundleApplyView({
       </label>
 
       <div className="flex justify-end gap-2">
-        <Button type="button" variant="outline" disabled={disabled} onClick={() => run(true)}>
+        <Button type="button" variant="outline" disabled={disabled} onClick={preview}>
           Preview
         </Button>
-        <Button type="button" disabled={disabled} onClick={() => run(false)}>
-          {applyBundle.isPending ? "Applying..." : "Apply Defaults"}
+        <Button type="button" disabled={disabled} onClick={apply}>
+          {queueBundleApply.isPending ? "Queueing..." : "Apply Defaults"}
         </Button>
       </div>
 

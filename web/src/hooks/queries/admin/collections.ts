@@ -14,8 +14,11 @@ import type {
   LibraryCollectionSyncRun,
   LibraryCollectionsListResponse,
   UpdateLibraryCollectionRequest,
+  AdminJob,
+  AdminJobsResponse,
 } from "@/api/types";
 import type {
+  ApplyCollectionTemplateBundleJobRequest,
   ApplyCollectionTemplateBundleRequest,
   ApplyCollectionTemplateBundleResponse,
 } from "@/lib/collectionTemplates";
@@ -161,6 +164,50 @@ export function useApplyCollectionTemplateBundle() {
     onError: (error) => {
       toast.error(applyTemplateBundleErrorMessage(error));
     },
+  });
+}
+
+export function useQueueCollectionTemplateBundleApply() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      bundleId,
+      body,
+    }: {
+      bundleId: string;
+      body: ApplyCollectionTemplateBundleJobRequest;
+    }) =>
+      api<AdminJob>(
+        `/admin/collections/template-bundles/${encodeURIComponent(bundleId)}/apply-job`,
+        {
+          method: "POST",
+          body: JSON.stringify(body),
+        },
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.jobs("template_bundle_apply") });
+      void queryClient.invalidateQueries({ queryKey: adminKeys.jobs("__all") });
+      toast.success("Applying collection defaults in the background");
+    },
+    onError: (error) => {
+      if (error instanceof ApiClientError && error.status === 409) {
+        toast.error("A collection defaults apply is already running");
+        return;
+      }
+      toast.error(error instanceof Error ? error.message : "Failed to queue collection defaults");
+    },
+  });
+}
+
+export function useTemplateBundleApplyJobs() {
+  return useQuery({
+    queryKey: adminKeys.jobs("template_bundle_apply"),
+    queryFn: () =>
+      api<AdminJobsResponse>("/admin/jobs?job_type=template_bundle_apply&limit=10").then(
+        (data) => data.jobs ?? [],
+      ),
+    staleTime: 0,
   });
 }
 

@@ -116,6 +116,12 @@ export interface ApplyCollectionTemplateBundleRequest {
   featured?: ApplyCollectionTemplateBundleFeaturedRequest;
 }
 
+export interface ApplyCollectionTemplateBundleJobRequest {
+  library_ids: number[];
+  delete_existing?: boolean;
+  featured?: ApplyCollectionTemplateBundleFeaturedRequest;
+}
+
 export interface ApplyCollectionTemplateBundleFeaturedRequest {
   home?: {
     library_id: number;

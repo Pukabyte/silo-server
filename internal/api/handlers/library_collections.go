@@ -23,10 +23,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/adminjob"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/collage"
 	"github.com/Silo-Server/silo-server/internal/collections/templates"
+	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/sections"
@@ -49,6 +51,8 @@ type LibraryCollectionHandler struct {
 	FolderRepo          *catalog.FolderRepository
 	TemplateRegistry    *templates.Registry
 	SmartCountRefresher *catalog.SmartCountRefresher
+	JobRepo             *adminjob.Repository
+	EventsHub           *evt.Hub
 }
 
 var errLibraryCollectionInUse = errors.New("collection is used by one or more sections")
@@ -1546,52 +1550,201 @@ func (h *LibraryCollectionHandler) HandleListTemplateBundles(w http.ResponseWrit
 	writeJSON(w, http.StatusOK, h.templateRegistry().BundleCatalog())
 }
 
+type templateBundleApplyError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e templateBundleApplyError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return e.code
+}
+
+func newTemplateBundleApplyError(status int, code, message string) error {
+	return templateBundleApplyError{status: status, code: code, message: message}
+}
+
 func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWriter, r *http.Request) {
 	bundleID := chi.URLParam(r, "bundleID")
-	bundle, ok := h.templateRegistry().GetBundle(bundleID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "Template bundle not found")
-		return
-	}
 
 	var req applyTemplateBundleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
+
+	// Keep the legacy synchronous endpoint compatible, including the previous
+	// detached context for non-dry-runs. The admin UI uses HandleApplyTemplateBundleJob
+	// for real applies so large batches no longer depend on this request.
+	workCtx := r.Context()
+	if !req.DryRun {
+		workCtx = context.WithoutCancel(r.Context())
+	}
+	resp, err := h.applyTemplateBundle(workCtx, bundleID, req, nil)
+	if err != nil {
+		writeTemplateBundleApplyError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *LibraryCollectionHandler) HandleApplyTemplateBundleJob(w http.ResponseWriter, r *http.Request) {
+	if h.JobRepo == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "Admin job queue is not configured")
+		return
+	}
+
+	bundleID := chi.URLParam(r, "bundleID")
+	var req applyTemplateBundleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	if req.DryRun {
+		writeError(w, http.StatusBadRequest, "bad_request", "dry_run is not supported for background apply jobs")
+		return
+	}
+	if _, ok := h.templateRegistry().GetBundle(bundleID); !ok {
+		writeError(w, http.StatusNotFound, "not_found", "Template bundle not found")
+		return
+	}
+
 	libraryIDs := uniquePositiveInts(req.LibraryIDs)
 	if len(libraryIDs) == 0 {
 		writeError(w, http.StatusBadRequest, "bad_request", "library_ids is required")
 		return
 	}
-	if h.FolderRepo == nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Library lookup is not configured")
-		return
-	}
-	if h.repo == nil || (!req.DryRun && h.service == nil) {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Collection service is not configured")
+
+	job, err := h.JobRepo.Create(r.Context(), adminjob.CreateJobInput{
+		JobType:         adminjob.JobTypeTemplateBundleApply,
+		CreatedByUserID: currentAdminUserID(r),
+		RequestPayload: adminjob.TemplateBundleApplyRequest{
+			BundleID:       bundleID,
+			LibraryIDs:     libraryIDs,
+			DeleteExisting: req.DeleteExisting,
+			Featured:       toAdminJobTemplateBundleFeatured(req.Featured),
+		},
+		Message: "Queued collection defaults apply",
+	})
+	if err != nil {
+		var conflict *adminjob.ActiveJobConflictError
+		if errors.As(err, &conflict) {
+			writeAdminJobConflict(w, "A collection defaults apply is already queued or running", conflict.Job, NewAdminJobsHandler(h.JobRepo, nil), r)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to queue collection defaults apply")
 		return
 	}
 
-	libraries, err := h.FolderRepo.ListByIDs(r.Context(), libraryIDs)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load libraries")
+	publishEventJob(r.Context(), h.EventsHub, "job.created", job)
+	writeJSON(w, http.StatusAccepted, adminJobToResponse(r, job, nil))
+}
+
+func writeTemplateBundleApplyError(w http.ResponseWriter, err error) {
+	var applyErr templateBundleApplyError
+	if errors.As(err, &applyErr) {
+		writeError(w, applyErr.status, applyErr.code, applyErr.message)
 		return
+	}
+	writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+}
+
+func toAdminJobTemplateBundleFeatured(req *templateBundleFeaturedRequest) *adminjob.TemplateBundleApplyFeaturedRequest {
+	if req == nil {
+		return nil
+	}
+	var home *adminjob.TemplateBundleApplyFeaturedHome
+	if req.Home != nil {
+		home = &adminjob.TemplateBundleApplyFeaturedHome{
+			LibraryID:  req.Home.LibraryID,
+			TemplateID: req.Home.TemplateID,
+		}
+	}
+	libraries := make(map[int]string, len(req.Libraries))
+	for libraryID, templateID := range req.Libraries {
+		libraries[libraryID] = templateID
+	}
+	return &adminjob.TemplateBundleApplyFeaturedRequest{
+		Home:      home,
+		Libraries: libraries,
+	}
+}
+
+func fromAdminJobTemplateBundleFeatured(req *adminjob.TemplateBundleApplyFeaturedRequest) *templateBundleFeaturedRequest {
+	if req == nil {
+		return nil
+	}
+	var home *templateBundleFeaturedHome
+	if req.Home != nil {
+		home = &templateBundleFeaturedHome{
+			LibraryID:  req.Home.LibraryID,
+			TemplateID: req.Home.TemplateID,
+		}
+	}
+	libraries := make(map[int]string, len(req.Libraries))
+	for libraryID, templateID := range req.Libraries {
+		libraries[libraryID] = templateID
+	}
+	return &templateBundleFeaturedRequest{
+		Home:      home,
+		Libraries: libraries,
+	}
+}
+
+func (h *LibraryCollectionHandler) ExecuteTemplateBundleApply(
+	ctx context.Context,
+	req adminjob.TemplateBundleApplyRequest,
+	progress func(current, total int, message string),
+) (any, error) {
+	resp, err := h.applyTemplateBundle(ctx, req.BundleID, applyTemplateBundleRequest{
+		LibraryIDs:     req.LibraryIDs,
+		DeleteExisting: req.DeleteExisting,
+		Featured:       fromAdminJobTemplateBundleFeatured(req.Featured),
+	}, progress)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (h *LibraryCollectionHandler) applyTemplateBundle(
+	ctx context.Context,
+	bundleID string,
+	req applyTemplateBundleRequest,
+	progress func(current, total int, message string),
+) (applyTemplateBundleResponse, error) {
+	reportTemplateBundleApplyProgress(progress, "Loading selected libraries")
+	bundle, ok := h.templateRegistry().GetBundle(bundleID)
+	if !ok {
+		return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusNotFound, "not_found", "Template bundle not found")
+	}
+
+	libraryIDs := uniquePositiveInts(req.LibraryIDs)
+	if len(libraryIDs) == 0 {
+		return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusBadRequest, "bad_request", "library_ids is required")
+	}
+	if h.FolderRepo == nil {
+		return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusInternalServerError, "internal_error", "Library lookup is not configured")
+	}
+	if h.repo == nil || (!req.DryRun && h.service == nil) {
+		return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusInternalServerError, "internal_error", "Collection service is not configured")
+	}
+
+	libraries, err := h.FolderRepo.ListByIDs(ctx, libraryIDs)
+	if err != nil {
+		return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusInternalServerError, "internal_error", "Failed to load libraries")
 	}
 	librariesByID := make(map[int]*models.MediaFolder, len(libraries))
 	for _, library := range libraries {
 		librariesByID[library.ID] = library
 	}
 	if len(librariesByID) != len(libraryIDs) {
-		writeError(w, http.StatusBadRequest, "bad_request", "library_ids must reference enabled libraries")
-		return
+		return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusBadRequest, "bad_request", "library_ids must reference enabled libraries")
 	}
-
-	// Detach from the request context so a closed client tab does not abort
-	// the apply mid-way and leave the bundle in a partially-created state.
-	// Re-runs are idempotent via the management_key uniqueness, but only if
-	// the server completes the work it started.
-	workCtx := context.WithoutCancel(r.Context())
 
 	resp := applyTemplateBundleResponse{
 		BundleID:       bundle.ID,
@@ -1615,8 +1768,9 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 
 	collectionsByLibraryID := make(map[int][]*models.LibraryCollection, len(libraryIDs))
 	remainingByLibrarySlug := make(map[templateBundleExistingCollectionKey]*models.LibraryCollection)
+	reportTemplateBundleApplyProgress(progress, "Checking existing collections")
 	for _, libraryID := range libraryIDs {
-		collections, err := h.repo.ListByLibrary(workCtx, libraryID, catalog.ListLibraryCollectionsOptions{IncludeHidden: true})
+		collections, err := h.repo.ListByLibrary(ctx, libraryID, catalog.ListLibraryCollectionsOptions{IncludeHidden: true})
 		if err != nil {
 			library := librariesByID[libraryID]
 			if req.DeleteExisting {
@@ -1642,14 +1796,14 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 
 	if req.DeleteExisting {
 		if !req.DryRun && h.SectionRepo != nil {
+			reportTemplateBundleApplyProgress(progress, "Deleting existing collections")
 			// Generated featured sections must go before we delete the
 			// collections they reference; otherwise every following delete
 			// trips the in-use guard and the admin sees a misleading wall of
 			// "collection_in_use" errors.
-			if err := h.SectionRepo.DeleteGeneratedTemplateBundleFeaturedSections(workCtx, bundle.ID, libraryIDs); err != nil {
+			if err := h.SectionRepo.DeleteGeneratedTemplateBundleFeaturedSections(ctx, bundle.ID, libraryIDs); err != nil {
 				slog.Error("deleting generated template bundle featured sections", "bundle_id", bundle.ID, "error", err)
-				writeError(w, http.StatusInternalServerError, "delete_setup_failed", "Failed to clear generated featured sections before delete")
-				return
+				return applyTemplateBundleResponse{}, newTemplateBundleApplyError(http.StatusInternalServerError, "delete_setup_failed", "Failed to clear generated featured sections before delete")
 			}
 		}
 		seenCollections := make(map[string]struct{})
@@ -1671,7 +1825,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 					resp.Deleted = append(resp.Deleted, entry)
 					continue
 				}
-				if err := h.deleteServerCollection(workCtx, collection.ID); err != nil {
+				if err := h.deleteServerCollection(ctx, collection.ID); err != nil {
 					entry.Reason = err.Error()
 					if errors.Is(err, errLibraryCollectionInUse) {
 						entry.Reason = "in_use_by_section"
@@ -1690,6 +1844,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 
 	collectionRefs := make(map[templateBundleCollectionRefKey]templateBundleCollectionRef)
 	pendingSyncs := make([]pendingTemplateBundleSync, 0)
+	reportTemplateBundleApplyProgress(progress, "Creating collection defaults")
 	for _, libraryID := range libraryIDs {
 		library := librariesByID[libraryID]
 		for _, templateID := range bundle.TemplateIDs {
@@ -1705,10 +1860,10 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				continue
 			}
 			key := templateBundleManagementKey(bundle.ID, templateID, library.ID)
-			existing, err := h.repo.GetByManagementKey(workCtx, collectionManagementModeTemplateBundle, bundle.ID, key)
+			existing, err := h.repo.GetByManagementKey(ctx, collectionManagementModeTemplateBundle, bundle.ID, key)
 			if err == nil {
 				if !req.DryRun {
-					h.ensureTemplatePoster(workCtx, existing, tmpl)
+					h.ensureTemplatePoster(ctx, existing, tmpl)
 				}
 				entry.CollectionID = existing.ID
 				entry.Reason = "already_exists"
@@ -1743,7 +1898,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				}]
 				if existingBySlug != nil {
 					if !req.DryRun {
-						h.ensureTemplatePoster(workCtx, existingBySlug, tmpl)
+						h.ensureTemplatePoster(ctx, existingBySlug, tmpl)
 					}
 					entry.CollectionID = existingBySlug.ID
 					if req.DeleteExisting {
@@ -1770,7 +1925,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 				continue
 			}
 
-			collection, err := h.createCollectionFromTemplate(workCtx, bundle.ID, tmpl, library.ID, key)
+			collection, err := h.createCollectionFromTemplate(ctx, bundle.ID, tmpl, library.ID, key)
 			if err != nil {
 				entry.Reason = err.Error()
 				resp.Failed = append(resp.Failed, entry)
@@ -1800,6 +1955,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 		// collection in this bundle is queryable by management_source=bundle.ID —
 		// the admin UI polls those for status after a bulk apply.
 		if shouldQueueTemplateBundleSyncs(bundle, len(pendingSyncs)) {
+			reportTemplateBundleApplyProgress(progress, "Queueing initial syncs")
 			created = templateBundleCreatedEntries(pendingSyncs)
 			queued := templateBundleQueuedEntries(pendingSyncs)
 			resp.Created = append(resp.Created, created...)
@@ -1807,7 +1963,7 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 			h.syncTemplateBundleCollectionsAsync(bundle.ID, pendingSyncs)
 		} else {
 			var failed []templateBundleApplyEntry
-			created, failed = h.syncTemplateBundleCollections(workCtx, pendingSyncs)
+			created, failed = h.syncTemplateBundleCollections(ctx, pendingSyncs)
 			resp.Created = append(resp.Created, created...)
 			resp.Failed = append(resp.Failed, failed...)
 			h.generateTemplateBundleCollagesAsync(created)
@@ -1824,8 +1980,9 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 	}
 
 	if req.Featured != nil {
+		reportTemplateBundleApplyProgress(progress, "Creating featured sections")
 		featured, failed := h.applyTemplateBundleFeaturedSections(
-			workCtx,
+			ctx,
 			bundle,
 			req.Featured,
 			librariesByID,
@@ -1836,7 +1993,14 @@ func (h *LibraryCollectionHandler) HandleApplyTemplateBundle(w http.ResponseWrit
 		resp.FeaturedFailed = append(resp.FeaturedFailed, failed...)
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	reportTemplateBundleApplyProgress(progress, "Collection defaults applied")
+	return resp, nil
+}
+
+func reportTemplateBundleApplyProgress(progress func(current, total int, message string), message string) {
+	if progress != nil {
+		progress(0, 0, message)
+	}
 }
 
 func (h *LibraryCollectionHandler) ensureTemplatePoster(
