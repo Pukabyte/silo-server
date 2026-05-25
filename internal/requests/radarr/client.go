@@ -106,12 +106,33 @@ func (c *Client) SubmitMovie(ctx context.Context, req mediarequests.Request, int
 
 	var created movieResource
 	if err := client.PostJSON(ctx, "/api/v3/movie", movie, &created); err != nil {
-		if arrclient.IsEmptyOrTruncatedDecodeError(err) {
-			return acceptedWithoutResponse("radarr"), nil
+		if !arrclient.IsEmptyOrTruncatedDecodeError(err) {
+			return mediarequests.FulfillmentResult{}, err
 		}
-		return mediarequests.FulfillmentResult{}, err
+		// POST accepted but Radarr returned an empty body. Recover the
+		// new movie's Radarr ID by listing movies filtered by TMDB ID;
+		// without the ID the reconcile loop cannot advance the request.
+		if found, lookErr := c.findMovieByTMDBID(ctx, client, req.TMDBID); lookErr == nil && found.ID > 0 {
+			return resultFromMovie(found), nil
+		}
+		return acceptedWithoutResponse("radarr"), nil
 	}
 	return resultFromMovie(created), nil
+}
+
+func (c *Client) findMovieByTMDBID(ctx context.Context, client *arrclient.Client, tmdbID int) (movieResource, error) {
+	values := url.Values{}
+	values.Set("tmdbId", strconv.Itoa(tmdbID))
+	var matches []movieResource
+	if err := client.GetJSON(ctx, "/api/v3/movie?"+values.Encode(), &matches); err != nil {
+		return movieResource{}, err
+	}
+	for _, m := range matches {
+		if m.ID > 0 {
+			return m, nil
+		}
+	}
+	return movieResource{}, fmt.Errorf("radarr: movie not found after add for tmdb_id %d", tmdbID)
 }
 
 func (c *Client) CheckMovieStatus(ctx context.Context, req mediarequests.Request, integration mediarequests.Integration) (mediarequests.FulfillmentStatus, error) {

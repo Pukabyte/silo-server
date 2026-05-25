@@ -73,6 +73,94 @@ func TestSubmitMovieAddsLookupResult(t *testing.T) {
 	}
 }
 
+func TestSubmitMovieRecoversFromEmptyAddResponse(t *testing.T) {
+	qualityProfileID := 7
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/movie/lookup/tmdb":
+			w.Write([]byte(`[{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}]`))
+		case "/api/v3/movie":
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
+			if r.Method == http.MethodGet {
+				if got := r.URL.Query().Get("tmdbId"); got != "550" {
+					t.Fatalf("tmdbId = %q, want 550", got)
+				}
+				w.Write([]byte(`[{"id":99,"tmdbId":550,"title":"Fight Club"}]`))
+				return
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client())
+	result, err := client.SubmitMovie(context.Background(), mediarequests.Request{
+		MediaType: mediarequests.MediaTypeMovie,
+		TMDBID:    550,
+		Title:     "Fight Club",
+	}, mediarequests.Integration{
+		Kind:             "radarr",
+		BaseURL:          server.URL,
+		APIKeyRef:        "radarr-key",
+		RootFolder:       "/movies",
+		QualityProfileID: &qualityProfileID,
+	})
+	if err != nil {
+		t.Fatalf("SubmitMovie returned error: %v", err)
+	}
+	if result.ExternalID != "99" {
+		t.Fatalf("ExternalID = %q, want 99 (recovered after empty 201)", result.ExternalID)
+	}
+	if result.ExternalStatus != "queued" {
+		t.Fatalf("ExternalStatus = %q, want queued", result.ExternalStatus)
+	}
+}
+
+func TestSubmitMovieFallsBackWhenEmptyResponseAndLookupFails(t *testing.T) {
+	qualityProfileID := 7
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/movie/lookup/tmdb":
+			w.Write([]byte(`[{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}]`))
+		case "/api/v3/movie":
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
+			if r.Method == http.MethodGet {
+				w.Write([]byte(`[]`))
+				return
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client())
+	result, err := client.SubmitMovie(context.Background(), mediarequests.Request{
+		MediaType: mediarequests.MediaTypeMovie,
+		TMDBID:    550,
+		Title:     "Fight Club",
+	}, mediarequests.Integration{
+		Kind:             "radarr",
+		BaseURL:          server.URL,
+		APIKeyRef:        "radarr-key",
+		RootFolder:       "/movies",
+		QualityProfileID: &qualityProfileID,
+	})
+	if err != nil {
+		t.Fatalf("SubmitMovie returned error: %v", err)
+	}
+	if result.ExternalStatus != "accepted_without_response" {
+		t.Fatalf("ExternalStatus = %q, want accepted_without_response", result.ExternalStatus)
+	}
+}
+
 func TestCheckMovieStatusReadsQueueDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Api-Key"); got != "radarr-key" {

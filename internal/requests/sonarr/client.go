@@ -113,12 +113,33 @@ func (c *Client) SubmitSeries(ctx context.Context, req mediarequests.Request, in
 
 	var created seriesResource
 	if err := client.PostJSON(ctx, "/api/v3/series", series, &created); err != nil {
-		if arrclient.IsEmptyOrTruncatedDecodeError(err) {
-			return acceptedWithoutResponse("sonarr"), nil
+		if !arrclient.IsEmptyOrTruncatedDecodeError(err) {
+			return mediarequests.FulfillmentResult{}, err
 		}
-		return mediarequests.FulfillmentResult{}, err
+		// POST accepted but Sonarr returned an empty body. Recover the
+		// new series' Sonarr ID by listing series filtered by TVDB ID;
+		// without the ID the reconcile loop cannot advance the request.
+		if found, lookErr := c.findSeriesByTVDBID(ctx, client, *req.TVDBID); lookErr == nil && found.ID > 0 {
+			return resultFromSeries(found), nil
+		}
+		return acceptedWithoutResponse("sonarr"), nil
 	}
 	return resultFromSeries(created), nil
+}
+
+func (c *Client) findSeriesByTVDBID(ctx context.Context, client *arrclient.Client, tvdbID int) (seriesResource, error) {
+	values := url.Values{}
+	values.Set("tvdbId", strconv.Itoa(tvdbID))
+	var matches []seriesResource
+	if err := client.GetJSON(ctx, "/api/v3/series?"+values.Encode(), &matches); err != nil {
+		return seriesResource{}, err
+	}
+	for _, s := range matches {
+		if s.ID > 0 && s.TVDBID == tvdbID {
+			return s, nil
+		}
+	}
+	return seriesResource{}, fmt.Errorf("sonarr: series not found after add for tvdb_id %d", tvdbID)
 }
 
 func (c *Client) CheckSeriesStatus(ctx context.Context, req mediarequests.Request, integration mediarequests.Integration) (mediarequests.FulfillmentStatus, error) {
