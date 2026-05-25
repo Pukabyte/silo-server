@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { useSearchParams } from "react-router";
 import { Search, Sparkles, X } from "lucide-react";
 import BrandCarousel from "@/components/BrandCarousel";
 import MediaCarousel from "@/components/MediaCarousel";
@@ -37,10 +38,13 @@ import { cn } from "@/lib/utils";
 import { formatRequestStatus, requestInputFromMediaResult } from "@/lib/mediaRequests";
 
 type MineBucketKey = "motion" | "completed" | "issues";
+type RequestTab = "discover" | "yours";
 type StatusGuideItem = {
   description: string;
   tone: string;
 };
+
+const REQUEST_TABS = ["discover", "yours"] as const;
 
 const MINE_BUCKET_META: Record<MineBucketKey, { title: string; eyebrow: string; accent: string }> =
   {
@@ -119,39 +123,112 @@ const REQUEST_ISSUE_GUIDE: Array<
 export default function Requests() {
   useDocumentTitle("Requests");
 
-  const [mediaType, setMediaType] = useState<RequestSearchMediaType>("all");
-  const [searchInput, setSearchInput] = useState("");
-  const [submittedQuery, setSubmittedQuery] = useState("");
-  const [searchPage, setSearchPage] = useState(1);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const submittedQuery = (searchParams.get("q") ?? "").trim();
+  const activeTab = normalizeRequestTab(searchParams.get("tab"));
+  const mediaType = normalizeRequestMediaType(
+    searchParams.get("type") ?? searchParams.get("media_type"),
+  );
+  const searchPage = normalizeSearchPage(searchParams.get("page"));
+  const searchQuery = activeTab === "discover" ? submittedQuery : "";
+  const [searchInput, setSearchInput] = useState(submittedQuery);
 
   const discovery = useRequestDiscovery();
   const studios = useDiscoverStudios();
   const networks = useDiscoverNetworks();
   const genres = useDiscoverGenres();
-  const search = useRequestSearch(mediaType, submittedQuery, searchPage);
+  const search = useRequestSearch(mediaType, searchQuery, searchPage);
   const mine = useMyMediaRequests({ limit: 100 });
   const createRequest = useCreateMediaRequest();
   const pendingRequestKey = createRequest.variables
     ? mediaRequestKey(createRequest.variables.media_type, createRequest.variables.tmdb_id)
     : undefined;
 
-  const isSearching = submittedQuery.length > 0;
+  const hasSubmittedSearch = searchQuery.length > 1;
+
+  useEffect(() => {
+    setSearchInput(submittedQuery);
+  }, [submittedQuery]);
+
+  function updateRequestParams(
+    update: (next: URLSearchParams) => void,
+    options: { replace?: boolean } = {},
+  ) {
+    const next = new URLSearchParams(searchParams);
+    update(next);
+    setSearchParams(next, options);
+  }
+
+  function setActiveTab(value: string) {
+    const nextTab = normalizeRequestTab(value);
+
+    updateRequestParams((next) => {
+      if (nextTab === "discover") {
+        next.delete("tab");
+      } else {
+        next.set("tab", nextTab);
+        next.delete("q");
+        next.delete("page");
+        next.delete("type");
+        next.delete("media_type");
+      }
+    });
+  }
 
   function handleSearch(event: FormEvent) {
     event.preventDefault();
-    setSubmittedQuery(searchInput.trim());
-    setSearchPage(1);
+    const normalizedQuery = searchInput.trim();
+    if (normalizedQuery.length < 2) return;
+
+    updateRequestParams((next) => {
+      next.delete("tab");
+      next.set("q", normalizedQuery);
+      next.delete("page");
+      if (mediaType === "all") {
+        next.delete("type");
+        next.delete("media_type");
+      } else {
+        next.set("type", mediaType);
+        next.delete("media_type");
+      }
+    });
   }
 
   function handleMediaTypeChange(value: RequestSearchMediaType) {
-    setMediaType(value);
-    setSearchPage(1);
+    updateRequestParams((next) => {
+      if (value === "all") {
+        next.delete("type");
+        next.delete("media_type");
+      } else {
+        next.set("type", value);
+        next.delete("media_type");
+      }
+      next.delete("page");
+    });
   }
 
   function clearSearch() {
     setSearchInput("");
-    setSubmittedQuery("");
-    setSearchPage(1);
+    updateRequestParams((next) => {
+      next.delete("q");
+      next.delete("page");
+      next.delete("type");
+      next.delete("media_type");
+      next.delete("tab");
+    });
+  }
+
+  function setSearchPageParam(page: number) {
+    updateRequestParams(
+      (next) => {
+        if (page <= 1) {
+          next.delete("page");
+        } else {
+          next.set("page", String(page));
+        }
+      },
+      { replace: true },
+    );
   }
 
   function submitRequest(item: RequestMediaResult) {
@@ -174,17 +251,17 @@ export default function Requests() {
           onSearchInputChange={setSearchInput}
           onSubmit={handleSearch}
           onClear={clearSearch}
-          isSearching={isSearching}
+          isSearching={hasSubmittedSearch}
         />
       </div>
 
-      <Tabs defaultValue="discover">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <div className="px-4 sm:px-6 lg:px-10 xl:px-12">
           <TabsList variant="line" className="border-border w-full justify-start border-b">
             <TabsTrigger value="discover" className="px-3 text-[13px]">
               Discover
             </TabsTrigger>
-            <TabsTrigger value="mine" className="px-3 text-[13px]">
+            <TabsTrigger value="yours" className="px-3 text-[13px]">
               Yours
               {totalMine > 0 && (
                 <span className="bg-muted/80 text-muted-foreground ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold tabular-nums">
@@ -196,12 +273,12 @@ export default function Requests() {
         </div>
 
         <TabsContent value="discover" className="space-y-8 pt-2">
-          {isSearching ? (
+          {hasSubmittedSearch ? (
             <SearchResultsView
               query={submittedQuery}
               mediaType={mediaType}
               page={searchPage}
-              onPageChange={setSearchPage}
+              onPageChange={setSearchPageParam}
               isLoading={search.isLoading || search.isFetching}
               isError={search.isError}
               totalPages={search.data?.total_pages ?? 0}
@@ -257,7 +334,7 @@ export default function Requests() {
           )}
         </TabsContent>
 
-        <TabsContent value="mine" className="space-y-8 pt-2">
+        <TabsContent value="yours" className="space-y-8 pt-2">
           {mine.isLoading ? (
             <DiscoveryCarouselSkeleton />
           ) : mine.isError ? (
@@ -756,6 +833,23 @@ function sectionEyebrow(key: string): string {
   if (key.startsWith("trending")) return "Trending now";
   if (key.startsWith("popular")) return "Crowd favorites";
   return "Discover";
+}
+
+function normalizeRequestTab(value: string | null): RequestTab {
+  if (value === "mine") return "yours";
+  if (REQUEST_TABS.includes(value as RequestTab)) return value as RequestTab;
+  return "discover";
+}
+
+function normalizeRequestMediaType(value: string | null): RequestSearchMediaType {
+  if (value === "movie" || value === "series") return value;
+  return "all";
+}
+
+function normalizeSearchPage(value: string | null): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return 1;
+  return parsed;
 }
 
 function mediaRequestKey(mediaType: RequestMediaResult["media_type"], tmdbID: number): string {
