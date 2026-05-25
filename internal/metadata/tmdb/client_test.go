@@ -2,17 +2,26 @@ package tmdb
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-func TestNewClientRequiresAPIKey(t *testing.T) {
+func TestNewClientUsesProjectAPIKeyWhenEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("api_key"); got != projectAPIKey {
+			t.Fatalf("api_key query = %q, want project API key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"page":1,"total_pages":1,"total_results":0,"results":[]}`))
+	}))
+	defer server.Close()
+
 	client := NewClient("", 1000)
-	_, err := client.GetCollectionPreset(context.Background(), "trending", "all", "day", 10)
-	if !errors.Is(err, ErrMissingAPIKey) {
-		t.Fatalf("err = %v, want ErrMissingAPIKey", err)
+	client.SetBaseURL(server.URL)
+
+	if _, err := client.GetCollectionPreset(context.Background(), "trending", "all", "day", 10); err != nil {
+		t.Fatalf("GetCollectionPreset returned error: %v", err)
 	}
 }
 

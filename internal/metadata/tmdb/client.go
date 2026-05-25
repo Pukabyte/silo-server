@@ -17,15 +17,11 @@ import (
 
 const (
 	defaultBaseURL             = "https://api.themoviedb.org/3"
+	projectAPIKey              = "4ef0d7355d9ffb5151e987764708ce96"
 	maxRetries                 = 3
 	maxResponseBody            = 1 << 20 // 1 MB
 	maxCollectionPresetResults = 500
 )
-
-// ErrMissingAPIKey is returned by client methods when the client was
-// constructed without an API key. Callers should source the key from
-// configuration rather than relying on a built-in default.
-var ErrMissingAPIKey = fmt.Errorf("tmdb: api key is required")
 
 // Client is an HTTP client for the TMDB collection preset API surface.
 type Client struct {
@@ -36,14 +32,16 @@ type Client struct {
 }
 
 // NewClient creates a TMDB API client with the given API key and rate limit
-// (requests per second). The apiKey must be sourced from configuration; a
-// client constructed with an empty key returns ErrMissingAPIKey from every
-// API call so misconfiguration surfaces immediately rather than silently
-// using a shared built-in key.
+// (requests per second). If apiKey is empty, Silo's public project API key is
+// used.
 func NewClient(apiKey string, rateLimit int) *Client {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		apiKey = projectAPIKey
+	}
 	return &Client{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-		apiKey:     strings.TrimSpace(apiKey),
+		apiKey:     apiKey,
 		baseURL:    defaultBaseURL,
 		limiter:    rate.NewLimiter(rate.Limit(rateLimit), rateLimit),
 	}
@@ -57,9 +55,6 @@ func (c *Client) SetBaseURL(url string) {
 // doGet executes a GET request against the TMDB API with rate limiting,
 // exponential backoff on 5xx/429, and JSON decoding into dest.
 func (c *Client) doGet(ctx context.Context, path string, dest any) error {
-	if c.apiKey == "" {
-		return ErrMissingAPIKey
-	}
 	if err := c.limiter.Wait(ctx); err != nil {
 		return err
 	}

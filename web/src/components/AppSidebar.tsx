@@ -497,6 +497,23 @@ export default function AppSidebar({ onNavigate, collapsed = false }: AppSidebar
             </li>
             <li>
               <ViewTransitionLink
+                to="/requests"
+                onClick={onNavigate}
+                className={navLinkClass("/requests")}
+                aria-current={isActive("/requests") ? "page" : undefined}
+              >
+                {isActive("/requests") && (
+                  <span
+                    className="absolute top-1/2 left-0 h-[18px] w-[3px] -translate-y-1/2 rounded-r-sm"
+                    style={{ background: "var(--primary)" }}
+                  />
+                )}
+                <Send className="h-[18px] w-[18px] shrink-0" />
+                <SidebarLabel show={showLabels}>Requests</SidebarLabel>
+              </ViewTransitionLink>
+            </li>
+            <li>
+              <ViewTransitionLink
                 to="/calendar"
                 onClick={onNavigate}
                 className={navLinkClass("/calendar")}
@@ -585,23 +602,6 @@ export default function AppSidebar({ onNavigate, collapsed = false }: AppSidebar
                 )}
                 <FolderOpen className="h-[18px] w-[18px] shrink-0" />
                 <SidebarLabel show={showLabels}>Collections</SidebarLabel>
-              </ViewTransitionLink>
-            </li>
-            <li>
-              <ViewTransitionLink
-                to="/requests"
-                onClick={onNavigate}
-                className={navLinkClass("/requests")}
-                aria-current={isActive("/requests") ? "page" : undefined}
-              >
-                {isActive("/requests") && (
-                  <span
-                    className="absolute top-1/2 left-0 h-[18px] w-[3px] -translate-y-1/2 rounded-r-sm"
-                    style={{ background: "var(--primary)" }}
-                  />
-                )}
-                <Send className="h-[18px] w-[18px] shrink-0" />
-                <SidebarLabel show={showLabels}>Requests</SidebarLabel>
               </ViewTransitionLink>
             </li>
             <li>
