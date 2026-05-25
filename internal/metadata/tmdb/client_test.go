@@ -435,6 +435,74 @@ func TestSearchMediaMovie(t *testing.T) {
 	}
 }
 
+func TestSearchMediaAllUsesMultiSearchAndFiltersToMoviesAndSeries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/multi" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if got := q.Get("query"); got != "fight club" {
+			t.Fatalf("query = %q, want fight club", got)
+		}
+		if got := q.Get("include_adult"); got != "false" {
+			t.Fatalf("include_adult = %q, want false", got)
+		}
+		if got := q.Get("page"); got != "2" {
+			t.Fatalf("page = %q, want 2", got)
+		}
+		if got := q.Get("api_key"); got != "test-key" {
+			t.Fatalf("api_key query = %q, want test-key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"page": 2,
+			"total_pages": 4,
+			"total_results": 40,
+			"results": [
+				{
+					"id": 550,
+					"media_type": "movie",
+					"title": "Fight Club",
+					"release_date": "1999-10-15"
+				},
+				{
+					"id": 1399,
+					"media_type": "tv",
+					"name": "Fight Club: The Series",
+					"first_air_date": "2020-01-01"
+				},
+				{
+					"id": 123,
+					"media_type": "person",
+					"name": "A Performer"
+				}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	page, err := client.SearchMedia(context.Background(), "all", "fight club", 2)
+	if err != nil {
+		t.Fatalf("SearchMedia returned error: %v", err)
+	}
+	if page.Page != 2 || page.TotalPages != 4 || page.TotalResults != 40 {
+		t.Fatalf("page metadata = %+v, want TMDB pagination metadata", page)
+	}
+	if len(page.Results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(page.Results))
+	}
+	if page.Results[0].ID != 550 || page.Results[0].MediaType != "movie" || page.Results[0].Year != 1999 {
+		t.Fatalf("results[0] = %+v, want normalized movie", page.Results[0])
+	}
+	if page.Results[1].ID != 1399 || page.Results[1].MediaType != "series" || page.Results[1].Year != 2020 {
+		t.Fatalf("results[1] = %+v, want normalized series", page.Results[1])
+	}
+}
+
 func TestDiscoverSectionTrendingSeries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/trending/tv/week" {

@@ -143,6 +143,20 @@ type mediaTVResponse struct {
 	VoteAverage  float64 `json:"vote_average"`
 }
 
+type mediaMultiSearchResponse struct {
+	ID           int     `json:"id"`
+	MediaType    string  `json:"media_type"`
+	Title        string  `json:"title"`
+	Name         string  `json:"name"`
+	Overview     string  `json:"overview"`
+	PosterPath   string  `json:"poster_path"`
+	BackdropPath string  `json:"backdrop_path"`
+	ReleaseDate  string  `json:"release_date"`
+	FirstAirDate string  `json:"first_air_date"`
+	Popularity   float64 `json:"popularity"`
+	VoteAverage  float64 `json:"vote_average"`
+}
+
 type externalIDsResponse struct {
 	ExternalIDs *ExternalIDs `json:"external_ids"`
 }

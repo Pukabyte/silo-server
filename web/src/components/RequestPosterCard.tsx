@@ -11,21 +11,29 @@ type DiscoverProps = {
   item: RequestMediaResult;
   isSubmitting: boolean;
   onRequest: () => void;
+  /** When true, fills the parent (use inside grids). Default: fixed carousel width. */
+  fluid?: boolean;
 };
 
 type MineProps = {
   variant: "mine";
   request: MediaRequest;
+  fluid?: boolean;
 };
 
 export type RequestPosterCardProps = DiscoverProps | MineProps;
 
 export default function RequestPosterCard(props: RequestPosterCardProps) {
   if (props.variant === "mine") {
-    return <MineCard request={props.request} />;
+    return <MineCard request={props.request} fluid={props.fluid} />;
   }
   return (
-    <DiscoverCard item={props.item} isSubmitting={props.isSubmitting} onRequest={props.onRequest} />
+    <DiscoverCard
+      item={props.item}
+      isSubmitting={props.isSubmitting}
+      onRequest={props.onRequest}
+      fluid={props.fluid}
+    />
   );
 }
 
@@ -33,10 +41,12 @@ function DiscoverCard({
   item,
   isSubmitting,
   onRequest,
+  fluid,
 }: {
   item: RequestMediaResult;
   isSubmitting: boolean;
   onRequest: () => void;
+  fluid?: boolean;
 }) {
   const poster = tmdbImageURL(item.poster_path);
   const requestable = item.request.requestable;
@@ -45,12 +55,20 @@ function DiscoverCard({
     !requestable && !item.request.status ? formatRequestReason(item.request.reason) : null;
   const availableInLibrary = item.availability === "available" && !item.request.status;
 
+  const ribbon: { kind: RibbonKind; label: string } | null = statusLabel
+    ? { kind: (item.request.status as RibbonKind) ?? "pending", label: statusLabel }
+    : availableInLibrary
+      ? { kind: "completed", label: "In library" }
+      : reasonLabel
+        ? { kind: "blocked", label: reasonLabel }
+        : null;
+
   return (
     <Link
       to={`/requests/${item.media_type}/${item.tmdb_id}`}
       className={cn(
         "group/req-card relative block focus:outline-none focus-visible:outline-none",
-        POSTER_WIDTH,
+        fluid ? "w-full" : POSTER_WIDTH,
       )}
     >
       <PosterFrame
@@ -58,21 +76,12 @@ function DiscoverCard({
         title={item.title}
         mediaType={item.media_type}
         dim={!requestable}
+        accent={ribbon?.kind ?? null}
       >
-        <TypeBadge mediaType={item.media_type} />
+        {ribbon && <StatusRibbon status={ribbon.kind} label={ribbon.label} />}
 
-        {/* Status ribbon for already-requested or in-library items */}
-        {statusLabel ? (
-          <StatusRibbon status={item.request.status!} label={statusLabel} />
-        ) : availableInLibrary ? (
-          <StatusRibbon status="completed" label="In library" />
-        ) : reasonLabel ? (
-          <StatusRibbon status="blocked" label={reasonLabel} />
-        ) : null}
-
-        {/* Hover Request overlay — only for requestable items */}
         {requestable && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 flex translate-y-2 items-end justify-center bg-gradient-to-t from-black/85 via-black/50 to-transparent p-3 opacity-0 transition-all duration-200 ease-out group-focus-within/req-card:translate-y-0 group-focus-within/req-card:opacity-100 group-hover/req-card:translate-y-0 group-hover/req-card:opacity-100">
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 flex translate-y-2 items-end justify-center bg-gradient-to-t from-black/85 via-black/45 to-transparent p-3 opacity-0 transition-all duration-200 ease-out group-focus-within/req-card:translate-y-0 group-focus-within/req-card:opacity-100 group-hover/req-card:translate-y-0 group-hover/req-card:opacity-100">
             <button
               type="button"
               disabled={isSubmitting}
@@ -99,12 +108,17 @@ function DiscoverCard({
         )}
       </PosterFrame>
 
-      <CardMeta title={item.title} year={item.year} rating={item.vote_average} />
+      <CardMeta
+        title={item.title}
+        year={item.year}
+        rating={item.vote_average}
+        mediaType={item.media_type}
+      />
     </Link>
   );
 }
 
-function MineCard({ request }: { request: MediaRequest }) {
+function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }) {
   const poster = tmdbImageURL(request.poster_path);
   const isDownloading = request.status === "downloading";
   const isCompleted = request.status === "completed";
@@ -113,12 +127,15 @@ function MineCard({ request }: { request: MediaRequest }) {
     request.outcome === "declined" ||
     request.outcome === "cancelled";
 
+  const kind: RibbonKind = isFailed ? "blocked" : (request.status as RibbonKind);
+  const label = isFailed ? formatOutcome(request.outcome) : formatRequestStatus(request.status);
+
   return (
     <Link
       to={`/requests/${request.media_type}/${request.tmdb_id}`}
       className={cn(
         "group/req-card relative block focus:outline-none focus-visible:outline-none",
-        POSTER_WIDTH,
+        fluid ? "w-full" : POSTER_WIDTH,
       )}
     >
       <PosterFrame
@@ -126,14 +143,10 @@ function MineCard({ request }: { request: MediaRequest }) {
         title={request.title}
         mediaType={request.media_type}
         dim={isFailed}
+        accent={kind}
       >
-        <TypeBadge mediaType={request.media_type} />
-        <StatusRibbon
-          status={isFailed ? "blocked" : request.status}
-          label={isFailed ? formatOutcome(request.outcome) : formatRequestStatus(request.status)}
-        />
+        <StatusRibbon status={kind} label={label} />
 
-        {/* Animated indicator at the bottom of the poster */}
         {isDownloading && (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1 overflow-hidden bg-black/40">
             <div className="downloading-shimmer h-full bg-sky-400" />
@@ -149,7 +162,7 @@ function MineCard({ request }: { request: MediaRequest }) {
         )}
       </PosterFrame>
 
-      <CardMeta title={request.title} year={request.year} />
+      <CardMeta title={request.title} year={request.year} mediaType={request.media_type} />
 
       {request.last_error ? (
         <p
@@ -163,17 +176,28 @@ function MineCard({ request }: { request: MediaRequest }) {
   );
 }
 
+const ACCENT_BAR: Record<RibbonKind, string> = {
+  pending: "bg-amber-300/70",
+  approved: "bg-emerald-300/70",
+  queued: "bg-sky-300/70",
+  downloading: "bg-sky-300/70",
+  completed: "bg-emerald-300/70",
+  blocked: "bg-zinc-400/40",
+};
+
 function PosterFrame({
   poster,
   title,
   mediaType,
   dim,
+  accent,
   children,
 }: {
   poster: string | null;
   title: string;
   mediaType: "movie" | "series";
   dim?: boolean;
+  accent?: RibbonKind | null;
   children?: React.ReactNode;
 }) {
   return (
@@ -189,41 +213,113 @@ function PosterFrame({
           )}
         />
       ) : (
-        <div className="bg-muted text-muted-foreground flex h-full w-full flex-col items-center justify-center gap-2 p-3 text-center">
-          {mediaType === "series" ? <Tv className="h-7 w-7" /> : <Film className="h-7 w-7" />}
-          <span className="line-clamp-3 text-xs font-medium">{title}</span>
-        </div>
+        <PosterFallback title={title} mediaType={mediaType} dim={dim} />
       )}
-      {/* subtle bottom vignette for legibility behind badges */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/55 to-transparent opacity-90" />
+      {/* subtle bottom vignette for legibility behind ribbons / hover overlays */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/55 to-transparent opacity-90" />
+      {/* thin status accent bar, hugs bottom edge */}
+      {accent && (
+        <div
+          className={cn(
+            "pointer-events-none absolute inset-x-0 bottom-0 h-[2px] opacity-90",
+            ACCENT_BAR[accent],
+          )}
+        />
+      )}
       {children}
     </div>
   );
 }
 
-function TypeBadge({ mediaType }: { mediaType: "movie" | "series" }) {
+function PosterFallback({
+  title,
+  mediaType,
+  dim,
+}: {
+  title: string;
+  mediaType: "movie" | "series";
+  dim?: boolean;
+}) {
+  const hue = stringHue(title);
+  const Icon = mediaType === "series" ? Tv : Film;
   return (
-    <span className="absolute top-2.5 left-2.5 inline-flex items-center gap-1 rounded-full border border-white/25 bg-black/80 px-2 py-0.5 text-[10px] leading-none font-semibold tracking-[0.14em] text-white uppercase shadow-sm shadow-black/40 backdrop-blur-md">
-      {mediaType === "series" ? "Series" : "Movie"}
-    </span>
+    <div
+      className={cn(
+        "relative flex h-full w-full flex-col justify-end overflow-hidden p-3.5",
+        dim && "opacity-90",
+      )}
+      style={{
+        background: `linear-gradient(160deg, hsl(${hue} 30% 22%) 0%, hsl(${hue} 22% 11%) 60%, hsl(${(hue + 28) % 360} 18% 7%) 100%)`,
+      }}
+    >
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <Icon className="h-28 w-28 text-white/[0.05]" strokeWidth={1.25} />
+      </div>
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          backgroundImage: "radial-gradient(rgba(255,255,255,0.55) 1px, transparent 1px)",
+          backgroundSize: "9px 9px",
+          opacity: 0.05,
+        }}
+      />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/15 to-transparent" />
+      <div className="relative space-y-1.5">
+        <span className="text-[9px] font-semibold tracking-[0.22em] text-white/45 uppercase">
+          {mediaType === "series" ? "Series" : "Motion picture"}
+        </span>
+        <h4 className="font-display line-clamp-4 text-[15px] leading-tight font-bold tracking-tight text-balance text-white/90">
+          {title}
+        </h4>
+      </div>
+    </div>
   );
 }
 
-function CardMeta({ title, year, rating }: { title: string; year?: number; rating?: number }) {
+function stringHue(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (Math.imul(hash, 31) + input.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 360;
+}
+
+function CardMeta({
+  title,
+  year,
+  rating,
+  mediaType,
+}: {
+  title: string;
+  year?: number;
+  rating?: number;
+  mediaType?: "movie" | "series";
+}) {
+  const Icon = mediaType === "series" ? Tv : Film;
+  const hasMeta = mediaType || year !== undefined || rating !== undefined;
   return (
-    <div className="mt-2 min-w-0 px-0.5">
-      <h3 className="text-foreground line-clamp-1 text-[13px] leading-tight font-semibold tracking-normal">
+    <div className="mt-2.5 min-w-0 px-0.5">
+      <h3 className="text-foreground line-clamp-1 text-[13px] leading-tight font-semibold tracking-tight">
         {title}
       </h3>
-      <div className="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-[11px]">
-        {year ? <span className="tabular-nums">{year}</span> : null}
-        {year && rating ? <span className="opacity-50">·</span> : null}
-        {rating ? (
-          <span className="tabular-nums">
-            <span className="text-amber-300/80">★</span> {rating.toFixed(1)}
-          </span>
-        ) : null}
-      </div>
+      {hasMeta && (
+        <div className="text-muted-foreground mt-1 flex items-center gap-1.5 text-[11px]">
+          {mediaType && (
+            <Icon className="h-3 w-3 shrink-0 opacity-60" strokeWidth={2} aria-hidden />
+          )}
+          {year ? <span className="tabular-nums">{year}</span> : null}
+          {(year || mediaType) && rating ? (
+            <span aria-hidden className="text-muted-foreground/40">
+              ·
+            </span>
+          ) : null}
+          {rating ? (
+            <span className="tabular-nums">
+              <span className="text-amber-300/90">★</span> {rating.toFixed(1)}
+            </span>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -232,13 +328,13 @@ type RibbonKind = "pending" | "approved" | "queued" | "downloading" | "completed
 
 const RIBBON_STYLES: Record<RibbonKind, string> = {
   pending:
-    "bg-amber-500/85 text-amber-50 ring-amber-300/60 [&_.dot]:bg-amber-200 [&_.dot]:animate-pulse",
-  approved: "bg-emerald-500/85 text-emerald-50 ring-emerald-300/60 [&_.dot]:bg-emerald-200",
-  queued: "bg-sky-500/85 text-sky-50 ring-sky-300/60 [&_.dot]:bg-sky-200 [&_.dot]:animate-pulse",
+    "bg-amber-950/75 text-amber-100 ring-amber-400/30 [&_.dot]:bg-amber-300 [&_.dot]:animate-pulse",
+  approved: "bg-emerald-950/75 text-emerald-100 ring-emerald-400/30 [&_.dot]:bg-emerald-300",
+  queued: "bg-sky-950/75 text-sky-100 ring-sky-400/30 [&_.dot]:bg-sky-300 [&_.dot]:animate-pulse",
   downloading:
-    "bg-sky-500/90 text-sky-50 ring-sky-300/70 [&_.dot]:bg-sky-200 [&_.dot]:animate-pulse",
-  completed: "bg-emerald-500/90 text-emerald-50 ring-emerald-300/60 [&_.dot]:bg-emerald-200",
-  blocked: "bg-zinc-800/85 text-zinc-50 ring-zinc-400/60 [&_.dot]:bg-zinc-300",
+    "bg-sky-950/80 text-sky-100 ring-sky-400/35 [&_.dot]:bg-sky-300 [&_.dot]:animate-pulse",
+  completed: "bg-emerald-950/80 text-emerald-100 ring-emerald-400/30 [&_.dot]:bg-emerald-300",
+  blocked: "bg-zinc-900/80 text-zinc-200 ring-white/10 [&_.dot]:bg-zinc-400",
 };
 
 function StatusRibbon({ status, label }: { status: string; label: string }) {
@@ -246,12 +342,12 @@ function StatusRibbon({ status, label }: { status: string; label: string }) {
   return (
     <span
       className={cn(
-        "absolute top-2.5 right-2.5 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] leading-none font-semibold tracking-[0.08em] uppercase shadow-sm ring-1 shadow-black/40 backdrop-blur-md",
+        "absolute top-2 right-2 inline-flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-full px-2 py-[3px] text-[10px] leading-none font-medium tracking-[0.06em] uppercase shadow-sm ring-1 shadow-black/40 backdrop-blur-md",
         RIBBON_STYLES[kind],
       )}
     >
-      <span className="dot inline-block h-1.5 w-1.5 rounded-full" />
-      {label}
+      <span className="dot inline-block h-1.5 w-1.5 shrink-0 rounded-full" />
+      <span className="truncate">{label}</span>
     </span>
   );
 }

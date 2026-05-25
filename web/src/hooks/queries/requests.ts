@@ -19,6 +19,7 @@ import type {
   RequestListParams,
   RequestMediaDetail,
   RequestMediaPage,
+  RequestSearchMediaType,
   RequestMediaType,
   RequestSettings,
   RequestUserLimit,
@@ -138,7 +139,7 @@ export function useRequestMediaDetail(mediaType: RequestMediaType, tmdbID: numbe
   });
 }
 
-export function useRequestSearch(mediaType: RequestMediaType, query: string, page = 1) {
+export function useRequestSearch(mediaType: RequestSearchMediaType, query: string, page = 1) {
   const normalizedQuery = query.trim();
   return useQuery({
     queryKey: requestKeys.search(mediaType, normalizedQuery, page),

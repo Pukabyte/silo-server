@@ -21,6 +21,7 @@ import type {
   MediaRequestStatus,
   RequestDiscoverySection,
   RequestMediaResult,
+  RequestSearchMediaType,
 } from "@/api/types";
 import {
   useCreateMediaRequest,
@@ -118,7 +119,7 @@ const REQUEST_ISSUE_GUIDE: Array<
 export default function Requests() {
   useDocumentTitle("Requests");
 
-  const [mediaType, setMediaType] = useState<"movie" | "series">("movie");
+  const [mediaType, setMediaType] = useState<RequestSearchMediaType>("all");
   const [searchInput, setSearchInput] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [searchPage, setSearchPage] = useState(1);
@@ -136,6 +137,11 @@ export default function Requests() {
   function handleSearch(event: FormEvent) {
     event.preventDefault();
     setSubmittedQuery(searchInput.trim());
+    setSearchPage(1);
+  }
+
+  function handleMediaTypeChange(value: RequestSearchMediaType) {
+    setMediaType(value);
     setSearchPage(1);
   }
 
@@ -160,7 +166,7 @@ export default function Requests() {
 
         <SearchBar
           mediaType={mediaType}
-          onMediaTypeChange={setMediaType}
+          onMediaTypeChange={handleMediaTypeChange}
           searchInput={searchInput}
           onSearchInputChange={setSearchInput}
           onSubmit={handleSearch}
@@ -196,6 +202,7 @@ export default function Requests() {
               isLoading={search.isLoading || search.isFetching}
               isError={search.isError}
               totalPages={search.data?.total_pages ?? 0}
+              totalResults={search.data?.total_results ?? 0}
               results={search.data?.results ?? []}
               pendingTMDBID={createRequest.variables?.tmdb_id}
               isSubmitting={createRequest.isPending}
@@ -383,8 +390,8 @@ function SearchBar({
   onClear,
   isSearching,
 }: {
-  mediaType: "movie" | "series";
-  onMediaTypeChange: (value: "movie" | "series") => void;
+  mediaType: RequestSearchMediaType;
+  onMediaTypeChange: (value: RequestSearchMediaType) => void;
   searchInput: string;
   onSearchInputChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
@@ -398,12 +405,13 @@ function SearchBar({
     >
       <Select
         value={mediaType}
-        onValueChange={(value) => onMediaTypeChange(value as "movie" | "series")}
+        onValueChange={(value) => onMediaTypeChange(value as RequestSearchMediaType)}
       >
         <SelectTrigger className="border-border/60 bg-background/40 h-10 w-full rounded-xl border text-sm">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
+          <SelectItem value="all">All</SelectItem>
           <SelectItem value="movie">Movies</SelectItem>
           <SelectItem value="series">Series</SelectItem>
         </SelectContent>
@@ -498,35 +506,74 @@ function SearchResultsView({
   isLoading,
   isError,
   totalPages,
+  totalResults,
   results,
   pendingTMDBID,
   isSubmitting,
   onRequest,
 }: {
   query: string;
-  mediaType: "movie" | "series";
+  mediaType: RequestSearchMediaType;
   page: number;
   onPageChange: (page: number) => void;
   isLoading: boolean;
   isError: boolean;
   totalPages: number;
+  totalResults: number;
   results: RequestMediaResult[];
   pendingTMDBID?: number;
   isSubmitting: boolean;
   onRequest: (item: RequestMediaResult) => void;
 }) {
+  const typeLabel =
+    mediaType === "series" ? "series" : mediaType === "movie" ? "movies" : "movies and series";
+  const filterLabel =
+    mediaType === "series" ? "Series" : mediaType === "movie" ? "Movies" : "All";
+  const shown = results.length;
+  const showCount = !isLoading && !isError && shown > 0;
+
   return (
-    <div className="space-y-5 px-4 sm:px-6 lg:px-10 xl:px-12">
-      <div className="flex items-baseline gap-2">
-        <span className="text-muted-foreground text-[10px] font-semibold tracking-[0.22em] uppercase">
-          Search · {mediaType === "series" ? "Series" : "Movies"}
+    <div className="space-y-6 px-4 sm:px-6 lg:px-10 xl:px-12">
+      <header className="border-border/50 flex flex-col gap-2 border-b pb-4">
+        <span className="text-muted-foreground text-[10px] font-semibold tracking-[0.24em] uppercase">
+          Search results · {filterLabel}
         </span>
-      </div>
-      <div>
-        <h2 className="text-foreground text-xl font-semibold tracking-tight">
-          Results for <span className="italic">"{query}"</span>
-        </h2>
-      </div>
+        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
+          <h2 className="font-display text-foreground text-[clamp(1.4rem,2.2vw,1.9rem)] leading-[1.1] font-bold tracking-tight">
+            <span className="text-muted-foreground/50 font-normal">“</span>
+            {query}
+            <span className="text-muted-foreground/50 font-normal">”</span>
+          </h2>
+          {showCount && (
+            <span className="text-muted-foreground text-[12px] tabular-nums">
+              {totalResults > 0 ? (
+                <>
+                  <span className="text-foreground/90 font-semibold">
+                    {totalResults.toLocaleString()}
+                  </span>{" "}
+                  {totalResults === 1 ? typeLabel.slice(0, -1) : typeLabel}
+                  {totalPages > 1 ? (
+                    <span className="text-muted-foreground/70">
+                      {" · "}
+                      Page {page} of {totalPages}
+                    </span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {shown} on this page
+                  {totalPages > 1 ? (
+                    <span className="text-muted-foreground/70">
+                      {" · "}
+                      Page {page} of {totalPages}
+                    </span>
+                  ) : null}
+                </>
+              )}
+            </span>
+          )}
+        </div>
+      </header>
 
       {isError ? (
         <EmptyPanel
@@ -538,11 +585,15 @@ function SearchResultsView({
       ) : results.length === 0 ? (
         <EmptyPanel
           title="Nothing found"
-          detail={`No ${mediaType === "series" ? "series" : "movies"} matched "${query}".`}
+          detail={
+            mediaType === "all"
+              ? `No movies or series matched "${query}". Try a different spelling.`
+              : `No ${typeLabel} matched "${query}". Try a different spelling or switch to ${mediaType === "series" ? "Movies" : "Series"}.`
+          }
         />
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
+          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8">
             {results.map((item) => (
               <RequestPosterCard
                 key={`${item.media_type}-${item.tmdb_id}`}
@@ -550,12 +601,13 @@ function SearchResultsView({
                 item={item}
                 isSubmitting={isSubmitting && pendingTMDBID === item.tmdb_id}
                 onRequest={() => onRequest(item)}
+                fluid
               />
             ))}
           </div>
 
           {totalPages > 1 && (
-            <div className="flex items-center justify-between gap-3 pt-2">
+            <div className="border-border/50 flex items-center justify-between gap-3 border-t pt-4">
               <Button
                 variant="outline"
                 size="sm"
@@ -565,7 +617,7 @@ function SearchResultsView({
                 Previous
               </Button>
               <span className="text-muted-foreground text-xs tabular-nums">
-                Page {page} of {totalPages}
+                Page <span className="text-foreground font-semibold">{page}</span> of {totalPages}
               </span>
               <Button
                 variant="outline"
@@ -682,12 +734,11 @@ function DiscoveryCarouselSkeleton() {
 
 function SearchGridSkeleton() {
   return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
-      {Array.from({ length: 14 }).map((_, i) => (
+    <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8">
+      {Array.from({ length: 16 }).map((_, i) => (
         <div key={i}>
-          <Skeleton className="aspect-[2/3] w-full rounded-xl" />
+          <Skeleton className="aspect-[2/3] w-full rounded-lg" />
           <Skeleton className="mt-2 h-4 w-3/4 rounded" />
-          <Skeleton className="mt-1 h-3 w-1/2 rounded" />
         </div>
       ))}
     </div>

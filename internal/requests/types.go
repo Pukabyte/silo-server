@@ -9,6 +9,7 @@ type MediaType string
 const (
 	MediaTypeMovie  MediaType = "movie"
 	MediaTypeSeries MediaType = "series"
+	MediaTypeAll    MediaType = "all"
 )
 
 type Status string

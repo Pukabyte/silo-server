@@ -133,9 +133,9 @@ func retryAfterOrDefault(resp *http.Response, attempt int) time.Duration {
 	return time.Duration(1<<attempt) * time.Second
 }
 
-// SearchMedia searches TMDB directly for movies or TV series. mediaType accepts
-// Silo-facing "movie" or "series" values, plus TMDB-facing "tv" for callers
-// already working at the provider boundary.
+// SearchMedia searches TMDB directly for movies, TV series, or both. mediaType
+// accepts Silo-facing "movie", "series", or "all" values, plus TMDB-facing
+// "tv" for callers already working at the provider boundary.
 func (c *Client) SearchMedia(ctx context.Context, mediaType, query string, page int) (*MediaPage, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -166,6 +166,16 @@ func (c *Client) SearchMedia(ctx context.Context, mediaType, query string, page 
 			return nil, err
 		}
 		return normalizeTVPage(resp), nil
+	case "all":
+		values := url.Values{}
+		values.Set("query", query)
+		values.Set("include_adult", "false")
+		values.Set("page", strconv.Itoa(page))
+		var resp paginatedResponse[mediaMultiSearchResponse]
+		if err := c.doGet(ctx, "/search/multi?"+values.Encode(), &resp); err != nil {
+			return nil, err
+		}
+		return normalizeMultiSearchPage(resp), nil
 	default:
 		return nil, fmt.Errorf("tmdb: invalid media type for search: %q", mediaType)
 	}
@@ -268,6 +278,46 @@ func normalizeTVPage(resp paginatedResponse[mediaTVResponse]) *MediaPage {
 			Popularity:   item.Popularity,
 			VoteAverage:  item.VoteAverage,
 		})
+	}
+	return page
+}
+
+func normalizeMultiSearchPage(resp paginatedResponse[mediaMultiSearchResponse]) *MediaPage {
+	page := &MediaPage{
+		Page:         resp.Page,
+		TotalPages:   resp.TotalPages,
+		TotalResults: resp.TotalResults,
+		Results:      make([]MediaResult, 0, len(resp.Results)),
+	}
+	for _, item := range resp.Results {
+		switch item.MediaType {
+		case "movie":
+			page.Results = append(page.Results, MediaResult{
+				ID:           item.ID,
+				MediaType:    "movie",
+				Title:        item.Title,
+				Overview:     item.Overview,
+				PosterPath:   item.PosterPath,
+				BackdropPath: item.BackdropPath,
+				ReleaseDate:  item.ReleaseDate,
+				Year:         releaseYear(item.ReleaseDate),
+				Popularity:   item.Popularity,
+				VoteAverage:  item.VoteAverage,
+			})
+		case "tv":
+			page.Results = append(page.Results, MediaResult{
+				ID:           item.ID,
+				MediaType:    "series",
+				Title:        item.Name,
+				Overview:     item.Overview,
+				PosterPath:   item.PosterPath,
+				BackdropPath: item.BackdropPath,
+				ReleaseDate:  item.FirstAirDate,
+				Year:         releaseYear(item.FirstAirDate),
+				Popularity:   item.Popularity,
+				VoteAverage:  item.VoteAverage,
+			})
+		}
 	}
 	return page
 }

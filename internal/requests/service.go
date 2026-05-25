@@ -91,7 +91,7 @@ func (s *Service) Search(ctx context.Context, viewer Viewer, query string, media
 	if s == nil || s.store == nil || s.tmdb == nil {
 		return nil, fmt.Errorf("request service is not configured")
 	}
-	mediaType, err := normalizeMediaType(mediaType)
+	mediaType, err := normalizeSearchMediaType(mediaType)
 	if err != nil {
 		return nil, err
 	}
@@ -1093,6 +1093,19 @@ func (s *Service) applyStoredIntegrationCredentials(ctx context.Context, integra
 
 func normalizeMediaType(mediaType MediaType) (MediaType, error) {
 	switch MediaType(strings.ToLower(strings.TrimSpace(string(mediaType)))) {
+	case MediaTypeMovie:
+		return MediaTypeMovie, nil
+	case MediaTypeSeries, "tv":
+		return MediaTypeSeries, nil
+	default:
+		return "", ErrInvalidMediaType
+	}
+}
+
+func normalizeSearchMediaType(mediaType MediaType) (MediaType, error) {
+	switch MediaType(strings.ToLower(strings.TrimSpace(string(mediaType)))) {
+	case "", MediaTypeAll:
+		return MediaTypeAll, nil
 	case MediaTypeMovie:
 		return MediaTypeMovie, nil
 	case MediaTypeSeries, "tv":

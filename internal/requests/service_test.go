@@ -293,6 +293,57 @@ func TestSearchEnrichmentShowsOwnRequestID(t *testing.T) {
 	}
 }
 
+func TestSearchWithoutMediaTypeSearchesMoviesAndSeries(t *testing.T) {
+	store := newFakeStore()
+	store.settings.RequestsEnabled = true
+	store.active[MediaTypeSeries][1399] = &Request{
+		ID:                "req-series",
+		MediaType:         MediaTypeSeries,
+		TMDBID:            1399,
+		Status:            StatusQueued,
+		Outcome:           OutcomeActive,
+		RequestedByUserID: 1,
+	}
+	tmdbClient := &fakeTMDBClient{page: &tmdb.MediaPage{
+		Page:         1,
+		TotalPages:   1,
+		TotalResults: 2,
+		Results: []tmdb.MediaResult{
+			{
+				ID:        550,
+				MediaType: "movie",
+				Title:     "Fight Club",
+			},
+			{
+				ID:        1399,
+				MediaType: "series",
+				Title:     "Fight Club: The Series",
+			},
+		},
+	}}
+	service := newTestServiceWithTMDB(store, tmdbClient)
+
+	result, err := service.Search(context.Background(), testViewer(1), "fight", "", 1)
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if tmdbClient.searchMediaType != "all" {
+		t.Fatalf("search media type = %q, want all", tmdbClient.searchMediaType)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("results = %d, want 2", len(result.Results))
+	}
+	if result.Results[0].MediaType != MediaTypeMovie {
+		t.Fatalf("results[0].MediaType = %q, want movie", result.Results[0].MediaType)
+	}
+	if result.Results[1].MediaType != MediaTypeSeries {
+		t.Fatalf("results[1].MediaType = %q, want series", result.Results[1].MediaType)
+	}
+	if result.Results[1].Request.RequestID != "req-series" {
+		t.Fatalf("series request id = %q, want req-series", result.Results[1].Request.RequestID)
+	}
+}
+
 func TestReconcileRequestsCompletesFromCatalogPresence(t *testing.T) {
 	store := newFakeStore()
 	store.candidates = []*Request{{
@@ -696,14 +747,16 @@ func (f *fakePresence) LookupTMDB(_ context.Context, mediaType MediaType, ids []
 }
 
 type fakeTMDBClient struct {
-	page         *tmdb.MediaPage
-	externalIDs  *tmdb.ExternalIDs
-	detail       *tmdb.MediaDetail
-	discoverPage *tmdb.MediaPage
-	discoverErr  error
+	page            *tmdb.MediaPage
+	externalIDs     *tmdb.ExternalIDs
+	detail          *tmdb.MediaDetail
+	discoverPage    *tmdb.MediaPage
+	discoverErr     error
+	searchMediaType string
 }
 
-func (f *fakeTMDBClient) SearchMedia(context.Context, string, string, int) (*tmdb.MediaPage, error) {
+func (f *fakeTMDBClient) SearchMedia(_ context.Context, mediaType, _ string, _ int) (*tmdb.MediaPage, error) {
+	f.searchMediaType = mediaType
 	return f.page, nil
 }
 

@@ -1384,6 +1384,7 @@ export interface ImportUserCollectionResponse {
 
 // Media Requests
 export type RequestMediaType = "movie" | "series";
+export type RequestSearchMediaType = RequestMediaType | "all";
 export type MediaRequestStatus = "pending" | "approved" | "queued" | "downloading" | "completed";
 export type MediaRequestOutcome = "active" | "declined" | "cancelled" | "failed";
 export type RequestAvailability = "missing" | "available";
