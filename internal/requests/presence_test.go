@@ -82,3 +82,10 @@ func TestCatalogPresenceKeepsLookupTMDBCompatibility(t *testing.T) {
 		t.Fatalf("lookup candidates = %+v, want tmdb candidate", lookup.got)
 	}
 }
+
+func TestNewCatalogPresenceIgnoresNilBackfiller(t *testing.T) {
+	presence := NewCatalogPresence(nil, nil)
+	if presence.tmdbBackfill != nil {
+		t.Fatalf("tmdbBackfill = %#v, want nil", presence.tmdbBackfill)
+	}
+}

@@ -40,7 +40,7 @@ type CatalogPresence struct {
 
 func NewCatalogPresence(items *catalog.ItemRepository, providerIDs ...*catalog.ProviderIDRepository) *CatalogPresence {
 	var backfill tmdbBackfiller
-	if len(providerIDs) > 0 {
+	if len(providerIDs) > 0 && providerIDs[0] != nil {
 		backfill = providerIDs[0]
 	}
 	return &CatalogPresence{items: items, tmdbBackfill: backfill}
