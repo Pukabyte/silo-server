@@ -637,12 +637,9 @@ func TestGetCollectionRejectsNonPositiveID(t *testing.T) {
 
 func TestGetExternalIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/movie/123" {
+		if r.URL.Path != "/movie/123/external_ids" {
 			http.NotFound(w, r)
 			return
-		}
-		if got := r.URL.Query().Get("append_to_response"); got != "external_ids" {
-			t.Fatalf("append_to_response = %q, want external_ids", got)
 		}
 		if got := r.URL.Query().Get("api_key"); got != "test-key" {
 			t.Fatalf("api_key query = %q, want test-key", got)
@@ -650,10 +647,8 @@ func TestGetExternalIDs(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"external_ids": {
-				"imdb_id": "tt0133093",
-				"tvdb_id": 12345
-			}
+			"imdb_id": "tt0133093",
+			"tvdb_id": 12345
 		}`))
 	}))
 	defer server.Close()

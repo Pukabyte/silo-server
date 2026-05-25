@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -885,11 +886,9 @@ func normalizeCast(cast []castEntry) []MediaCastMember {
 	}
 	sorted := make([]castEntry, len(cast))
 	copy(sorted, cast)
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j].Order < sorted[j-1].Order; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
-	}
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Order < sorted[j].Order
+	})
 	const maxCast = 24
 	if len(sorted) > maxCast {
 		sorted = sorted[:maxCast]
@@ -972,20 +971,23 @@ func pickTVRating(cr *contentRatingsResponse) string {
 }
 
 // GetExternalIDs fetches external IDs for a TMDB movie or TV entry.
+// Uses the dedicated external_ids endpoint instead of append_to_response on
+// the full detail, which would return a 100+ KB payload to extract a handful
+// of identifiers.
 func (c *Client) GetExternalIDs(ctx context.Context, mediaType string, id int) (*ExternalIDs, error) {
 	var path string
 	switch mediaType {
 	case "movie":
-		path = fmt.Sprintf("/movie/%d?append_to_response=external_ids", id)
+		path = fmt.Sprintf("/movie/%d/external_ids", id)
 	case "tv":
-		path = fmt.Sprintf("/tv/%d?append_to_response=external_ids", id)
+		path = fmt.Sprintf("/tv/%d/external_ids", id)
 	default:
 		return nil, fmt.Errorf("tmdb: invalid media type: %q", mediaType)
 	}
 
-	var resp externalIDsResponse
+	var resp ExternalIDs
 	if err := c.doGet(ctx, path, &resp); err != nil {
 		return nil, err
 	}
-	return resp.ExternalIDs, nil
+	return &resp, nil
 }

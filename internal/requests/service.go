@@ -1236,7 +1236,7 @@ func normalizeIntegration(integration Integration) (Integration, error) {
 	if integration.QualityProfileID != nil && *integration.QualityProfileID <= 0 {
 		return Integration{}, fmt.Errorf("%w: quality_profile_id must be positive", ErrInvalidInput)
 	}
-	filteredTags := integration.Tags[:0]
+	filteredTags := make([]int, 0, len(integration.Tags))
 	for _, tag := range integration.Tags {
 		if tag > 0 {
 			filteredTags = append(filteredTags, tag)

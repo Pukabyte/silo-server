@@ -265,7 +265,7 @@ func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
-	viewer, ok := requestViewer(w, r, false)
+	viewer, ok := requestViewer(w, r, true)
 	if !ok {
 		return
 	}

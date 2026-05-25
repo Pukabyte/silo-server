@@ -37,6 +37,11 @@ type CollectionResult struct {
 
 // MediaResult is a normalized TMDB movie or TV result for request search and
 // discovery surfaces. MediaType is Silo-facing: "movie" or "series".
+//
+// PosterPath and BackdropPath are raw TMDB path fragments (e.g. "/abc.jpg").
+// Callers must compose the full URL by prepending the TMDB image base
+// (https://image.tmdb.org/t/p/{size}); the values are not browser-loadable
+// on their own.
 type MediaResult struct {
 	ID           int
 	MediaType    string
@@ -155,10 +160,6 @@ type mediaMultiSearchResponse struct {
 	FirstAirDate string  `json:"first_air_date"`
 	Popularity   float64 `json:"popularity"`
 	VoteAverage  float64 `json:"vote_average"`
-}
-
-type externalIDsResponse struct {
-	ExternalIDs *ExternalIDs `json:"external_ids"`
 }
 
 type apiError struct {
