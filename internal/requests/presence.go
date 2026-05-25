@@ -39,11 +39,15 @@ type CatalogPresence struct {
 }
 
 func NewCatalogPresence(items *catalog.ItemRepository, providerIDs ...*catalog.ProviderIDRepository) *CatalogPresence {
+	var itemLookup presenceItemLookup
+	if items != nil {
+		itemLookup = items
+	}
 	var backfill tmdbBackfiller
 	if len(providerIDs) > 0 && providerIDs[0] != nil {
 		backfill = providerIDs[0]
 	}
-	return &CatalogPresence{items: items, tmdbBackfill: backfill}
+	return &CatalogPresence{items: itemLookup, tmdbBackfill: backfill}
 }
 
 func (p *CatalogPresence) Lookup(ctx context.Context, mediaType MediaType, candidates []PresenceCandidate) (map[int]PresenceMatch, error) {

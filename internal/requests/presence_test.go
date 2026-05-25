@@ -83,8 +83,11 @@ func TestCatalogPresenceKeepsLookupTMDBCompatibility(t *testing.T) {
 	}
 }
 
-func TestNewCatalogPresenceIgnoresNilBackfiller(t *testing.T) {
+func TestNewCatalogPresenceIgnoresNilRepositories(t *testing.T) {
 	presence := NewCatalogPresence(nil, nil)
+	if presence.items != nil {
+		t.Fatalf("items = %#v, want nil", presence.items)
+	}
 	if presence.tmdbBackfill != nil {
 		t.Fatalf("tmdbBackfill = %#v, want nil", presence.tmdbBackfill)
 	}
