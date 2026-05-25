@@ -51,7 +51,7 @@ check_pattern() {
 check_pattern \
 	"T3 worktree path or generated worktree id" \
 	"(${t3_worktree_dir}|/Users/[^[:space:]]*/${t3_worktree_dir}/|${t3_worktree_id_prefix}[0-9a-f]{8})" \
-	.
+	docs/superpowers/specs docs/superpowers/plans
 
 check_pattern \
 	"absolute local filesystem path in generated superpowers docs" \

@@ -58,6 +58,7 @@ Run before opening a merge request:
 
 - `cd web && pnpm run lint`
 - `cd web && pnpm run format:check`
+- `make verify-local-paths`
 
 For local services, start PostgreSQL and Redis with `docker compose up -d postgres redis`.
 

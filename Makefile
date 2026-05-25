@@ -49,6 +49,10 @@ verify-local-paths:
 
 # Install repo-local git hooks for this checkout/worktree.
 install-hooks:
+	@existing="$$(git config --local core.hooksPath 2>/dev/null || true)"; \
+	if [ -n "$$existing" ] && [ "$$existing" != ".githooks" ]; then \
+		echo "warning: overwriting existing local core.hooksPath ($$existing) with .githooks"; \
+	fi
 	git config core.hooksPath .githooks
 
 # Fetch and build the pinned Jellyfin Web bundle
