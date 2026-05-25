@@ -287,17 +287,32 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 			status = StatusApproved
 		}
 	}
-	req, err := s.store.CreateRequest(ctx, CreateRequestRecord{
+	record := CreateRequestRecord{
 		ID:        id,
 		Input:     normalized,
 		Status:    status,
 		Outcome:   OutcomeActive,
 		Requester: viewer,
 		Now:       s.now(),
-	})
+	}
+	if !policy.Unlimited {
+		record.Quota = &QuotaCheck{
+			UserID:      viewer.UserID,
+			WindowStart: policy.WindowStart,
+			MaxRequests: policy.MaxRequests,
+		}
+	}
+	req, err := s.store.CreateRequest(ctx, record)
 	if err != nil {
 		if errors.Is(err, ErrAlreadyRequested) {
 			return nil, ErrAlreadyRequested
+		}
+		if errors.Is(err, ErrQuotaExceeded) {
+			return nil, QuotaError{
+				Used:       policy.MaxRequests,
+				Limit:      policy.MaxRequests,
+				WindowDays: policy.WindowDays,
+			}
 		}
 		return nil, err
 	}
@@ -1250,9 +1265,17 @@ func normalizeSearchMediaType(mediaType MediaType) (MediaType, error) {
 	}
 }
 
+const (
+	defaultRequestListLimit = 50
+	maxRequestListLimit     = 100
+)
+
 func normalizeListFilter(filter ListFilter) ListFilter {
-	if filter.Limit <= 0 || filter.Limit > 100 {
-		filter.Limit = 50
+	if filter.Limit <= 0 {
+		filter.Limit = defaultRequestListLimit
+	}
+	if filter.Limit > maxRequestListLimit {
+		filter.Limit = maxRequestListLimit
 	}
 	if filter.Offset < 0 {
 		filter.Offset = 0

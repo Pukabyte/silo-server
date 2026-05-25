@@ -182,12 +182,36 @@ func (r *Repository) ListActiveByTMDB(ctx context.Context, mediaType MediaType, 
 	return out, nil
 }
 
+// quotaLockNamespace partitions advisory locks so request-quota locks do not
+// collide with advisory locks held elsewhere in the database. The value is
+// arbitrary; what matters is that it is stable.
+const quotaLockNamespace = 139
+
 func (r *Repository) CreateRequest(ctx context.Context, input CreateRequestRecord) (*Request, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin create request transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	if input.Quota != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`,
+			quotaLockNamespace, input.Quota.UserID); err != nil {
+			return nil, fmt.Errorf("acquire request quota lock: %w", err)
+		}
+		var count int
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM media_requests
+			WHERE requested_by_user_id = $1
+			  AND created_at >= $2
+		`, input.Quota.UserID, input.Quota.WindowStart).Scan(&count); err != nil {
+			return nil, fmt.Errorf("count requests for quota: %w", err)
+		}
+		if count >= input.Quota.MaxRequests {
+			return nil, ErrQuotaExceeded
+		}
+	}
 
 	now := input.Now
 	if now.IsZero() {

@@ -32,4 +32,15 @@ type CreateRequestRecord struct {
 	Outcome   Outcome
 	Requester Viewer
 	Now       time.Time
+	// Quota, when non-nil, instructs the store to atomically verify the
+	// requester is below their per-user limit before inserting. The check
+	// runs inside the same transaction as the insert with a per-user
+	// advisory lock so concurrent submissions cannot both exceed the limit.
+	Quota *QuotaCheck
+}
+
+type QuotaCheck struct {
+	UserID      int
+	WindowStart time.Time
+	MaxRequests int
 }
