@@ -191,6 +191,26 @@ func TestItemRepo_GetByExternalIDs_NilSliceStillBindsArg(t *testing.T) {
 	_ = args
 }
 
+func TestLookupExternalIDsSQLChecksProviderTableAndDirectColumns(t *testing.T) {
+	sql := lookupExternalIDsSQL()
+
+	for _, want := range []string{
+		"FROM requested r",
+		"JOIN media_item_provider_ids mip",
+		"mip.provider = r.provider",
+		"mip.provider_id = r.provider_id",
+		"COALESCE(mi.tmdb_id, '') = r.provider_id",
+		"COALESCE(mi.tvdb_id, '') = r.provider_id",
+		"COALESCE(mi.imdb_id, '') = r.provider_id",
+		"JOIN media_folders mf ON mf.id = mil.media_folder_id",
+		"mf.enabled = true",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("lookupExternalIDsSQL missing %q:\n%s", want, sql)
+		}
+	}
+}
+
 // TestItemRepo_Search_UsesWindowCount asserts that buildSearchSQL emits a
 // single-pass paged SELECT that includes COUNT(*) OVER () so Search no longer
 // needs a separate count query before the data fetch (audit 2026-05-01 §3.11).
