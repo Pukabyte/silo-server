@@ -137,13 +137,22 @@ func (s *Service) Discover(ctx context.Context, viewer Viewer, section string, p
 }
 
 func (s *Service) DiscoverAll(ctx context.Context, viewer Viewer) ([]DiscoverySection, error) {
-	sections := make([]DiscoverySection, 0, len(discoverySectionOrder))
-	for _, key := range discoverySectionOrder {
-		section, err := s.Discover(ctx, viewer, key, 1)
-		if err != nil {
-			return nil, err
-		}
-		sections = append(sections, *section)
+	sections := make([]DiscoverySection, len(discoverySectionOrder))
+	group, gctx := errgroup.WithContext(ctx)
+	group.SetLimit(externalIDHydrationConcurrency)
+	for i, key := range discoverySectionOrder {
+		i, key := i, key
+		group.Go(func() error {
+			section, err := s.Discover(gctx, viewer, key, 1)
+			if err != nil {
+				return err
+			}
+			sections[i] = *section
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
 	}
 	return sections, nil
 }
