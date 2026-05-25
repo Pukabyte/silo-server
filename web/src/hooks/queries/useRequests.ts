@@ -43,8 +43,8 @@ function buildListQuery(params: RequestListParams = {}) {
   const query = new URLSearchParams();
   if (params.status && params.status !== "all") query.set("status", params.status);
   if (params.outcome && params.outcome !== "all") query.set("outcome", params.outcome);
-  if (params.limit) query.set("limit", String(params.limit));
-  if (params.offset) query.set("offset", String(params.offset));
+  if (params.limit != null && params.limit > 0) query.set("limit", String(params.limit));
+  if (params.offset != null && params.offset > 0) query.set("offset", String(params.offset));
   const encoded = query.toString();
   return encoded ? `?${encoded}` : "";
 }

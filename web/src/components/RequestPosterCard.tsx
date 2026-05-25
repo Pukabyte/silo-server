@@ -209,7 +209,7 @@ function PosterFrame({
       {poster ? (
         <img
           src={poster}
-          alt=""
+          alt={title ? `${title} poster` : "Poster"}
           loading="lazy"
           className={cn(
             "h-full w-full object-cover transition-[transform,filter] duration-300 group-hover/req-card:scale-[1.04]",

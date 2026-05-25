@@ -15,6 +15,14 @@ import type {
 } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -134,14 +142,22 @@ function RequestQueueTab() {
   const approve = useApproveMediaRequest();
   const decline = useDeclineMediaRequest();
   const retry = useRetryMediaRequest();
+  const [declineTarget, setDeclineTarget] = useState<MediaRequest | null>(null);
+  const [declineReason, setDeclineReason] = useState("");
   const usernamesByID = useMemo(() => {
     return new Map((users.data ?? []).map((user) => [user.id, user.username]));
   }, [users.data]);
 
   function handleDecline(request: MediaRequest) {
-    const reason = window.prompt(`Decline "${request.title}"?`, "");
-    if (reason === null) return;
-    decline.mutate({ id: request.id, reason });
+    setDeclineTarget(request);
+    setDeclineReason("");
+  }
+
+  function confirmDecline() {
+    if (!declineTarget) return;
+    decline.mutate({ id: declineTarget.id, reason: declineReason });
+    setDeclineTarget(null);
+    setDeclineReason("");
   }
 
   return (
@@ -229,6 +245,50 @@ function RequestQueueTab() {
           </Table>
         </div>
       )}
+      <Dialog
+        open={declineTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeclineTarget(null);
+            setDeclineReason("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Decline request</DialogTitle>
+            <DialogDescription>
+              {declineTarget
+                ? `"${declineTarget.title}" will be marked declined. Add an optional note for the requester.`
+                : null}
+            </DialogDescription>
+          </DialogHeader>
+          <Label htmlFor="decline-reason" className="text-sm">
+            Reason (optional)
+          </Label>
+          <textarea
+            id="decline-reason"
+            className="border-input bg-background text-foreground focus-visible:ring-ring min-h-[88px] w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+            value={declineReason}
+            onChange={(event) => setDeclineReason(event.target.value)}
+            placeholder="e.g. duplicate of an existing request"
+          />
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setDeclineTarget(null);
+                setDeclineReason("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={confirmDecline} disabled={decline.isPending}>
+              Decline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
