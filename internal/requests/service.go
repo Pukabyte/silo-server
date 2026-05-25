@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -373,7 +374,10 @@ func (s *Service) Decline(ctx context.Context, viewer Viewer, id, reason string)
 	if err != nil {
 		return nil, err
 	}
+	// Approved requests are pending submission by the reconciler; declining
+	// while submission may be in flight risks a divergent external state.
 	if req.Outcome != OutcomeActive ||
+		req.Status == StatusApproved ||
 		req.Status == StatusCompleted ||
 		req.Status == StatusQueued ||
 		req.Status == StatusDownloading ||
@@ -382,6 +386,34 @@ func (s *Service) Decline(ctx context.Context, viewer Viewer, id, reason string)
 		return nil, ErrInvalidState
 	}
 	return s.store.SetOutcome(ctx, req.ID, OutcomeDeclined, viewer, reason)
+}
+
+// Cancel withdraws a request that has not yet been submitted to a downstream
+// integration. Owners can cancel their own pending requests; admins can cancel
+// any active request that has not entered the fulfillment pipeline. Requests
+// already approved, queued, downloading, or completed cannot be cancelled —
+// callers should decline (admin) or wait for completion in those cases.
+func (s *Service) Cancel(ctx context.Context, viewer Viewer, id, reason string) (*Request, error) {
+	if viewer.UserID == 0 {
+		return nil, ErrForbidden
+	}
+	req, err := s.store.GetRequest(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return nil, err
+	}
+	if !viewer.IsAdmin && req.RequestedByUserID != viewer.UserID {
+		return nil, ErrForbidden
+	}
+	if req.Outcome != OutcomeActive ||
+		req.Status == StatusApproved ||
+		req.Status == StatusCompleted ||
+		req.Status == StatusQueued ||
+		req.Status == StatusDownloading ||
+		strings.TrimSpace(req.ExternalID) != "" ||
+		strings.TrimSpace(req.IntegrationKind) != "" {
+		return nil, ErrInvalidState
+	}
+	return s.store.SetOutcome(ctx, req.ID, OutcomeCancelled, viewer, reason)
 }
 
 func (s *Service) Retry(ctx context.Context, viewer Viewer, id string) (*Request, error) {
@@ -425,6 +457,14 @@ func (s *Service) ReconcileRequests(ctx context.Context, limit int) (ReconcileRe
 		}
 		change, err := s.reconcileRequest(ctx, *req)
 		if err != nil {
+			slog.WarnContext(ctx, "request reconcile failed",
+				"request_id", req.ID,
+				"media_type", req.MediaType,
+				"tmdb_id", req.TMDBID,
+				"status", req.Status,
+				"integration_kind", req.IntegrationKind,
+				"err", err,
+			)
 			result.Errors++
 			continue
 		}

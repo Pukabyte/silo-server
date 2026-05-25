@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ type RequestService interface {
 	GetRequest(ctx context.Context, viewer mediarequests.Viewer, id string) (*mediarequests.Request, error)
 	Approve(ctx context.Context, viewer mediarequests.Viewer, id string) (*mediarequests.Request, error)
 	Decline(ctx context.Context, viewer mediarequests.Viewer, id, reason string) (*mediarequests.Request, error)
+	Cancel(ctx context.Context, viewer mediarequests.Viewer, id, reason string) (*mediarequests.Request, error)
 	Retry(ctx context.Context, viewer mediarequests.Viewer, id string) (*mediarequests.Request, error)
 	GetSettings(ctx context.Context, viewer mediarequests.Viewer) (mediarequests.Settings, error)
 	UpdateSettings(ctx context.Context, viewer mediarequests.Viewer, settings mediarequests.Settings) (mediarequests.Settings, error)
@@ -318,6 +320,28 @@ func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	req, err := h.service.Decline(r.Context(), viewer, chi.URLParam(r, "id"), body.Reason)
+	if err != nil {
+		writeRequestServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, req)
+}
+
+func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
+	viewer, ok := requestViewer(w, r, false)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+			return
+		}
+	}
+	req, err := h.service.Cancel(r.Context(), viewer, chi.URLParam(r, "id"), body.Reason)
 	if err != nil {
 		writeRequestServiceError(w, err)
 		return

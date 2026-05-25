@@ -649,6 +649,106 @@ func TestReconcileRequestsMarksDownloadingFromAdapter(t *testing.T) {
 	}
 }
 
+func TestCancelOwnerCanWithdrawPendingRequest(t *testing.T) {
+	store := newFakeStore()
+	store.requests["req-mine"] = &Request{
+		ID:                "req-mine",
+		MediaType:         MediaTypeMovie,
+		TMDBID:            550,
+		Status:            StatusPending,
+		Outcome:           OutcomeActive,
+		RequestedByUserID: 7,
+	}
+	service := newTestService(store)
+
+	req, err := service.Cancel(context.Background(), Viewer{UserID: 7, ProfileID: "profile-1"}, "req-mine", "no longer want")
+	if err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	if req.Outcome != OutcomeCancelled {
+		t.Fatalf("Outcome = %q, want cancelled", req.Outcome)
+	}
+}
+
+func TestCancelNonOwnerForbidden(t *testing.T) {
+	store := newFakeStore()
+	store.requests["req-someone-else"] = &Request{
+		ID:                "req-someone-else",
+		MediaType:         MediaTypeMovie,
+		TMDBID:            550,
+		Status:            StatusPending,
+		Outcome:           OutcomeActive,
+		RequestedByUserID: 7,
+	}
+	service := newTestService(store)
+
+	_, err := service.Cancel(context.Background(), Viewer{UserID: 8, ProfileID: "profile-2"}, "req-someone-else", "")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestCancelAdminCanCancelAnyPending(t *testing.T) {
+	store := newFakeStore()
+	store.requests["req-other"] = &Request{
+		ID:                "req-other",
+		MediaType:         MediaTypeMovie,
+		TMDBID:            550,
+		Status:            StatusPending,
+		Outcome:           OutcomeActive,
+		RequestedByUserID: 7,
+	}
+	service := newTestService(store)
+
+	_, err := service.Cancel(context.Background(), Viewer{UserID: 99, IsAdmin: true}, "req-other", "house cleaning")
+	if err != nil {
+		t.Fatalf("admin Cancel returned error: %v", err)
+	}
+}
+
+func TestCancelRejectsRequestsAlreadyInFulfillment(t *testing.T) {
+	cases := []struct {
+		name string
+		req  Request
+	}{
+		{"approved", Request{Status: StatusApproved, Outcome: OutcomeActive}},
+		{"queued", Request{Status: StatusQueued, Outcome: OutcomeActive, IntegrationKind: "radarr", ExternalID: "42"}},
+		{"downloading", Request{Status: StatusDownloading, Outcome: OutcomeActive, IntegrationKind: "radarr", ExternalID: "42"}},
+		{"completed", Request{Status: StatusCompleted, Outcome: OutcomeActive}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			tc.req.ID = "req-x"
+			tc.req.RequestedByUserID = 7
+			store.requests["req-x"] = &tc.req
+			service := newTestService(store)
+
+			_, err := service.Cancel(context.Background(), Viewer{UserID: 7, ProfileID: "profile-1"}, "req-x", "")
+			if !errors.Is(err, ErrInvalidState) {
+				t.Fatalf("err = %v, want ErrInvalidState for %s", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestDeclineRejectsApprovedRequests(t *testing.T) {
+	store := newFakeStore()
+	store.requests["req-approved"] = &Request{
+		ID:        "req-approved",
+		MediaType: MediaTypeMovie,
+		TMDBID:    550,
+		Status:    StatusApproved,
+		Outcome:   OutcomeActive,
+	}
+	service := newTestService(store)
+
+	_, err := service.Decline(context.Background(), Viewer{UserID: 1, IsAdmin: true}, "req-approved", "changed mind")
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("err = %v, want ErrInvalidState (approved is owned by the reconciler)", err)
+	}
+}
+
 func TestDeclineRejectsQueuedRequests(t *testing.T) {
 	store := newFakeStore()
 	store.requests["req-1"] = &Request{

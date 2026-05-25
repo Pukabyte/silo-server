@@ -1407,6 +1407,7 @@ func NewRouter(deps Dependencies) chi.Router {
 						r.Post("/", requestHandler.HandleCreate)
 						r.Get("/mine", requestHandler.HandleListMine)
 						r.Get("/{id}", requestHandler.HandleGet)
+						r.Post("/{id}/cancel", requestHandler.HandleCancel)
 					})
 				}
 
@@ -1909,6 +1910,7 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Get("/requests", requestHandler.HandleAdminList)
 							r.Post("/requests/{id}/approve", requestHandler.HandleApprove)
 							r.Post("/requests/{id}/decline", requestHandler.HandleDecline)
+							r.Post("/requests/{id}/cancel", requestHandler.HandleCancel)
 							r.Post("/requests/{id}/retry", requestHandler.HandleRetry)
 							r.Get("/request-settings", requestHandler.HandleGetSettings)
 							r.Put("/request-settings", requestHandler.HandleUpdateSettings)
