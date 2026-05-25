@@ -107,6 +107,35 @@ func TestCreateRequestAutoApprovesWithConfiguredIntegration(t *testing.T) {
 	}
 }
 
+func TestCreateRequestAutoApprovalFallsBackToPendingOnIntegrationCheckError(t *testing.T) {
+	store := newFakeStore()
+	store.settings.RequestsEnabled = true
+	store.settings.GlobalAutoApprovalEnabled = true
+	qualityProfileID := 1
+	store.integrations = []Integration{{
+		Kind:             "radarr",
+		Enabled:          true,
+		BaseURL:          "http://radarr.local",
+		APIKeyRef:        "requests.radarr.api_key",
+		RootFolder:       "/movies",
+		QualityProfileID: &qualityProfileID,
+	}}
+	service := newTestService(store)
+	service.SetSecretResolver(fakeSecretError{err: errors.New("secret lookup unavailable")})
+
+	req, err := service.CreateRequest(context.Background(), testViewer(1), CreateRequestInput{
+		MediaType: MediaTypeMovie,
+		TMDBID:    550,
+		Title:     "Fight Club",
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest returned error: %v", err)
+	}
+	if req.Status != StatusPending {
+		t.Fatalf("status = %q, want pending", req.Status)
+	}
+}
+
 func TestCreateRequestAutoApprovalSubmitsMovie(t *testing.T) {
 	store := newFakeStore()
 	store.settings.RequestsEnabled = true
@@ -406,6 +435,66 @@ func TestReconcileRequestsMarksDownloadingFromAdapter(t *testing.T) {
 	}
 }
 
+func TestDeclineRejectsQueuedRequests(t *testing.T) {
+	store := newFakeStore()
+	store.requests["req-1"] = &Request{
+		ID:              "req-1",
+		MediaType:       MediaTypeMovie,
+		TMDBID:          550,
+		Status:          StatusQueued,
+		Outcome:         OutcomeActive,
+		IntegrationKind: "radarr",
+		ExternalID:      "42",
+	}
+	service := newTestService(store)
+
+	_, err := service.Decline(context.Background(), Viewer{UserID: 1, IsAdmin: true}, "req-1", "not needed")
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("err = %v, want ErrInvalidState", err)
+	}
+}
+
+func TestRetryResubmitsFailedQueuedRequest(t *testing.T) {
+	store := newFakeStore()
+	qualityProfileID := 1
+	store.integrations = []Integration{{
+		Kind:             "radarr",
+		Enabled:          true,
+		BaseURL:          "http://radarr.local",
+		APIKeyRef:        "radarr-key",
+		RootFolder:       "/movies",
+		QualityProfileID: &qualityProfileID,
+	}}
+	store.requests["req-1"] = &Request{
+		ID:        "req-1",
+		MediaType: MediaTypeMovie,
+		TMDBID:    550,
+		Status:    StatusQueued,
+		Outcome:   OutcomeFailed,
+	}
+	adapter := &fakeMovieAdapter{result: FulfillmentResult{
+		IntegrationKind: "radarr",
+		ExternalID:      "99",
+		ExternalStatus:  "queued",
+	}}
+	service := newTestService(store)
+	service.SetFulfillmentAdapters(adapter, nil)
+
+	req, err := service.Retry(context.Background(), Viewer{UserID: 1, IsAdmin: true}, "req-1")
+	if err != nil {
+		t.Fatalf("Retry returned error: %v", err)
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", adapter.calls)
+	}
+	if adapter.gotReq.Status != StatusApproved {
+		t.Fatalf("submitted status = %q, want approved", adapter.gotReq.Status)
+	}
+	if req.Status != StatusQueued || req.ExternalID != "99" {
+		t.Fatalf("request = %+v, want re-queued with external id 99", req)
+	}
+}
+
 func newTestService(store *fakeStore) *Service {
 	return newTestServiceWithTMDB(store, &fakeTMDBClient{})
 }
@@ -430,6 +519,7 @@ type fakeStore struct {
 	queued        []QueueUpdate
 	candidates    []*Request
 	statusUpdates []Status
+	requests      map[string]*Request
 }
 
 func newFakeStore() *fakeStore {
@@ -442,6 +532,7 @@ func newFakeStore() *fakeStore {
 			MediaTypeMovie:  {},
 			MediaTypeSeries: {},
 		},
+		requests: map[string]*Request{},
 	}
 }
 
@@ -496,8 +587,13 @@ func (f *fakeStore) CreateRequest(_ context.Context, input CreateRequestRecord) 
 	}, nil
 }
 
-func (f *fakeStore) GetRequest(context.Context, string) (*Request, error) {
-	return nil, ErrNotFound
+func (f *fakeStore) GetRequest(_ context.Context, id string) (*Request, error) {
+	req := f.requests[strings.TrimSpace(id)]
+	if req == nil {
+		return nil, ErrNotFound
+	}
+	copy := *req
+	return &copy, nil
 }
 
 func (f *fakeStore) ListReconciliationCandidates(context.Context, int) ([]*Request, error) {
@@ -514,31 +610,42 @@ func (f *fakeStore) ListAdmin(context.Context, ListFilter) ([]*Request, error) {
 
 func (f *fakeStore) SetStatus(_ context.Context, id string, status Status, _ Viewer) (*Request, error) {
 	f.statusUpdates = append(f.statusUpdates, status)
-	return &Request{
-		ID:      id,
-		Status:  status,
-		Outcome: OutcomeActive,
-	}, nil
+	req := f.requests[id]
+	if req == nil {
+		req = &Request{ID: id, Outcome: OutcomeActive}
+		f.requests[id] = req
+	}
+	req.Status = status
+	copy := *req
+	return &copy, nil
 }
 
 func (f *fakeStore) MarkQueued(_ context.Context, id string, update QueueUpdate, _ Viewer) (*Request, error) {
 	f.queued = append(f.queued, update)
-	return &Request{
-		ID:              id,
-		Status:          StatusQueued,
-		Outcome:         OutcomeActive,
-		IntegrationKind: update.IntegrationKind,
-		ExternalID:      update.ExternalID,
-		ExternalStatus:  update.ExternalStatus,
-	}, nil
+	req := f.requests[id]
+	if req == nil {
+		req = &Request{ID: id}
+		f.requests[id] = req
+	}
+	req.Status = StatusQueued
+	req.Outcome = OutcomeActive
+	req.IntegrationKind = update.IntegrationKind
+	req.ExternalID = update.ExternalID
+	req.ExternalStatus = update.ExternalStatus
+	copy := *req
+	return &copy, nil
 }
 
 func (f *fakeStore) SetOutcome(_ context.Context, id string, outcome Outcome, _ Viewer, message string) (*Request, error) {
-	return &Request{
-		ID:        id,
-		Outcome:   outcome,
-		LastError: message,
-	}, nil
+	req := f.requests[id]
+	if req == nil {
+		req = &Request{ID: id}
+		f.requests[id] = req
+	}
+	req.Outcome = outcome
+	req.LastError = message
+	copy := *req
+	return &copy, nil
 }
 
 func (f *fakeStore) ListIntegrations(context.Context) ([]Integration, error) {
@@ -547,6 +654,11 @@ func (f *fakeStore) ListIntegrations(context.Context) ([]Integration, error) {
 
 func (f *fakeStore) UpsertIntegration(context.Context, Integration) (*Integration, error) {
 	return nil, nil
+}
+
+func (f *fakeStore) UpsertIntegrations(_ context.Context, integrations []Integration) ([]Integration, error) {
+	f.integrations = append([]Integration(nil), integrations...)
+	return append([]Integration(nil), integrations...), nil
 }
 
 func TestListStudiosReturnsBundleWithDuotoneLogos(t *testing.T) {
@@ -811,4 +923,12 @@ type fakeSecrets map[string]string
 
 func (f fakeSecrets) Get(_ context.Context, key string) (string, error) {
 	return f[key], nil
+}
+
+type fakeSecretError struct {
+	err error
+}
+
+func (f fakeSecretError) Get(context.Context, string) (string, error) {
+	return "", f.err
 }

@@ -75,6 +75,35 @@ func TestSubmitSeriesAddsLookupResult(t *testing.T) {
 	}
 }
 
+func TestSubmitSeriesRejectsNonExactTVDBLookupMatch(t *testing.T) {
+	qualityProfileID := 3
+	tvdbID := 121361
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/series/lookup" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		w.Write([]byte(`[{"title":"Wrong Show","tvdbId":999,"titleSlug":"wrong-show"}]`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client())
+	_, err := client.SubmitSeries(context.Background(), mediarequests.Request{
+		MediaType: mediarequests.MediaTypeSeries,
+		TMDBID:    1399,
+		TVDBID:    &tvdbID,
+		Title:     "Game of Thrones",
+	}, mediarequests.Integration{
+		Kind:             "sonarr",
+		BaseURL:          server.URL,
+		APIKeyRef:        "sonarr-key",
+		RootFolder:       "/series",
+		QualityProfileID: &qualityProfileID,
+	})
+	if err == nil {
+		t.Fatal("expected error for non-exact TVDB lookup match")
+	}
+}
+
 func TestCheckSeriesStatusReadsQueueDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Api-Key"); got != "sonarr-key" {

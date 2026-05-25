@@ -136,10 +136,14 @@ func (c *Client) CheckMovieStatus(ctx context.Context, req mediarequests.Request
 func (c *Client) lookupMovie(ctx context.Context, client *arrclient.Client, tmdbID int) (movieResource, error) {
 	values := url.Values{}
 	values.Set("tmdbId", strconv.Itoa(tmdbID))
-	var movie movieResource
-	if err := client.GetJSON(ctx, "/api/v3/movie/lookup/tmdb?"+values.Encode(), &movie); err != nil {
+	var matches []movieResource
+	if err := client.GetJSON(ctx, "/api/v3/movie/lookup/tmdb?"+values.Encode(), &matches); err != nil {
 		return movieResource{}, err
 	}
+	if len(matches) == 0 {
+		return movieResource{}, fmt.Errorf("radarr: no movie found for tmdb_id %d", tmdbID)
+	}
+	movie := matches[0]
 	if movie.TMDBID == 0 {
 		movie.TMDBID = tmdbID
 	}

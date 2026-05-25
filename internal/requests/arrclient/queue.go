@@ -32,6 +32,7 @@ func EvaluateQueue(resources []QueueResource) QueueEvaluation {
 	}
 
 	queued := false
+	downloadingStatus := ""
 	for _, resource := range resources {
 		status := strings.TrimSpace(resource.Status)
 		state := strings.TrimSpace(resource.TrackedDownloadState)
@@ -45,9 +46,16 @@ func EvaluateQueue(resources []QueueResource) QueueEvaluation {
 			}
 		}
 		if status == "downloading" || state == "downloading" || state == "importPending" || state == "importing" {
-			return QueueEvaluation{State: QueueStateDownloading, ExternalStatus: externalStatus}
+			if downloadingStatus == "" {
+				downloadingStatus = externalStatus
+			}
+			queued = true
+			continue
 		}
 		queued = true
+	}
+	if downloadingStatus != "" {
+		return QueueEvaluation{State: QueueStateDownloading, ExternalStatus: downloadingStatus}
 	}
 	if queued {
 		return QueueEvaluation{State: QueueStateQueued, ExternalStatus: "queued"}

@@ -31,7 +31,7 @@ import {
   useMyMediaRequests,
   useRequestDiscovery,
   useRequestSearch,
-} from "@/hooks/queries/requests";
+} from "@/hooks/queries/useRequests";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { cn } from "@/lib/utils";
 import { formatRequestStatus, requestInputFromMediaResult } from "@/lib/mediaRequests";
@@ -131,6 +131,9 @@ export default function Requests() {
   const search = useRequestSearch(mediaType, submittedQuery, searchPage);
   const mine = useMyMediaRequests({ limit: 100 });
   const createRequest = useCreateMediaRequest();
+  const pendingRequestKey = createRequest.variables
+    ? mediaRequestKey(createRequest.variables.media_type, createRequest.variables.tmdb_id)
+    : undefined;
 
   const isSearching = submittedQuery.length > 0;
 
@@ -204,7 +207,7 @@ export default function Requests() {
               totalPages={search.data?.total_pages ?? 0}
               totalResults={search.data?.total_results ?? 0}
               results={search.data?.results ?? []}
-              pendingTMDBID={createRequest.variables?.tmdb_id}
+              pendingRequestKey={pendingRequestKey}
               isSubmitting={createRequest.isPending}
               onRequest={submitRequest}
             />
@@ -221,7 +224,7 @@ export default function Requests() {
                 <DiscoverySectionRow
                   key={section.key}
                   section={section}
-                  pendingTMDBID={createRequest.variables?.tmdb_id}
+                  pendingRequestKey={pendingRequestKey}
                   isSubmitting={createRequest.isPending}
                   onRequest={submitRequest}
                 />
@@ -448,12 +451,12 @@ function SearchBar({
 
 function DiscoverySectionRow({
   section,
-  pendingTMDBID,
+  pendingRequestKey,
   isSubmitting,
   onRequest,
 }: {
   section: RequestDiscoverySection;
-  pendingTMDBID?: number;
+  pendingRequestKey?: string;
   isSubmitting: boolean;
   onRequest: (item: RequestMediaResult) => void;
 }) {
@@ -471,7 +474,9 @@ function DiscoverySectionRow({
             key={`${item.media_type}-${item.tmdb_id}`}
             variant="discover"
             item={item}
-            isSubmitting={isSubmitting && pendingTMDBID === item.tmdb_id}
+            isSubmitting={
+              isSubmitting && pendingRequestKey === mediaRequestKey(item.media_type, item.tmdb_id)
+            }
             onRequest={() => onRequest(item)}
           />
         ))}
@@ -508,7 +513,7 @@ function SearchResultsView({
   totalPages,
   totalResults,
   results,
-  pendingTMDBID,
+  pendingRequestKey,
   isSubmitting,
   onRequest,
 }: {
@@ -521,14 +526,13 @@ function SearchResultsView({
   totalPages: number;
   totalResults: number;
   results: RequestMediaResult[];
-  pendingTMDBID?: number;
+  pendingRequestKey?: string;
   isSubmitting: boolean;
   onRequest: (item: RequestMediaResult) => void;
 }) {
   const typeLabel =
     mediaType === "series" ? "series" : mediaType === "movie" ? "movies" : "movies and series";
-  const filterLabel =
-    mediaType === "series" ? "Series" : mediaType === "movie" ? "Movies" : "All";
+  const filterLabel = mediaType === "series" ? "Series" : mediaType === "movie" ? "Movies" : "All";
   const shown = results.length;
   const showCount = !isLoading && !isError && shown > 0;
 
@@ -599,7 +603,10 @@ function SearchResultsView({
                 key={`${item.media_type}-${item.tmdb_id}`}
                 variant="discover"
                 item={item}
-                isSubmitting={isSubmitting && pendingTMDBID === item.tmdb_id}
+                isSubmitting={
+                  isSubmitting &&
+                  pendingRequestKey === mediaRequestKey(item.media_type, item.tmdb_id)
+                }
                 onRequest={() => onRequest(item)}
                 fluid
               />
@@ -751,6 +758,14 @@ function sectionEyebrow(key: string): string {
   return "Discover";
 }
 
+function mediaRequestKey(mediaType: RequestMediaResult["media_type"], tmdbID: number): string {
+  return `${mediaType}-${tmdbID}`;
+}
+
+function isIssueOutcome(outcome: MediaRequestOutcome): boolean {
+  return outcome === "declined" || outcome === "cancelled" || outcome === "failed";
+}
+
 function groupMineRequests(requests: MediaRequest[]) {
   const buckets: Record<MineBucketKey, MediaRequest[]> = {
     motion: [],
@@ -758,11 +773,7 @@ function groupMineRequests(requests: MediaRequest[]) {
     issues: [],
   };
   for (const request of requests) {
-    if (
-      request.outcome === "declined" ||
-      request.outcome === "cancelled" ||
-      request.outcome === "failed"
-    ) {
+    if (isIssueOutcome(request.outcome)) {
       buckets.issues.push(request);
     } else if (request.status === "completed") {
       buckets.completed.push(request);
@@ -779,11 +790,7 @@ function countMineStatuses(requests: MediaRequest[]) {
   let completed = 0;
   let issues = 0;
   for (const request of requests) {
-    if (
-      request.outcome === "declined" ||
-      request.outcome === "cancelled" ||
-      request.outcome === "failed"
-    ) {
+    if (isIssueOutcome(request.outcome)) {
       issues += 1;
     } else if (request.status === "completed") {
       completed += 1;

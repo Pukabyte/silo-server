@@ -478,6 +478,35 @@ func (r *Repository) ListIntegrations(ctx context.Context) ([]Integration, error
 }
 
 func (r *Repository) UpsertIntegration(ctx context.Context, integration Integration) (*Integration, error) {
+	out, err := r.upsertIntegration(ctx, r.pool, integration)
+	if err != nil {
+		return nil, fmt.Errorf("upsert request integration: %w", err)
+	}
+	return out, nil
+}
+
+func (r *Repository) UpsertIntegrations(ctx context.Context, integrations []Integration) ([]Integration, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin request integrations transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	out := make([]Integration, 0, len(integrations))
+	for _, integration := range integrations {
+		updated, err := r.upsertIntegration(ctx, tx, integration)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *updated)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit request integrations transaction: %w", err)
+	}
+	return out, nil
+}
+
+func (r *Repository) upsertIntegration(ctx context.Context, exec requestExecutor, integration Integration) (*Integration, error) {
 	if integration.Options == nil {
 		integration.Options = map[string]any{}
 	}
@@ -486,7 +515,7 @@ func (r *Repository) UpsertIntegration(ctx context.Context, integration Integrat
 		return nil, fmt.Errorf("marshal request integration options: %w", err)
 	}
 	tags := int32Slice(integration.Tags)
-	row := r.pool.QueryRow(ctx, `
+	row := exec.QueryRow(ctx, `
 		INSERT INTO request_integrations (
 			kind, enabled, base_url, api_key_ref, root_folder, quality_profile_id,
 			tags, options, updated_at
@@ -511,7 +540,7 @@ func (r *Repository) UpsertIntegration(ctx context.Context, integration Integrat
 		integration.QualityProfileID, tags, options)
 	out, err := scanIntegration(row)
 	if err != nil {
-		return nil, fmt.Errorf("upsert request integration: %w", err)
+		return nil, err
 	}
 	return &out, nil
 }
@@ -655,7 +684,9 @@ func scanIntegration(row integrationScanner) (Integration, error) {
 	}
 	integration.Tags = intsFromInt32(tags)
 	if len(optionsRaw) > 0 {
-		_ = json.Unmarshal(optionsRaw, &integration.Options)
+		if err := json.Unmarshal(optionsRaw, &integration.Options); err != nil {
+			return Integration{}, fmt.Errorf("unmarshal request integration options for %s: %w", integration.Kind, err)
+		}
 	}
 	if integration.Options == nil {
 		integration.Options = map[string]any{}

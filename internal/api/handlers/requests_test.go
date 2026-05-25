@@ -123,6 +123,10 @@ func (f *fakeRequestService) UpsertIntegration(context.Context, mediarequests.Vi
 	return nil, nil
 }
 
+func (f *fakeRequestService) UpsertIntegrations(context.Context, mediarequests.Viewer, []mediarequests.Integration) ([]mediarequests.Integration, error) {
+	return nil, nil
+}
+
 func (f *fakeRequestService) LoadIntegrationOptions(context.Context, mediarequests.Viewer, mediarequests.Integration) (*mediarequests.IntegrationOptions, error) {
 	return nil, nil
 }

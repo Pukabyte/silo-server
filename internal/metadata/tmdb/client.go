@@ -889,8 +889,12 @@ func normalizeCast(cast []castEntry) []MediaCastMember {
 	}
 	out := make([]MediaCastMember, 0, len(sorted))
 	for _, member := range sorted {
+		name := strings.TrimSpace(member.Name)
+		if name == "" {
+			continue
+		}
 		out = append(out, MediaCastMember{
-			Name:        strings.TrimSpace(member.Name),
+			Name:        name,
 			Character:   strings.TrimSpace(member.Character),
 			ProfilePath: member.ProfilePath,
 			Order:       member.Order,

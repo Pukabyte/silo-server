@@ -48,7 +48,7 @@ import {
   useUpdateRequestIntegrations,
   useUpdateRequestSettings,
   useUpdateRequestUserLimit,
-} from "@/hooks/queries/requests";
+} from "@/hooks/queries/useRequests";
 import {
   formatMediaType,
   formatRequestDate,
@@ -535,24 +535,28 @@ function IntegrationEditor({
     form.base_url.trim().length > 0 && Boolean(form.api_key_ref.trim() || form.has_api_key);
 
   async function handleLoadOptions() {
-    const loaded = await loadOptions.mutateAsync({
-      kind: form.kind,
-      body: {
-        base_url: form.base_url,
-        api_key_ref: form.api_key_ref.trim() || undefined,
-      },
-    });
-    setOptions(loaded);
+    try {
+      const loaded = await loadOptions.mutateAsync({
+        kind: form.kind,
+        body: {
+          base_url: form.base_url,
+          api_key_ref: form.api_key_ref.trim() || undefined,
+        },
+      });
+      setOptions(loaded);
 
-    const patch: Partial<IntegrationFormState> = {};
-    if (!form.root_folder && loaded.root_folders[0]?.path) {
-      patch.root_folder = loaded.root_folders[0].path;
-    }
-    if (!form.quality_profile_id && loaded.quality_profiles[0]?.id) {
-      patch.quality_profile_id = String(loaded.quality_profiles[0].id);
-    }
-    if (Object.keys(patch).length > 0) {
-      onChange(patch);
+      const patch: Partial<IntegrationFormState> = {};
+      if (!form.root_folder && loaded.root_folders[0]?.path) {
+        patch.root_folder = loaded.root_folders[0].path;
+      }
+      if (!form.quality_profile_id && loaded.quality_profiles[0]?.id) {
+        patch.quality_profile_id = String(loaded.quality_profiles[0].id);
+      }
+      if (Object.keys(patch).length > 0) {
+        onChange(patch);
+      }
+    } catch {
+      // Error toast is handled by useLoadRequestIntegrationOptions.onError.
     }
   }
 

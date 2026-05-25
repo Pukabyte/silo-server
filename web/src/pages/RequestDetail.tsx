@@ -7,11 +7,16 @@ import DetailHero from "@/pages/ItemDetail/DetailHero";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { RequestMediaCastMember, RequestMediaDetail, RequestMediaResult } from "@/api/types";
-import { useCreateMediaRequest, useRequestMediaDetail } from "@/hooks/queries/requests";
+import { useCreateMediaRequest, useRequestMediaDetail } from "@/hooks/queries/useRequests";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { cn } from "@/lib/utils";
 import { getInitials } from "@/lib/text";
-import { formatRequestReason, formatRequestStatus, tmdbImageURL } from "@/lib/mediaRequests";
+import {
+  formatRequestReason,
+  formatRequestStatus,
+  requestInputFromMediaResult,
+  tmdbImageURL,
+} from "@/lib/mediaRequests";
 
 export default function RequestDetail() {
   const navigate = useNavigate();
@@ -69,17 +74,7 @@ export default function RequestDetail() {
             isSubmitting={
               createRequest.isPending && createRequest.variables?.tmdb_id === item.tmdb_id
             }
-            onRequest={() =>
-              createRequest.mutate({
-                media_type: item.media_type,
-                tmdb_id: item.tmdb_id,
-                title: item.title,
-                year: item.year || undefined,
-                overview: item.overview || undefined,
-                poster_path: item.poster_path || undefined,
-                backdrop_path: item.backdrop_path || undefined,
-              })
-            }
+            onRequest={() => createRequest.mutate(requestInputFromMediaResult(item))}
             onBack={() => navigate(-1)}
           />
         }
@@ -98,17 +93,7 @@ export default function RequestDetail() {
             recommendations={item.recommendations}
             pendingTMDBID={createRequest.variables?.tmdb_id}
             isSubmitting={createRequest.isPending}
-            onRequest={(rec) =>
-              createRequest.mutate({
-                media_type: rec.media_type,
-                tmdb_id: rec.tmdb_id,
-                title: rec.title,
-                year: rec.year || undefined,
-                overview: rec.overview || undefined,
-                poster_path: rec.poster_path || undefined,
-                backdrop_path: rec.backdrop_path || undefined,
-              })
-            }
+            onRequest={(rec) => createRequest.mutate(requestInputFromMediaResult(rec))}
           />
         )}
       </div>

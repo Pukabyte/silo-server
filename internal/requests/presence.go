@@ -30,6 +30,9 @@ func (p *CatalogPresence) LookupTMDB(ctx context.Context, mediaType MediaType, t
 			ids = append(ids, strconv.Itoa(id))
 		}
 	}
+	if len(ids) == 0 {
+		return out, nil
+	}
 	internalType := string(mediaType)
 	rows, err := p.items.LookupTMDBIDs(ctx, internalType, ids)
 	if err != nil {

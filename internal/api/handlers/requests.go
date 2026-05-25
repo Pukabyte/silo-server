@@ -33,6 +33,7 @@ type RequestService interface {
 	UpsertUserLimit(ctx context.Context, viewer mediarequests.Viewer, limit mediarequests.UserLimit) (*mediarequests.UserLimit, error)
 	ListIntegrations(ctx context.Context, viewer mediarequests.Viewer) ([]mediarequests.Integration, error)
 	UpsertIntegration(ctx context.Context, viewer mediarequests.Viewer, integration mediarequests.Integration) (*mediarequests.Integration, error)
+	UpsertIntegrations(ctx context.Context, viewer mediarequests.Viewer, integrations []mediarequests.Integration) ([]mediarequests.Integration, error)
 	LoadIntegrationOptions(ctx context.Context, viewer mediarequests.Viewer, integration mediarequests.Integration) (*mediarequests.IntegrationOptions, error)
 
 	ListStudios(ctx context.Context, viewer mediarequests.Viewer) ([]mediarequests.DiscoverBrandCard, error)
@@ -311,7 +312,10 @@ func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) 
 		Reason string `json:"reason"`
 	}
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+			return
+		}
 	}
 	req, err := h.service.Decline(r.Context(), viewer, chi.URLParam(r, "id"), body.Reason)
 	if err != nil {
@@ -392,14 +396,10 @@ func (h *RequestsHandler) HandleUpdateIntegrations(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
-	updated := make([]mediarequests.Integration, 0, len(body.Integrations))
-	for _, integration := range body.Integrations {
-		result, err := h.service.UpsertIntegration(r.Context(), viewer, integration)
-		if err != nil {
-			writeRequestServiceError(w, err)
-			return
-		}
-		updated = append(updated, *result)
+	updated, err := h.service.UpsertIntegrations(r.Context(), viewer, body.Integrations)
+	if err != nil {
+		writeRequestServiceError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Integrations []requestIntegrationResponse `json:"integrations"`

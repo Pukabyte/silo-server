@@ -152,9 +152,6 @@ func (c *Client) lookupSeries(ctx context.Context, client *arrclient.Client, tvd
 			return match, nil
 		}
 	}
-	if len(matches) > 0 {
-		return matches[0], nil
-	}
 	return seriesResource{}, fmt.Errorf("sonarr: no series found for tvdb_id %d", tvdbID)
 }
 

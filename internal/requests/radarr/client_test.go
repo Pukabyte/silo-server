@@ -37,7 +37,7 @@ func TestSubmitMovieAddsLookupResult(t *testing.T) {
 			if got := r.URL.Query().Get("tmdbId"); got != "550" {
 				t.Fatalf("lookup tmdbId = %q, want 550", got)
 			}
-			w.Write([]byte(`{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}`))
+			w.Write([]byte(`[{"title":"Fight Club","tmdbId":550,"titleSlug":"fight-club"}]`))
 			return
 		}
 		t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())

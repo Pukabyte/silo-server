@@ -22,6 +22,7 @@ type Store interface {
 	SetOutcome(ctx context.Context, id string, outcome Outcome, actor Viewer, message string) (*Request, error)
 	ListIntegrations(ctx context.Context) ([]Integration, error)
 	UpsertIntegration(ctx context.Context, integration Integration) (*Integration, error)
+	UpsertIntegrations(ctx context.Context, integrations []Integration) ([]Integration, error)
 }
 
 type CreateRequestRecord struct {

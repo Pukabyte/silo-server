@@ -247,8 +247,6 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	if err != nil {
 		return nil, err
 	}
-	s.enrichExternalIDs(ctx, &normalized)
-
 	available, err := s.lookupAvailable(ctx, normalized.MediaType, []int{normalized.TMDBID})
 	if err != nil {
 		return nil, err
@@ -273,6 +271,8 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 		return nil, err
 	}
 
+	s.enrichExternalIDs(ctx, &normalized)
+
 	id, err := idgen.NextID()
 	if err != nil {
 		return nil, err
@@ -280,10 +280,7 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	status := StatusPending
 	if policy.AutoApprove {
 		configured, err := s.integrationConfigured(ctx, normalized.MediaType)
-		if err != nil {
-			return nil, err
-		}
-		if configured {
+		if err == nil && configured {
 			status = StatusApproved
 		}
 	}
@@ -358,7 +355,12 @@ func (s *Service) Decline(ctx context.Context, viewer Viewer, id, reason string)
 	if err != nil {
 		return nil, err
 	}
-	if req.Outcome != OutcomeActive || req.Status == StatusCompleted {
+	if req.Outcome != OutcomeActive ||
+		req.Status == StatusCompleted ||
+		req.Status == StatusQueued ||
+		req.Status == StatusDownloading ||
+		strings.TrimSpace(req.ExternalID) != "" ||
+		strings.TrimSpace(req.IntegrationKind) != "" {
 		return nil, ErrInvalidState
 	}
 	return s.store.SetOutcome(ctx, req.ID, OutcomeDeclined, viewer, reason)
@@ -379,8 +381,10 @@ func (s *Service) Retry(ctx context.Context, viewer Viewer, id string) (*Request
 	if err != nil {
 		return nil, err
 	}
-	if active.Status == StatusApproved {
-		return s.submitApprovedRequest(ctx, *active, viewer)
+	if active.Status == StatusApproved || active.Status == StatusQueued || active.Status == StatusDownloading {
+		retry := *active
+		retry.Status = StatusApproved
+		return s.submitApprovedRequest(ctx, retry, viewer)
 	}
 	return active, nil
 }
@@ -487,6 +491,21 @@ func (s *Service) UpsertIntegration(ctx context.Context, viewer Viewer, integrat
 		return nil, err
 	}
 	return s.store.UpsertIntegration(ctx, normalized)
+}
+
+func (s *Service) UpsertIntegrations(ctx context.Context, viewer Viewer, integrations []Integration) ([]Integration, error) {
+	if !viewer.IsAdmin {
+		return nil, ErrForbidden
+	}
+	normalized := make([]Integration, 0, len(integrations))
+	for _, integration := range integrations {
+		item, err := normalizeIntegration(integration)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, item)
+	}
+	return s.store.UpsertIntegrations(ctx, normalized)
 }
 
 func (s *Service) LoadIntegrationOptions(ctx context.Context, viewer Viewer, integration Integration) (*IntegrationOptions, error) {

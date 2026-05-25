@@ -12,7 +12,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
-import { useCreateMediaRequest, useRequestBrowse } from "@/hooks/queries/requests";
+import { useCreateMediaRequest, useRequestBrowse } from "@/hooks/queries/useRequests";
 import { requestInputFromMediaResult } from "@/lib/mediaRequests";
 import type {
   DiscoverBrowseKind,
@@ -38,13 +38,17 @@ export default function RequestBrowse({ kind }: RequestBrowseProps) {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const sort = normalizeSort(searchParams.get("sort"));
-  const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
+  const rawPage = Number(searchParams.get("page") ?? "1");
+  const page = Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1;
   const mediaTypeFromQuery = normalizeMediaType(searchParams.get("media_type"));
   const mediaType: RequestMediaType | undefined =
     kind === "studio" ? "movie" : kind === "network" ? "series" : (mediaTypeFromQuery ?? "movie");
 
   const browse = useRequestBrowse({ kind, slug, mediaType, sort, page });
   const createRequest = useCreateMediaRequest();
+  const pendingRequestKey = createRequest.variables
+    ? mediaRequestKey(createRequest.variables.media_type, createRequest.variables.tmdb_id)
+    : undefined;
 
   const title = browse.data?.display_name ?? humanizeSlug(slug);
   useDocumentTitle(title ? `${title} - Requests` : "Requests");
@@ -161,7 +165,8 @@ export default function RequestBrowse({ kind }: RequestBrowseProps) {
                 item={item}
                 onRequest={() => submitRequest(item)}
                 isSubmitting={
-                  createRequest.isPending && createRequest.variables?.tmdb_id === item.tmdb_id
+                  createRequest.isPending &&
+                  pendingRequestKey === mediaRequestKey(item.media_type, item.tmdb_id)
                 }
               />
             ))}
@@ -244,6 +249,10 @@ function normalizeSort(value: string | null): BrowseSort {
 
 function normalizeMediaType(value: string | null): RequestMediaType | undefined {
   return value === "movie" || value === "series" ? value : undefined;
+}
+
+function mediaRequestKey(mediaType: RequestMediaType, tmdbID: number): string {
+  return `${mediaType}-${tmdbID}`;
 }
 
 function humanizeSlug(slug: string) {

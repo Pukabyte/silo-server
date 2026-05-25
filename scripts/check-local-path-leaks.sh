@@ -54,8 +54,8 @@ check_pattern \
 	.
 
 check_pattern \
-	"absolute /Users path in generated superpowers docs" \
-	'/Users/[^[:space:]]+' \
+	"absolute local filesystem path in generated superpowers docs" \
+	'(/Users/[^[:space:]]+|/home/[^[:space:]]+|/Volumes/[^[:space:]]+|/var/folders/[^[:space:]]+|/private/tmp/[^[:space:]]+|[A-Za-z]:\\Users\\[^[:space:]]+)' \
 	docs/superpowers/specs docs/superpowers/plans
 
 if [[ "$failed" -ne 0 ]]; then

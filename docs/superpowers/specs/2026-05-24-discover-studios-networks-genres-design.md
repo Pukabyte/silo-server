@@ -5,10 +5,10 @@ Status: design approved 2026-05-24
 ## Dependency
 
 This feature extends the media request system spec'd in
-`docs/superpowers/specs/request-system.md` (currently on branch
-`t3code/df875f01`). It must land on top of that branch — it depends on
-`internal/requests/`, `internal/metadata/tmdb/`, `Requests.tsx`, and the
-existing `/api/v1/requests/discover/*` route prefix.
+`docs/superpowers/specs/request-system.md`. It depends on `internal/requests/`,
+`internal/metadata/tmdb/`, `Requests.tsx`, and the existing
+`/api/v1/requests/discover/*` route prefix. Commands assume the repository root
+is the cwd.
 
 ## Goal
 
@@ -170,7 +170,7 @@ discover routes.
 
 ### List endpoints
 
-```
+```http
 GET /api/v1/requests/discover/studios
 GET /api/v1/requests/discover/networks
 GET /api/v1/requests/discover/genres
@@ -182,7 +182,7 @@ the response is not failed wholesale.
 
 ### Browse endpoints
 
-```
+```http
 GET /api/v1/requests/discover/browse/studio/{slug}?page=1&sort=popularity
 GET /api/v1/requests/discover/browse/network/{slug}?page=1&sort=popularity
 GET /api/v1/requests/discover/browse/genre/{slug}?media_type=movie&page=1&sort=popularity
@@ -247,7 +247,7 @@ remains.
 
 ### New routes (`web/src/App.tsx`)
 
-```
+```text
 /requests/browse/studio/:slug
 /requests/browse/network/:slug
 /requests/browse/genre/:slug
@@ -276,7 +276,7 @@ Empty/error states:
 - Empty results → "Nothing matched — try a different sort."
 - Network error → existing toast pattern from the request hooks.
 
-### New hooks (`web/src/hooks/queries/requests.ts`)
+### New hooks (`web/src/hooks/queries/useRequests.ts`)
 
 - `useDiscoverStudios()`, `useDiscoverNetworks()`, `useDiscoverGenres()` —
   24h stale time matching the server cache.

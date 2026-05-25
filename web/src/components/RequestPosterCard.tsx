@@ -64,57 +64,61 @@ function DiscoverCard({
         : null;
 
   return (
-    <Link
-      to={`/requests/${item.media_type}/${item.tmdb_id}`}
+    <div
       className={cn(
-        "group/req-card relative block focus:outline-none focus-visible:outline-none",
+        "group/req-card relative block focus-within:outline-none",
         fluid ? "w-full" : POSTER_WIDTH,
       )}
     >
-      <PosterFrame
-        poster={poster}
-        title={item.title}
-        mediaType={item.media_type}
-        dim={!requestable}
-        accent={ribbon?.kind ?? null}
+      <Link
+        to={`/requests/${item.media_type}/${item.tmdb_id}`}
+        className="block focus:outline-none focus-visible:outline-none"
       >
-        {ribbon && <StatusRibbon status={ribbon.kind} label={ribbon.label} />}
+        <PosterFrame
+          poster={poster}
+          title={item.title}
+          mediaType={item.media_type}
+          dim={!requestable}
+          accent={ribbon?.kind ?? null}
+        >
+          {ribbon && <StatusRibbon status={ribbon.kind} label={ribbon.label} />}
+        </PosterFrame>
 
-        {requestable && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 flex translate-y-2 items-end justify-center bg-gradient-to-t from-black/85 via-black/45 to-transparent p-3 opacity-0 transition-all duration-200 ease-out group-focus-within/req-card:translate-y-0 group-focus-within/req-card:opacity-100 group-hover/req-card:translate-y-0 group-hover/req-card:opacity-100">
-            <button
-              type="button"
-              disabled={isSubmitting}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onRequest();
-              }}
-              className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-[12px] font-semibold tracking-wide text-black shadow-lg shadow-black/40 transition-all hover:scale-[1.03] active:scale-[0.97] disabled:opacity-70"
-            >
-              {isSubmitting ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Sending
-                </>
-              ) : (
-                <>
-                  <Plus className="h-3.5 w-3.5 stroke-[2.5]" />
-                  Request
-                </>
-              )}
-            </button>
-          </div>
-        )}
-      </PosterFrame>
+        <CardMeta
+          title={item.title}
+          year={item.year}
+          rating={item.vote_average}
+          mediaType={item.media_type}
+        />
+      </Link>
 
-      <CardMeta
-        title={item.title}
-        year={item.year}
-        rating={item.vote_average}
-        mediaType={item.media_type}
-      />
-    </Link>
+      {requestable && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex aspect-[2/3] translate-y-2 items-end justify-center bg-gradient-to-t from-black/85 via-black/45 to-transparent p-3 opacity-0 transition-all duration-200 ease-out group-focus-within/req-card:translate-y-0 group-focus-within/req-card:opacity-100 group-hover/req-card:translate-y-0 group-hover/req-card:opacity-100">
+          <button
+            type="button"
+            disabled={isSubmitting}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onRequest();
+            }}
+            className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-[12px] font-semibold tracking-wide text-black shadow-lg shadow-black/40 transition-all hover:scale-[1.03] active:scale-[0.97] disabled:opacity-70"
+          >
+            {isSubmitting ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Sending
+              </>
+            ) : (
+              <>
+                <Plus className="h-3.5 w-3.5 stroke-[2.5]" />
+                Request
+              </>
+            )}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
