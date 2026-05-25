@@ -247,11 +247,13 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	if err != nil {
 		return nil, err
 	}
-	available, err := s.lookupAvailable(ctx, normalized.MediaType, []int{normalized.TMDBID})
+	s.enrichExternalIDs(ctx, &normalized)
+
+	matches, err := s.lookupPresence(ctx, normalized.MediaType, []PresenceCandidate{createPresenceCandidate(normalized)})
 	if err != nil {
 		return nil, err
 	}
-	if available[normalized.TMDBID] {
+	if matches[normalized.TMDBID].Available {
 		return nil, ErrAlreadyAvailable
 	}
 
@@ -270,8 +272,6 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	if err := validateCreatePolicy(policy); err != nil {
 		return nil, err
 	}
-
-	s.enrichExternalIDs(ctx, &normalized)
 
 	id, err := idgen.NextID()
 	if err != nil {
@@ -672,11 +672,86 @@ func (s *Service) enrichPage(ctx context.Context, viewer Viewer, raw *tmdb.Media
 	return out, nil
 }
 
-func (s *Service) lookupAvailable(ctx context.Context, mediaType MediaType, ids []int) (map[int]bool, error) {
+func (s *Service) lookupPresence(ctx context.Context, mediaType MediaType, candidates []PresenceCandidate) (map[int]PresenceMatch, error) {
 	if s.presence == nil {
-		return map[int]bool{}, nil
+		return map[int]PresenceMatch{}, nil
 	}
-	return s.presence.LookupTMDB(ctx, mediaType, ids)
+	return s.presence.Lookup(ctx, mediaType, candidates)
+}
+
+func availabilityBoolMap(matches map[int]PresenceMatch) map[int]bool {
+	out := map[int]bool{}
+	for id, match := range matches {
+		out[id] = match.Available
+	}
+	return out
+}
+
+func requestPresenceCandidate(req Request) PresenceCandidate {
+	candidate := PresenceCandidate{
+		TMDBID: req.TMDBID,
+		IMDbID: strings.TrimSpace(req.IMDbID),
+	}
+	if req.TVDBID != nil && *req.TVDBID > 0 {
+		tvdbID := *req.TVDBID
+		candidate.TVDBID = &tvdbID
+	}
+	return candidate
+}
+
+func createPresenceCandidate(input CreateRequestInput) PresenceCandidate {
+	candidate := PresenceCandidate{
+		TMDBID: input.TMDBID,
+		IMDbID: strings.TrimSpace(input.IMDbID),
+	}
+	if input.TVDBID != nil && *input.TVDBID > 0 {
+		tvdbID := *input.TVDBID
+		candidate.TVDBID = &tvdbID
+	}
+	return candidate
+}
+
+func (s *Service) hydratePresenceCandidate(ctx context.Context, mediaType MediaType, candidate PresenceCandidate) PresenceCandidate {
+	if candidate.TMDBID <= 0 {
+		return candidate
+	}
+	client, ok := s.tmdb.(TMDBExternalIDClient)
+	if !ok {
+		return candidate
+	}
+	externalIDs, err := client.GetExternalIDs(ctx, tmdbMediaType(mediaType), candidate.TMDBID)
+	if err != nil || externalIDs == nil {
+		return candidate
+	}
+	if candidate.IMDbID == "" {
+		candidate.IMDbID = strings.TrimSpace(externalIDs.IMDbID)
+	}
+	if candidate.TVDBID == nil && externalIDs.TVDBID > 0 {
+		tvdbID := externalIDs.TVDBID
+		candidate.TVDBID = &tvdbID
+	}
+	return candidate
+}
+
+func tmdbMediaType(mediaType MediaType) string {
+	if mediaType == MediaTypeSeries {
+		return "tv"
+	}
+	return "movie"
+}
+
+func (s *Service) lookupAvailable(ctx context.Context, mediaType MediaType, ids []int) (map[int]bool, error) {
+	candidates := make([]PresenceCandidate, 0, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			candidates = append(candidates, s.hydratePresenceCandidate(ctx, mediaType, PresenceCandidate{TMDBID: id}))
+		}
+	}
+	matches, err := s.lookupPresence(ctx, mediaType, candidates)
+	if err != nil {
+		return nil, err
+	}
+	return availabilityBoolMap(matches), nil
 }
 
 func (s *Service) enrichExternalIDs(ctx context.Context, input *CreateRequestInput) {
@@ -687,11 +762,7 @@ func (s *Service) enrichExternalIDs(ctx context.Context, input *CreateRequestInp
 	if !ok {
 		return
 	}
-	mediaType := "movie"
-	if input.MediaType == MediaTypeSeries {
-		mediaType = "tv"
-	}
-	externalIDs, err := client.GetExternalIDs(ctx, mediaType, input.TMDBID)
+	externalIDs, err := client.GetExternalIDs(ctx, tmdbMediaType(input.MediaType), input.TMDBID)
 	if err != nil || externalIDs == nil {
 		return
 	}
@@ -864,11 +935,11 @@ func (s *Service) reconcileRequest(ctx context.Context, req Request) (reconcileC
 }
 
 func (s *Service) requestAvailable(ctx context.Context, req Request) (bool, error) {
-	available, err := s.lookupAvailable(ctx, req.MediaType, []int{req.TMDBID})
+	matches, err := s.lookupPresence(ctx, req.MediaType, []PresenceCandidate{requestPresenceCandidate(req)})
 	if err != nil {
 		return false, err
 	}
-	return available[req.TMDBID], nil
+	return matches[req.TMDBID].Available, nil
 }
 
 func (s *Service) checkFulfillmentStatus(ctx context.Context, req Request) (FulfillmentStatus, error) {

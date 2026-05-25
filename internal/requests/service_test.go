@@ -229,6 +229,28 @@ func TestCreateRequestEnrichesSeriesTVDBID(t *testing.T) {
 	}
 }
 
+func TestCreateRequestBlocksWhenHydratedTVDBIDIsAvailable(t *testing.T) {
+	store := newFakeStore()
+	store.settings.RequestsEnabled = true
+	tmdbClient := &fakeTMDBClient{externalIDs: &tmdb.ExternalIDs{TVDBID: 420105, IMDbID: "tt18076310"}}
+	presence := &fakePresence{byTVDB: map[MediaType]map[int]int{
+		MediaTypeSeries: {420105: 201992},
+	}}
+	service := NewService(store, tmdbClient, presence)
+
+	_, err := service.CreateRequest(context.Background(), testViewer(1), CreateRequestInput{
+		MediaType: MediaTypeSeries,
+		TMDBID:    201992,
+		Title:     "The Rookie: Feds",
+	})
+	if !errors.Is(err, ErrAlreadyAvailable) {
+		t.Fatalf("err = %v, want ErrAlreadyAvailable", err)
+	}
+	if len(store.created) != 0 {
+		t.Fatalf("created requests = %d, want 0", len(store.created))
+	}
+}
+
 func TestCreateRequestNoActiveDuplicateCreatesRequest(t *testing.T) {
 	store := newFakeStore()
 	store.settings.RequestsEnabled = true
@@ -247,6 +269,43 @@ func TestCreateRequestNoActiveDuplicateCreatesRequest(t *testing.T) {
 	}
 	if len(store.created) != 1 {
 		t.Fatalf("created requests = %d, want 1", len(store.created))
+	}
+}
+
+func TestSearchMarksSeriesAvailableByHydratedTVDBID(t *testing.T) {
+	store := newFakeStore()
+	store.settings.RequestsEnabled = true
+	tmdbClient := &fakeTMDBClient{
+		page: &tmdb.MediaPage{
+			Page: 1,
+			Results: []tmdb.MediaResult{{
+				ID:        201992,
+				MediaType: "series",
+				Title:     "The Rookie: Feds",
+				Year:      2022,
+			}},
+		},
+		externalIDsByID: map[int]*tmdb.ExternalIDs{
+			201992: {TVDBID: 420105, IMDbID: "tt18076310"},
+		},
+	}
+	presence := &fakePresence{byTVDB: map[MediaType]map[int]int{
+		MediaTypeSeries: {420105: 201992},
+	}}
+	service := NewService(store, tmdbClient, presence)
+
+	page, err := service.Search(context.Background(), testViewer(1), "rookie feds", MediaTypeSeries, 1)
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if got := page.Results[0].Availability; got != AvailabilityAvailable {
+		t.Fatalf("availability = %q, want available", got)
+	}
+	if page.Results[0].Request.Reason != "already_available" {
+		t.Fatalf("request reason = %q, want already_available", page.Results[0].Request.Reason)
+	}
+	if len(presence.got) != 1 || presence.got[0].TVDBID == nil || *presence.got[0].TVDBID != 420105 {
+		t.Fatalf("presence candidates = %+v, want hydrated tvdb id", presence.got)
 	}
 }
 
@@ -392,6 +451,31 @@ func TestReconcileRequestsCompletesFromCatalogPresence(t *testing.T) {
 	}
 	if result.Completed != 1 || len(store.statusUpdates) != 1 || store.statusUpdates[0] != StatusCompleted {
 		t.Fatalf("result = %+v statusUpdates = %+v, want one completed update", result, store.statusUpdates)
+	}
+}
+
+func TestReconcileRequestsCompletesByStoredTVDBID(t *testing.T) {
+	store := newFakeStore()
+	tvdbID := 420105
+	store.candidates = []*Request{{
+		ID:        "req-1",
+		MediaType: MediaTypeSeries,
+		TMDBID:    201992,
+		TVDBID:    &tvdbID,
+		Status:    StatusQueued,
+		Outcome:   OutcomeActive,
+	}}
+	presence := &fakePresence{byTVDB: map[MediaType]map[int]int{
+		MediaTypeSeries: {420105: 201992},
+	}}
+	service := NewService(store, &fakeTMDBClient{}, presence)
+
+	result, err := service.ReconcileRequests(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ReconcileRequests returned error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Fatalf("completed = %d, want 1", result.Completed)
 	}
 }
 
@@ -843,15 +927,35 @@ func TestBrowseGenreMovieReturnsResults(t *testing.T) {
 
 type fakePresence struct {
 	available map[MediaType]map[int]bool
+	byTVDB    map[MediaType]map[int]int
+	got       []PresenceCandidate
+}
+
+func (f *fakePresence) Lookup(_ context.Context, mediaType MediaType, candidates []PresenceCandidate) (map[int]PresenceMatch, error) {
+	out := map[int]PresenceMatch{}
+	f.got = append(f.got, candidates...)
+	for _, candidate := range candidates {
+		if f.available != nil && f.available[mediaType][candidate.TMDBID] {
+			out[candidate.TMDBID] = PresenceMatch{Available: true, MatchedProvider: "tmdb"}
+			continue
+		}
+		if candidate.TVDBID != nil && f.byTVDB != nil {
+			if tmdbID, ok := f.byTVDB[mediaType][*candidate.TVDBID]; ok && tmdbID == candidate.TMDBID {
+				out[candidate.TMDBID] = PresenceMatch{Available: true, MatchedProvider: "tvdb"}
+			}
+		}
+	}
+	return out, nil
 }
 
 func (f *fakePresence) LookupTMDB(_ context.Context, mediaType MediaType, ids []int) (map[int]bool, error) {
 	out := map[int]bool{}
-	if f.available == nil {
-		return out, nil
-	}
 	for _, id := range ids {
-		if f.available[mediaType][id] {
+		matches, err := f.Lookup(context.Background(), mediaType, []PresenceCandidate{{TMDBID: id}})
+		if err != nil {
+			return nil, err
+		}
+		if matches[id].Available {
 			out[id] = true
 		}
 	}
@@ -861,6 +965,8 @@ func (f *fakePresence) LookupTMDB(_ context.Context, mediaType MediaType, ids []
 type fakeTMDBClient struct {
 	page            *tmdb.MediaPage
 	externalIDs     *tmdb.ExternalIDs
+	externalIDsByID map[int]*tmdb.ExternalIDs
+	externalIDCalls []int
 	detail          *tmdb.MediaDetail
 	discoverPage    *tmdb.MediaPage
 	discoverErr     error
@@ -886,7 +992,11 @@ func (f *fakeTMDBClient) DiscoverPage(context.Context, string, tmdb.DiscoverPara
 	return &tmdb.MediaPage{Results: []tmdb.MediaResult{}}, nil
 }
 
-func (f *fakeTMDBClient) GetExternalIDs(context.Context, string, int) (*tmdb.ExternalIDs, error) {
+func (f *fakeTMDBClient) GetExternalIDs(_ context.Context, _ string, id int) (*tmdb.ExternalIDs, error) {
+	f.externalIDCalls = append(f.externalIDCalls, id)
+	if f.externalIDsByID != nil {
+		return f.externalIDsByID[id], nil
+	}
 	return f.externalIDs, nil
 }
 

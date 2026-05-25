@@ -22,7 +22,7 @@ type PresenceMatch struct {
 }
 
 type PresenceResolver interface {
-	LookupTMDB(ctx context.Context, mediaType MediaType, tmdbIDs []int) (map[int]bool, error)
+	Lookup(ctx context.Context, mediaType MediaType, candidates []PresenceCandidate) (map[int]PresenceMatch, error)
 }
 
 type presenceItemLookup interface {
