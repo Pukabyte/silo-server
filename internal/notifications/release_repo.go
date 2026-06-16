@@ -75,7 +75,7 @@ func (r *ReleaseRepository) RecordAvailabilityForLibrary(ctx context.Context, li
 		JOIN episodes e ON e.content_id = el.episode_id
 		WHERE el.media_folder_id = $1
 		  AND ` + availabilityOrdinalGuard + `
-		ON CONFLICT (library_id, episode_id) DO NOTHING` + availabilityReturning
+		ON CONFLICT DO NOTHING` + availabilityReturning
 	return r.recordAvailability(ctx, libraryID, emitEvents, query, []any{libraryID})
 }
 
@@ -106,7 +106,7 @@ func (r *ReleaseRepository) RecordAvailabilityForPaths(ctx context.Context, libr
 		  AND mf.episode_id IS NOT NULL
 		  AND ` + availabilityOrdinalGuard + `
 		  AND (` + strings.Join(scopeConds, " OR ") + `)
-		ON CONFLICT (library_id, episode_id) DO NOTHING` + availabilityReturning
+		ON CONFLICT DO NOTHING` + availabilityReturning
 	return r.recordAvailability(ctx, libraryID, emitEvents, query, args)
 }
 
@@ -262,9 +262,16 @@ func (r *ReleaseRepository) recordMovieAvailability(ctx context.Context, library
 	return len(inserted), events, nil
 }
 
+// EpisodeDedupeKey composes the release_events dedupe key for an episode.
+// It keys the logical episode in a library, not the catalog row id, so a
+// series re-ID or episode-row re-mint that remaps the episode id does not
+// become a new release.
+func EpisodeDedupeKey(libraryID int, seriesID string, episodeKey int) string {
+	return fmt.Sprintf("episode:%d:%s:%d", libraryID, seriesID, episodeKey)
+}
+
 // MovieDedupeKey composes the release_events dedupe key for a movie. The
-// "movie:" prefix keeps the keyspace disjoint from episode keys
-// ("{library_id}:{episode_id}").
+// "movie:" prefix keeps the keyspace disjoint from episode keys.
 func MovieDedupeKey(libraryID int, itemID string) string {
 	return fmt.Sprintf("movie:%d:%s", libraryID, itemID)
 }
@@ -349,7 +356,7 @@ func insertReleaseEvents(ctx context.Context, tx pgx.Tx, libraryID int, rows []n
 				row.EpisodeNumber,
 				row.EpisodeKey,
 				row.AvailableAt,
-				fmt.Sprintf("%d:%s", libraryID, row.EpisodeID),
+				EpisodeDedupeKey(libraryID, row.SeriesID, row.EpisodeKey),
 			)
 		}
 		sb.WriteString(" ON CONFLICT (dedupe_key) DO NOTHING")

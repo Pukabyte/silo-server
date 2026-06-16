@@ -289,6 +289,36 @@ func TestParseAudiobookFolderMultiFile(t *testing.T) {
 	}
 }
 
+func TestApplyAudiobookFilesystemFallbacksUsesFolderNameWhenTagsAreBlank(t *testing.T) {
+	book := &parsedAudiobook{}
+	book.applyFilesystemFallbacks(
+		"/library/Calibre_Audio_Library/Dean Koontz/Devoted (2799)",
+		[]string{"/library/Calibre_Audio_Library/Dean Koontz/Devoted (2799)/Devoted - Dean Koontz.mp3"},
+	)
+	if book.Title != "Devoted" {
+		t.Fatalf("Title = %q, want Devoted", book.Title)
+	}
+}
+
+func TestApplyAudiobookFilesystemFallbacksPreservesTaggedTitle(t *testing.T) {
+	book := &parsedAudiobook{Title: "Tagged Title"}
+	book.applyFilesystemFallbacks(
+		"/library/Bad.Folder.Name-AudioBook",
+		[]string{"/library/Bad.Folder.Name-AudioBook/part01.mp3"},
+	)
+	if book.Title != "Tagged Title" {
+		t.Fatalf("Title = %q, want tagged title", book.Title)
+	}
+}
+
+func TestCleanAudiobookFilesystemTitleRemovesCommonReleaseNoise(t *testing.T) {
+	got := cleanAudiobookFilesystemTitle("Dan.Brown-Robert.Langdon.Bk.2-The.DaVinci.Code.NMR-AudioBook")
+	want := "Dan Brown-Robert Langdon Bk 2-The DaVinci Code"
+	if got != want {
+		t.Fatalf("cleanAudiobookFilesystemTitle = %q, want %q", got, want)
+	}
+}
+
 func TestAudiobookIdentityConfidenceReflectsMetadataCompleteness(t *testing.T) {
 	book := &parsedAudiobook{Title: "Tagged Book", Author: "Author", Narrator: "Narrator", Year: 2024}
 	file := parsedAudiobookFile{Chapters: []ChapterInfo{{Title: "One", StartSeconds: 0, EndSeconds: 10}}}
@@ -579,6 +609,14 @@ func TestAudiobookLookupPathsIncludeCaseFoldedVariants(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("paths[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestApplyBookToMediaItemDoesNotBlankAllNarratorSuffixTitle(t *testing.T) {
+	item := &models.MediaItem{}
+	applyBookToMediaItem(item, &parsedAudiobook{Title: "Read by Jim Dale"})
+	if item.Title != "Read by Jim Dale" {
+		t.Fatalf("Title = %q, want raw title fallback", item.Title)
 	}
 }
 

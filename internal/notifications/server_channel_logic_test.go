@@ -436,11 +436,13 @@ func TestServerChannelHeadersSigned(t *testing.T) {
 	}
 }
 
-func TestMovieDedupeKeyDisjointFromEpisodeKeys(t *testing.T) {
-	// Episode dedupe keys are "{library_id}:{episode_id}". A movie key must
-	// never collide even if a movie item id equals an episode id.
-	if MovieDedupeKey(3, "abc") == "3:abc" {
-		t.Fatal("movie dedupe keys must live in their own keyspace")
+func TestReleaseDedupeKeysAreDisjoint(t *testing.T) {
+	episodeKey := EpisodeDedupeKey(3, "series-abc", EpisodeKey(2, 4))
+	if episodeKey != "episode:3:series-abc:2000004" {
+		t.Fatalf("unexpected episode dedupe key %q", episodeKey)
+	}
+	if MovieDedupeKey(3, "series-abc:2000004") == episodeKey {
+		t.Fatal("movie and episode dedupe keys must live in separate keyspaces")
 	}
 	if got := MovieDedupeKey(3, "abc"); got != "movie:3:abc" {
 		t.Fatalf("unexpected movie dedupe key %q", got)

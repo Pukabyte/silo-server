@@ -153,11 +153,17 @@ func (s *Scanner) audiobookFolderShouldSkip(ctx context.Context, folder *models.
 	if contentID == "" {
 		return "", false, nil
 	}
-	statuses, err := s.itemRepo.GetStatusByIDs(ctx, []string{contentID})
+	items, err := s.itemRepo.GetByIDs(ctx, []string{contentID})
 	if err != nil {
-		return "", false, fmt.Errorf("get item status: %w", err)
+		return "", false, fmt.Errorf("get item for skip check: %w", err)
 	}
-	if strings.EqualFold(strings.TrimSpace(statuses[contentID]), "unmatched") {
+	if len(items) == 0 || items[0] == nil {
+		return "", false, nil
+	}
+	if strings.TrimSpace(items[0].Title) == "" {
+		return "", false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(items[0].Status), "unmatched") {
 		return "", false, nil
 	}
 	return contentID, true, nil
@@ -652,6 +658,9 @@ func (s *Scanner) upsertAudiobookMediaItem(ctx context.Context, folderID int, fo
 		return "", fmt.Errorf("find audiobook by root path: %w", err)
 	}
 	if existingID != "" {
+		if err := s.updateExistingAudiobookMediaItem(ctx, existingID, book); err != nil {
+			return "", err
+		}
 		return existingID, nil
 	}
 
@@ -689,6 +698,22 @@ func (s *Scanner) upsertAudiobookMediaItem(ctx context.Context, folderID int, fo
 	}
 
 	return createAudiobookMediaItem(ctx, s.itemRepo, book, cleanTitle)
+}
+
+func (s *Scanner) updateExistingAudiobookMediaItem(ctx context.Context, contentID string, book *parsedAudiobook) error {
+	items, err := s.itemRepo.GetByIDs(ctx, []string{contentID})
+	if err != nil {
+		return fmt.Errorf("get audiobook media item %s: %w", contentID, err)
+	}
+	if len(items) == 0 || items[0] == nil {
+		return fmt.Errorf("audiobook media item %s not found", contentID)
+	}
+	item := items[0]
+	applyBookToMediaItem(item, book)
+	if item.SortTitle == "" {
+		item.SortTitle = titleutil.DeriveDefaultSortTitle(item.Title)
+	}
+	return s.itemRepo.Upsert(ctx, item)
 }
 
 func resolveAudiobookMediaItem(
@@ -870,8 +895,11 @@ func audiobookLookupPaths(files []parsedAudiobookFile) []string {
 // in OriginalTitle when it differs so the original is never lost.
 func applyBookToMediaItem(item *models.MediaItem, book *parsedAudiobook) {
 	item.Type = "audiobook"
-	raw := book.Title
+	raw := strings.TrimSpace(book.Title)
 	cleaned := stripNarratorSuffix(raw)
+	if cleaned == "" {
+		cleaned = raw
+	}
 	item.Title = cleaned
 	if cleaned != raw && item.OriginalTitle == "" {
 		item.OriginalTitle = raw

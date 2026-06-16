@@ -34,6 +34,9 @@ var unabridgedTokenRE = regexp.MustCompile(`(?i)\s*\(unabridged\)\s*`)
 var collapseSpacesRE = regexp.MustCompile(`\s+`)
 var audiobookDedupeTitleTokenRE = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
+var audiobookFilesystemTitleNumericIDRE = regexp.MustCompile(`\s*[\[(]\d+[\])]\s*$`)
+var audiobookFilesystemTitleNoiseSuffixRE = regexp.MustCompile(`(?i)(?:\s*[-_. ]+\s*)?(?:nmr|audio\s*book|audiobook|unabridged|abridged)\s*$`)
+
 // stripNarratorSuffix removes the narrator-suffix noise and "(unabridged)"
 // markers from a title. Returns the input unchanged when no match.
 // Kept in sync with the SQL `regexp_replace` used by migration 146 so
@@ -136,6 +139,7 @@ func parseAudiobookFolder(ctx context.Context, ffprobePath string, folderPath st
 			return nil, fmt.Errorf("probe audiobook file %s: %w", audioFiles[0], err)
 		}
 		book.populateFromTags(probed.FormatTags)
+		book.applyFilesystemFallbacks(folderPath, audioFiles)
 		book.Files = []parsedAudiobookFile{{
 			Path:          audioFiles[0],
 			Chapters:      probed.Chapters,
@@ -156,6 +160,7 @@ func parseAudiobookFolder(ctx context.Context, ffprobePath string, folderPath st
 		return nil, fmt.Errorf("probe first audiobook file %s: %w", audioFiles[0], err)
 	}
 	book.populateFromTags(probedFirst.FormatTags)
+	book.applyFilesystemFallbacks(folderPath, audioFiles)
 
 	book.Files = make([]parsedAudiobookFile, 0, len(audioFiles))
 	for i, path := range audioFiles {
@@ -242,6 +247,42 @@ func parseGenresFromTags(tags map[string]string) []string {
 		}
 	}
 	return out
+}
+
+func (b *parsedAudiobook) applyFilesystemFallbacks(folderPath string, audioFiles []string) {
+	if b == nil || strings.TrimSpace(b.Title) != "" {
+		return
+	}
+	b.Title = deriveAudiobookTitleFromFilesystem(folderPath, audioFiles)
+}
+
+func deriveAudiobookTitleFromFilesystem(folderPath string, audioFiles []string) string {
+	candidates := []string{filepath.Base(folderPath)}
+	if len(audioFiles) == 1 {
+		file := audioFiles[0]
+		candidates = append(candidates, strings.TrimSuffix(filepath.Base(file), filepath.Ext(file)))
+	}
+	for _, candidate := range candidates {
+		if cleaned := cleanAudiobookFilesystemTitle(candidate); cleaned != "" {
+			return cleaned
+		}
+	}
+	return ""
+}
+
+func cleanAudiobookFilesystemTitle(title string) string {
+	cleaned := strings.TrimSpace(title)
+	cleaned = audiobookFilesystemTitleNumericIDRE.ReplaceAllString(cleaned, "")
+	cleaned = strings.NewReplacer(".", " ", "_", " ").Replace(cleaned)
+	for {
+		next := audiobookFilesystemTitleNoiseSuffixRE.ReplaceAllString(cleaned, "")
+		if next == cleaned {
+			break
+		}
+		cleaned = next
+	}
+	cleaned = collapseSpacesRE.ReplaceAllString(cleaned, " ")
+	return strings.Trim(cleaned, " -_.")
 }
 
 // parseTagYear extracts a 4-digit year (e.g. 1900-9999) from a tag value

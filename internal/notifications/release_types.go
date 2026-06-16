@@ -41,8 +41,10 @@ func normalizeEventKind(kind string) string {
 }
 
 // ReleaseEvent is one logical "content became newly available in a library"
-// event. dedupe_key is "{library_id}:{episode_id}" for episodes and
-// "movie:{library_id}:{item_id}" for movies.
+// event. New episode events use dedupe_key
+// "episode:{library_id}:{series_id}:{episode_key}" so episode-id churn from a
+// series re-ID or episode-row re-mint does not create another release. Movie
+// events use "movie:{library_id}:{item_id}".
 type ReleaseEvent struct {
 	ID        string
 	LibraryID int
