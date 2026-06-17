@@ -40,7 +40,7 @@ import {
 } from "@/hooks/queries/mediaSurfaceRefresh";
 import { bumpHomeRefreshSignal } from "@/pages/homeSurfaceRefresh";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router";
 
 interface JobWaiter {
@@ -479,13 +479,13 @@ export function RealtimeEventsProvider({ children }: { children: ReactNode }) {
     waiter.reject(new Error(job.error_message || job.message || "Job failed"));
   };
 
-  function currentChannels() {
+  const currentChannels = useCallback(() => {
     return Array.from(channelRefsRef.current.entries())
       .filter(([, count]) => count > 0)
       .map(([channel]) => channel);
-  }
+  }, []);
 
-  function sendSubscribe() {
+  const sendSubscribe = useCallback(() => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN || !helloReceivedRef.current) {
       return;
@@ -498,7 +498,44 @@ export function RealtimeEventsProvider({ children }: { children: ReactNode }) {
         channels: currentChannels(),
       }),
     );
-  }
+  }, [currentChannels]);
+
+  const subscribeChannel = useCallback(
+    (channel: EventChannel, handlers?: EventChannelHandlers) => {
+      channelRefsRef.current.set(channel, (channelRefsRef.current.get(channel) ?? 0) + 1);
+
+      let handlerID: number | null = null;
+      if (handlers) {
+        handlerID = nextHandlerIDRef.current++;
+        const channelHandlers =
+          channelHandlersRef.current.get(channel) ?? new Map<number, EventChannelHandlers>();
+        channelHandlers.set(handlerID, handlers);
+        channelHandlersRef.current.set(channel, channelHandlers);
+      }
+
+      sendSubscribe();
+
+      return () => {
+        const current = channelRefsRef.current.get(channel) ?? 0;
+        if (current <= 1) {
+          channelRefsRef.current.delete(channel);
+        } else {
+          channelRefsRef.current.set(channel, current - 1);
+        }
+
+        if (handlerID != null) {
+          const channelHandlers = channelHandlersRef.current.get(channel);
+          channelHandlers?.delete(handlerID);
+          if (channelHandlers && channelHandlers.size === 0) {
+            channelHandlersRef.current.delete(channel);
+          }
+        }
+
+        sendSubscribe();
+      };
+    },
+    [sendSubscribe],
+  );
 
   function dispatchChannelMessage(
     channel: EventChannel,
@@ -874,83 +911,62 @@ export function RealtimeEventsProvider({ children }: { children: ReactNode }) {
     // profile?.id is a dependency on purpose: the websocket binds to the
     // active profile via the handshake ticket, so a profile switch must
     // reconnect (and resubscribe) under the new identity.
-  }, [authenticatedUserID, profile?.id, pageActivity.canApplyRealtimeUpdates, queryClient]);
+  }, [
+    authenticatedUserID,
+    profile?.id,
+    pageActivity.canApplyRealtimeUpdates,
+    queryClient,
+    sendSubscribe,
+  ]);
+
+  const awaitAdminJob = useCallback(
+    (jobId: string) => {
+      const cachedJob = findCachedAdminJob(queryClient, jobId);
+      if (cachedJob) {
+        if (cachedJob.status === "completed") {
+          return Promise.resolve(cachedJob);
+        }
+        if (cachedJob.status === "failed") {
+          return Promise.reject(
+            new Error(cachedJob.error_message || cachedJob.message || "Job failed"),
+          );
+        }
+        if (cachedJob.status === "cancelled") {
+          return Promise.reject(new Error(cachedJob.message || "Job cancelled"));
+        }
+      }
+
+      // Must match the gate on AdminRealtimeEventChannels: when the jobs
+      // channel isn't subscribed (not acting as admin), waiting on a live
+      // event would hang until the fallback timeout — poll instead.
+      if (!actingAdmin || connectionState !== "live") {
+        return pollAdminJobUntilTerminal(jobId);
+      }
+
+      return new Promise<AdminJob>((resolve, reject) => {
+        const existing = waitersRef.current.get(jobId);
+        if (existing) {
+          window.clearTimeout(existing.timeoutId);
+        }
+
+        const timeoutId = window.setTimeout(() => {
+          waitersRef.current.delete(jobId);
+          void pollAdminJobUntilTerminal(jobId).then(resolve).catch(reject);
+        }, 60_000);
+
+        waitersRef.current.set(jobId, { timeoutId, resolve, reject });
+      });
+    },
+    [actingAdmin, connectionState, queryClient],
+  );
 
   const value = useMemo<RealtimeEventsContextValue>(
     () => ({
       connectionState,
-      awaitAdminJob: (jobId: string) => {
-        const cachedJob = findCachedAdminJob(queryClient, jobId);
-        if (cachedJob) {
-          if (cachedJob.status === "completed") {
-            return Promise.resolve(cachedJob);
-          }
-          if (cachedJob.status === "failed") {
-            return Promise.reject(
-              new Error(cachedJob.error_message || cachedJob.message || "Job failed"),
-            );
-          }
-          if (cachedJob.status === "cancelled") {
-            return Promise.reject(new Error(cachedJob.message || "Job cancelled"));
-          }
-        }
-
-        // Must match the gate on AdminRealtimeEventChannels: when the jobs
-        // channel isn't subscribed (not acting as admin), waiting on a live
-        // event would hang until the fallback timeout — poll instead.
-        if (!actingAdmin || connectionState !== "live") {
-          return pollAdminJobUntilTerminal(jobId);
-        }
-
-        return new Promise<AdminJob>((resolve, reject) => {
-          const existing = waitersRef.current.get(jobId);
-          if (existing) {
-            window.clearTimeout(existing.timeoutId);
-          }
-
-          const timeoutId = window.setTimeout(() => {
-            waitersRef.current.delete(jobId);
-            void pollAdminJobUntilTerminal(jobId).then(resolve).catch(reject);
-          }, 60_000);
-
-          waitersRef.current.set(jobId, { timeoutId, resolve, reject });
-        });
-      },
-      subscribeChannel: (channel: EventChannel, handlers?: EventChannelHandlers) => {
-        channelRefsRef.current.set(channel, (channelRefsRef.current.get(channel) ?? 0) + 1);
-
-        let handlerID: number | null = null;
-        if (handlers) {
-          handlerID = nextHandlerIDRef.current++;
-          const channelHandlers =
-            channelHandlersRef.current.get(channel) ?? new Map<number, EventChannelHandlers>();
-          channelHandlers.set(handlerID, handlers);
-          channelHandlersRef.current.set(channel, channelHandlers);
-        }
-
-        sendSubscribe();
-
-        return () => {
-          const current = channelRefsRef.current.get(channel) ?? 0;
-          if (current <= 1) {
-            channelRefsRef.current.delete(channel);
-          } else {
-            channelRefsRef.current.set(channel, current - 1);
-          }
-
-          if (handlerID != null) {
-            const channelHandlers = channelHandlersRef.current.get(channel);
-            channelHandlers?.delete(handlerID);
-            if (channelHandlers && channelHandlers.size === 0) {
-              channelHandlersRef.current.delete(channel);
-            }
-          }
-
-          sendSubscribe();
-        };
-      },
+      awaitAdminJob,
+      subscribeChannel,
     }),
-    [connectionState, queryClient, actingAdmin],
+    [awaitAdminJob, connectionState, subscribeChannel],
   );
 
   return <RealtimeEventsContext.Provider value={value}>{children}</RealtimeEventsContext.Provider>;

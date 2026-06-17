@@ -881,6 +881,8 @@ export interface AudiobookGroup {
 
 export interface AudiobookGroupsResponse {
   total: number;
+  total_exact: boolean;
+  has_more: boolean;
   groups: AudiobookGroup[];
 }
 
