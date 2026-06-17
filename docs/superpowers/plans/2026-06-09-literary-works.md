@@ -35,7 +35,7 @@
 Run:
 
 ```bash
-cd /Users/jimcole/projects/silo/silo-server
+# Commands assume the repository root is the cwd.
 git fetch origin
 git worktree add ../silo-server-literary-works origin/work/ebook-reader-ruler-profiles
 cd ../silo-server-literary-works

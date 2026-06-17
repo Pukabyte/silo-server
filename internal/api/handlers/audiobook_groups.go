@@ -18,8 +18,10 @@ type audiobookGroupResponse struct {
 }
 
 type audiobookGroupsResponse struct {
-	Total  int                      `json:"total"`
-	Groups []audiobookGroupResponse `json:"groups"`
+	Total      int                      `json:"total"`
+	TotalExact bool                     `json:"total_exact"`
+	HasMore    bool                     `json:"has_more"`
+	Groups     []audiobookGroupResponse `json:"groups"`
 }
 
 // HandleGetAudiobookGroups — GET /api/v1/catalog/audiobook-groups
@@ -28,7 +30,7 @@ type audiobookGroupsResponse struct {
 // aggregate stats (book count, total duration, per-profile progress counts)
 // and up to four poster URLs for cover stacks. Query parameters:
 // library_id=<id> (required), group_by=author|narrator|series (required),
-// sort=name|count|duration (default name), limit, offset.
+// sort=name|count|duration (default name), limit, offset, include_total, q.
 //
 // Group names round-trip into the corresponding catalog filter fields
 // (author / narrator / series), which match case-insensitively.
@@ -58,10 +60,6 @@ func (h *CatalogHandler) HandleGetAudiobookGroups(w http.ResponseWriter, r *http
 		return
 	}
 
-	// maxAudiobookGroupsLimit bounds a single page. Paging is now an in-memory
-	// slice of the cached full list, so this is the response-size cap (the old
-	// 500/page cap in ListAudiobookGroups no longer sits on this path).
-	const maxAudiobookGroupsLimit = 5000
 	limit := 200
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		n, parseErr := strconv.Atoi(raw)
@@ -69,21 +67,30 @@ func (h *CatalogHandler) HandleGetAudiobookGroups(w http.ResponseWriter, r *http
 			writeError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
 			return
 		}
-		if n > maxAudiobookGroupsLimit {
-			n = maxAudiobookGroupsLimit
-		}
 		limit = n
 	}
 	offset := max(catalog.ParseIntParam(r.URL.Query().Get("offset")), 0)
+	includeTotal := true
+	if raw := strings.TrimSpace(r.URL.Query().Get("include_total")); raw != "" {
+		parsed, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "include_total must be true or false")
+			return
+		}
+		includeTotal = parsed
+	}
 
-	groups, total, err := h.audiobookGroups().Page(
+	result, err := catalog.ListAudiobookGroups(
 		r.Context(),
+		h.itemsH.browseRepo.Pool(),
 		catalog.AudiobookGroupsQuery{
-			LibraryID: libraryID,
-			GroupBy:   groupBy,
-			Sort:      sort,
-			Limit:     limit,
-			Offset:    offset,
+			LibraryID:    libraryID,
+			GroupBy:      groupBy,
+			SearchPrefix: strings.TrimSpace(r.URL.Query().Get("q")),
+			IncludeTotal: includeTotal,
+			Sort:         sort,
+			Limit:        limit,
+			Offset:       offset,
 		},
 		h.itemsH.accessFilter(r),
 	)
@@ -92,12 +99,18 @@ func (h *CatalogHandler) HandleGetAudiobookGroups(w http.ResponseWriter, r *http
 		return
 	}
 
-	resp := audiobookGroupsResponse{Total: total, Groups: make([]audiobookGroupResponse, 0, len(groups))}
-	for _, g := range groups {
+	resolvedPosters := h.resolveAudiobookGroupPosterURLs(r, result.Groups)
+	resp := audiobookGroupsResponse{
+		Total:      result.Total,
+		TotalExact: result.TotalExact,
+		HasMore:    result.HasMore,
+		Groups:     make([]audiobookGroupResponse, 0, len(result.Groups)),
+	}
+	for _, g := range result.Groups {
 		posterURLs := make([]string, 0, len(g.PosterPaths))
 		for _, path := range g.PosterPaths {
-			if url := h.itemsH.presignURL(r, cardThumbnailPath(path), "card"); url != "" {
-				posterURLs = append(posterURLs, url)
+			if resolved := resolvedPosters[cardThumbnailPath(path)]; resolved.URL != "" {
+				posterURLs = append(posterURLs, resolved.URL)
 			}
 		}
 		resp.Groups = append(resp.Groups, audiobookGroupResponse{
@@ -111,4 +124,27 @@ func (h *CatalogHandler) HandleGetAudiobookGroups(w http.ResponseWriter, r *http
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *CatalogHandler) resolveAudiobookGroupPosterURLs(r *http.Request, groups []catalog.AudiobookGroup) map[string]catalog.ResolvedImageURL {
+	if h == nil || h.itemsH == nil || h.itemsH.detailSvc == nil || len(groups) == 0 {
+		return map[string]catalog.ResolvedImageURL{}
+	}
+
+	paths := make([]string, 0, len(groups)*4)
+	seen := make(map[string]struct{}, len(groups)*4)
+	for _, group := range groups {
+		for _, path := range group.PosterPaths {
+			normalized := cardThumbnailPath(path)
+			if normalized == "" {
+				continue
+			}
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			paths = append(paths, normalized)
+		}
+	}
+	return h.itemsH.detailSvc.PresignURLsWithExpiry(r.Context(), paths, "card")
 }

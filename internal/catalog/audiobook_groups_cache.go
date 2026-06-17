@@ -105,8 +105,9 @@ func audiobookGroupsCacheKey(q AudiobookGroupsQuery, filter AccessFilter) string
 	if sortKey == "" {
 		sortKey = "name"
 	}
+	searchKey := strings.ToLower(strings.TrimSpace(q.SearchPrefix))
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d|%s|%s|u=%d|p=%s|cr=%s", q.LibraryID, q.GroupBy, sortKey, filter.UserID, filter.ProfileID, filter.MaxContentRating)
+	fmt.Fprintf(&b, "%d|%s|%s|q=%s|u=%d|p=%s|cr=%s", q.LibraryID, q.GroupBy, sortKey, searchKey, filter.UserID, filter.ProfileID, filter.MaxContentRating)
 	b.WriteString("|allow=")
 	b.WriteString(joinSortedInts(filter.AllowedLibraryIDs))
 	b.WriteString("|deny=")
