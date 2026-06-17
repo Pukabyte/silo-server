@@ -299,13 +299,19 @@ export function applyNotificationRead(
 /** Hydrates the unread badge from the websocket snapshot (recent unread rows). */
 export function applyNotificationsSnapshot(queryClient: QueryClient, rows: AppNotification[]) {
   // The snapshot is capped (25 rows); use it as a lower bound and refresh the
-  // real count lazily.
+  // exact count only when the cap means the lower bound may be incomplete.
   queryClient.setQueryData<number>(notificationKeys.unreadCount(), (count) =>
     Math.max(count ?? 0, rows.length),
   );
-  void queryClient.invalidateQueries({ queryKey: notificationKeys.unreadCount() });
+  if (rows.length >= NOTIFICATIONS_PAGE_SIZE) {
+    void queryClient.invalidateQueries({ queryKey: notificationKeys.unreadCount() });
+  }
   void queryClient.invalidateQueries({
-    queryKey: notificationKeys.all,
+    queryKey: notificationKeys.list("all"),
+    refetchType: "active",
+  });
+  void queryClient.invalidateQueries({
+    queryKey: notificationKeys.list("unread"),
     refetchType: "active",
   });
 }

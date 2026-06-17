@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { AudiobookGroup } from "@/api/types";
 import { Input } from "@/components/ui/input";
@@ -15,10 +15,9 @@ import {
   type AudiobookGroupBy,
   type AudiobookGroupSort,
 } from "@/hooks/queries/audiobookGroups";
+import { useDebounce } from "@/hooks/useDebounce";
+import { useIntersectionObserver } from "@/hooks/useIntersectionObserver";
 import { formatHoursMinutes } from "@/lib/audiobooks/duration";
-
-// Number of groups rendered per reveal step (initial paint + each scroll grow).
-const GROUPS_REVEAL_BATCH = 120;
 
 interface AudiobookGroupsViewProps {
   libraryId: number;
@@ -129,45 +128,36 @@ export default function AudiobookGroupsView({
   // series read more naturally alphabetized.
   const [sort, setSort] = useState<AudiobookGroupSort>(groupBy === "series" ? "name" : "count");
   const [filter, setFilter] = useState("");
-  const { data, isLoading } = useAudiobookGroups(libraryId, groupBy, sort);
+  const debouncedFilter = useDebounce(filter.trim(), 250);
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } = useAudiobookGroups(
+    libraryId,
+    groupBy,
+    sort,
+    debouncedFilter,
+  );
 
-  const groups = useMemo(() => {
-    const all = data?.groups ?? [];
-    const needle = filter.trim().toLowerCase();
-    if (!needle) return all;
-    return all.filter((group) => group.name.toLowerCase().includes(needle));
-  }, [data?.groups, filter]);
-
-  // Incremental reveal: a large audiobook library can have tens of thousands of
-  // authors/narrators. Rendering them all at once mounts tens of thousands of
-  // DOM nodes (+ cover images) and freezes the main thread on load. Render a
-  // capped window and grow it as the user scrolls toward the end, so initial
-  // paint is bounded regardless of library size.
-  const [visibleCount, setVisibleCount] = useState(GROUPS_REVEAL_BATCH);
-  useEffect(() => {
-    setVisibleCount(GROUPS_REVEAL_BATCH);
-  }, [filter, sort, groupBy, libraryId]);
-  const visibleGroups = useMemo(() => groups.slice(0, visibleCount), [groups, visibleCount]);
-  const hasMore = visibleCount < groups.length;
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!hasMore) return;
-    const el = sentinelRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisibleCount((count) => count + GROUPS_REVEAL_BATCH);
-        }
-      },
-      { rootMargin: "800px" },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [hasMore, groups.length]);
+  const groups = useMemo(() => data?.pages.flatMap((page) => page.groups) ?? [], [data?.pages]);
+  const firstPage = data?.pages[0];
+  const total = firstPage?.total ?? 0;
+  const totalExact = firstPage?.total_exact ?? false;
+  const isInitialLoading = isLoading && groups.length === 0;
+  const loadNextPage = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage) {
+      void fetchNextPage();
+    }
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+  const sentinelRef = useIntersectionObserver({
+    onIntersect: loadNextPage,
+    enabled: Boolean(hasNextPage) && !isFetchingNextPage,
+  });
 
   const noun = GROUP_NOUN[groupBy];
   const isSeries = groupBy === "series";
+  const countLabel = totalExact
+    ? groups.length === total
+      ? String(total)
+      : `${groups.length} of ${total}`
+    : `${groups.length}${hasNextPage ? "+" : ""}`;
 
   return (
     <div className="space-y-5">
@@ -175,7 +165,7 @@ export default function AudiobookGroupsView({
         <Input
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
-          placeholder={`Filter ${noun}…`}
+          placeholder={`Search ${noun}…`}
           className="w-full max-w-xs"
         />
         <Select value={sort} onValueChange={(value) => setSort(value as AudiobookGroupSort)}>
@@ -188,14 +178,14 @@ export default function AudiobookGroupsView({
             <SelectItem value="duration">Longest</SelectItem>
           </SelectContent>
         </Select>
-        {data && (
+        {firstPage && (
           <span className="text-muted-foreground ml-auto text-sm">
-            {groups.length === data.total ? data.total : `${groups.length} of ${data.total}`} {noun}
+            {countLabel} {noun}
           </span>
         )}
       </div>
 
-      {isLoading ? (
+      {isInitialLoading ? (
         isSeries ? (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
             {Array.from({ length: 12 }).map((_, i) => (
@@ -217,48 +207,57 @@ export default function AudiobookGroupsView({
           {filter ? `No ${noun} match “${filter}”.` : `No ${noun} found in this library.`}
         </p>
       ) : isSeries ? (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-          {visibleGroups.map((group) => (
-            <button
-              key={group.name}
-              type="button"
-              onClick={() => onSelectGroup(group.name)}
-              className="group/series text-left"
-            >
-              <div className="transition-transform duration-[--duration-fast] group-hover/series:scale-[1.02]">
-                <CoverStack group={group} large />
-              </div>
-              <div className="mt-2.5 truncate px-0.5 text-[14px] font-semibold tracking-tight">
-                {group.name}
-              </div>
-              <div className="text-muted-foreground truncate px-0.5 text-xs">
-                {groupStats(group)}
-              </div>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {visibleGroups.map((group) => (
-            <button
-              key={group.name}
-              type="button"
-              onClick={() => onSelectGroup(group.name)}
-              className="surface-panel hover:bg-muted/40 flex items-center gap-4 rounded-xl border-0 px-4 py-3 text-left transition-colors duration-[--duration-fast]"
-            >
-              <CoverStack group={group} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-semibold">{group.name}</div>
-                <div className="text-muted-foreground mt-0.5 truncate text-xs">
+        <>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+            {groups.map((group) => (
+              <button
+                key={group.name}
+                type="button"
+                onClick={() => onSelectGroup(group.name)}
+                className="group/series text-left"
+              >
+                <div className="transition-transform duration-[--duration-fast] group-hover/series:scale-[1.02]">
+                  <CoverStack group={group} large />
+                </div>
+                <div className="mt-2.5 truncate px-0.5 text-[14px] font-semibold tracking-tight">
+                  {group.name}
+                </div>
+                <div className="text-muted-foreground truncate px-0.5 text-xs">
                   {groupStats(group)}
                 </div>
-              </div>
-              <ChevronRight className="text-muted-foreground/50 h-4 w-4 shrink-0" />
-            </button>
-          ))}
-        </div>
+              </button>
+            ))}
+          </div>
+          <div ref={sentinelRef} className="h-8">
+            {isFetchingNextPage ? <Skeleton className="mx-auto h-3 w-28 rounded" /> : null}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {groups.map((group) => (
+              <button
+                key={group.name}
+                type="button"
+                onClick={() => onSelectGroup(group.name)}
+                className="surface-panel hover:bg-muted/40 flex items-center gap-4 rounded-xl border-0 px-4 py-3 text-left transition-colors duration-[--duration-fast]"
+              >
+                <CoverStack group={group} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold">{group.name}</div>
+                  <div className="text-muted-foreground mt-0.5 truncate text-xs">
+                    {groupStats(group)}
+                  </div>
+                </div>
+                <ChevronRight className="text-muted-foreground/50 h-4 w-4 shrink-0" />
+              </button>
+            ))}
+          </div>
+          <div ref={sentinelRef} className="h-8">
+            {isFetchingNextPage ? <Skeleton className="mx-auto h-3 w-28 rounded" /> : null}
+          </div>
+        </>
       )}
-      {!isLoading && hasMore && <div ref={sentinelRef} aria-hidden className="h-1" />}
     </div>
   );
 }
