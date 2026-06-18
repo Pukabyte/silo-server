@@ -117,7 +117,7 @@ func TestTranscribeProcessesChunksPlayheadFirst(t *testing.T) {
 	var chunkOrder []string
 	cues, _, err := tr.Transcribe(context.Background(), TranscribeJobRequest{
 		FilePath: "/x.mkv", StartPosition: 1300, // inside chunk 2
-	}, func(chunk []SubtitleCue, done, total int) {
+	}, func(chunk []SubtitleCue, _ string, done, total int) {
 		if total != 3 {
 			t.Errorf("total = %d, want 3", total)
 		}
@@ -154,6 +154,67 @@ func TestTranscribePassesHintAndChunkSizedTimeout(t *testing.T) {
 	}
 	if want := 1800 * time.Second; req.Timeout != want {
 		t.Errorf("timeout = %v, want %v (3x chunk duration)", req.Timeout, want)
+	}
+}
+
+func TestSetExtractionClampsChunkSecondsToNearestBound(t *testing.T) {
+	tr := &WhisperTranscriber{}
+
+	tr.SetExtraction("", 1)
+	if got := int(tr.chunkSeconds.Load()); got != minASRChunkSeconds {
+		t.Fatalf("low clamp = %d, want %d", got, minASRChunkSeconds)
+	}
+
+	tr.SetExtraction("", defaultASRChunkSeconds+1)
+	if got := int(tr.chunkSeconds.Load()); got != defaultASRChunkSeconds {
+		t.Fatalf("high clamp = %d, want %d", got, defaultASRChunkSeconds)
+	}
+
+	tr.SetExtraction("", 45)
+	if got := int(tr.chunkSeconds.Load()); got != 45 {
+		t.Fatalf("in-range chunk seconds = %d, want 45", got)
+	}
+}
+
+func TestTranscribeUsesRequestChunkSecondsOverride(t *testing.T) {
+	var dir string
+	var extractedChunkSeconds int
+	client := &fakeASRClient{
+		language: "en",
+		perChunk: map[string][]llm.TranscriptionSegment{
+			"chunk00000.wav": {{Start: 0, End: 1, Text: "hi"}},
+		},
+	}
+	tr := &WhisperTranscriber{
+		client: client,
+		extract: func(_ context.Context, _ string, _ int, d, _ string, chunkSeconds int) ([]playback.AudioChunk, error) {
+			dir = d
+			extractedChunkSeconds = chunkSeconds
+			p := filepath.Join(d, "chunk00000.wav")
+			if err := os.WriteFile(p, []byte("RIFF"), 0o644); err != nil {
+				return nil, err
+			}
+			return []playback.AudioChunk{{Path: p, Start: 0}}, nil
+		},
+		probeOffset: func(context.Context, string, int, string) float64 { return 0 },
+	}
+	tr.SetExtraction("", 600)
+
+	_, _, err := tr.Transcribe(context.Background(), TranscribeJobRequest{
+		FilePath:     "/x.mkv",
+		ChunkSeconds: 10,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if extractedChunkSeconds != minASRChunkSeconds {
+		t.Fatalf("extract chunk seconds = %d, want clamped override %d", extractedChunkSeconds, minASRChunkSeconds)
+	}
+	if want := time.Duration(minASRChunkSeconds*asrChunkTimeoutFactor) * time.Second; client.requests[0].Timeout != want {
+		t.Fatalf("timeout = %v, want %v", client.requests[0].Timeout, want)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("temp dir %s not cleaned up", dir)
 	}
 }
 
@@ -326,6 +387,215 @@ func TestChunkOrderForPosition(t *testing.T) {
 	}
 }
 
+func TestTranscribeIncrementalStreamsPlayheadFirstAcrossTwoPasses(t *testing.T) {
+	var trace []string
+	var starts []float64
+	client := &fakeASRClient{
+		language: "en",
+		perChunk: map[string][]llm.TranscriptionSegment{
+			"inc1200.wav": {{Start: 0, End: 1, Text: "pivot"}},
+			"inc1800.wav": {{Start: 0, End: 1, Text: "tail"}},
+			"inc0.wav":    {{Start: 0, End: 1, Text: "head"}},
+			"inc600.wav":  {{Start: 0, End: 1, Text: "middle"}},
+		},
+	}
+	tr := &WhisperTranscriber{
+		client: client,
+		incrementalExtract: func(_ context.Context, _ string, _ int, dir, _ string, startSec float64, _ int,
+			onSegment func(playback.AudioChunk) error) error {
+			starts = append(starts, startSec)
+			segmentStarts := []float64{1200, 1800}
+			if startSec == 0 {
+				segmentStarts = []float64{0, 600, 1200}
+			}
+			for _, segStart := range segmentStarts {
+				name := fmt.Sprintf("inc%.0f.wav", segStart)
+				p := filepath.Join(dir, name)
+				if err := os.WriteFile(p, []byte("RIFF"), 0o644); err != nil {
+					return err
+				}
+				trace = append(trace, fmt.Sprintf("segment:%.0f", segStart))
+				if err := onSegment(playback.AudioChunk{Path: p, Start: segStart}); err != nil {
+					return err
+				}
+				trace = append(trace, fmt.Sprintf("after:%.0f", segStart))
+			}
+			return nil
+		},
+		probeOffset: func(context.Context, string, int, string) float64 { return 0 },
+	}
+	tr.SetExtraction("", 600)
+
+	var progress []string
+	cues, _, err := tr.Transcribe(context.Background(), TranscribeJobRequest{
+		FilePath:        "/x.mkv",
+		StartPosition:   1300,
+		DurationSeconds: 2400,
+		Incremental:     true,
+	}, func(chunk []SubtitleCue, _ string, done, total int) {
+		progress = append(progress, fmt.Sprintf("%d/%d", done, total))
+		trace = append(trace, "chunk:"+strings.Join(chunk[0].Lines, " "))
+	})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if got := fmt.Sprint(starts); got != "[1200 0]" {
+		t.Fatalf("incremental pass starts = %s, want [1200 0]", got)
+	}
+	var requestOrder []string
+	for _, req := range client.requests {
+		requestOrder = append(requestOrder, req.Filename)
+	}
+	if got := strings.Join(requestOrder, ","); got != "inc1200.wav,inc1800.wav,inc0.wav,inc600.wav" {
+		t.Fatalf("request order = %s", got)
+	}
+	if got := strings.Join(progress, ","); got != "1/4,2/4,3/4,4/4" {
+		t.Fatalf("progress = %s, want chunk totals", got)
+	}
+	if chunkIdx, nextSegmentIdx := traceIndexString(trace, "chunk:pivot"), traceIndexString(trace, "segment:1800"); chunkIdx < 0 || nextSegmentIdx < 0 || chunkIdx > nextSegmentIdx {
+		t.Fatalf("first onChunk did not fire before the next extracted segment: %v", trace)
+	}
+	if len(cues) != 4 {
+		t.Fatalf("returned cues = %d, want complete transcript", len(cues))
+	}
+}
+
+func TestTranscribeIncrementalFallsBackToStartWhenSeekedPassProducesNoAudio(t *testing.T) {
+	client := &fakeASRClient{
+		language: "en",
+		perChunk: map[string][]llm.TranscriptionSegment{
+			"head.wav": {{Start: 1, End: 2, Text: "head"}},
+		},
+	}
+	tr := &WhisperTranscriber{
+		client: client,
+		incrementalExtract: func(_ context.Context, _ string, _ int, dir, _ string, startSec float64, _ int,
+			onSegment func(playback.AudioChunk) error) error {
+			if startSec > 0 {
+				return fmt.Errorf("ffmpeg produced no audio chunks for track 0")
+			}
+			p := filepath.Join(dir, "head.wav")
+			if err := os.WriteFile(p, []byte("RIFF"), 0o644); err != nil {
+				return err
+			}
+			return onSegment(playback.AudioChunk{Path: p, Start: 0})
+		},
+		probeOffset: func(context.Context, string, int, string) float64 { return 0 },
+	}
+	tr.SetExtraction("", 600)
+
+	cues, _, err := tr.Transcribe(context.Background(), TranscribeJobRequest{
+		FilePath:        "/x.mkv",
+		StartPosition:   1300,
+		DurationSeconds: 1800,
+		Incremental:     true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if len(cues) != 1 || strings.Join(cues[0].Lines, " ") != "head" {
+		t.Fatalf("fallback cues = %#v, want head cue from start pass", cues)
+	}
+	if len(client.requests) != 1 || client.requests[0].Filename != "head.wav" {
+		t.Fatalf("ASR requests = %#v, want only fallback chunk", client.requests)
+	}
+}
+
+func TestTranscribeIncrementalDoesNotDoubleApplyAudioOffsetAfterSeek(t *testing.T) {
+	client := &fakeASRClient{
+		language: "en",
+		perChunk: map[string][]llm.TranscriptionSegment{
+			"seek.wav": {{Start: 1, End: 2, Text: "seek"}},
+			"head.wav": {{Start: 1, End: 2, Text: "head"}},
+		},
+	}
+	tr := &WhisperTranscriber{
+		client: client,
+		incrementalExtract: func(_ context.Context, _ string, _ int, dir, _ string, startSec float64, _ int,
+			onSegment func(playback.AudioChunk) error) error {
+			name := "seek.wav"
+			chunkStart := 600.0
+			if startSec == 0 {
+				name = "head.wav"
+				chunkStart = 0
+			}
+			p := filepath.Join(dir, name)
+			if err := os.WriteFile(p, []byte("RIFF"), 0o644); err != nil {
+				return err
+			}
+			if err := onSegment(playback.AudioChunk{Path: p, Start: chunkStart}); err != nil {
+				return err
+			}
+			if startSec == 0 {
+				stop := filepath.Join(dir, "seek.wav")
+				if err := os.WriteFile(stop, []byte("RIFF"), 0o644); err != nil {
+					return err
+				}
+				return onSegment(playback.AudioChunk{Path: stop, Start: 600})
+			}
+			return nil
+		},
+		probeOffset: func(context.Context, string, int, string) float64 { return 1.25 },
+	}
+	tr.SetExtraction("", 600)
+
+	cues, _, err := tr.Transcribe(context.Background(), TranscribeJobRequest{
+		FilePath:        "/x.mkv",
+		StartPosition:   600,
+		DurationSeconds: 1200,
+		Incremental:     true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if len(cues) != 2 {
+		t.Fatalf("cues = %d, want seek and head", len(cues))
+	}
+	if want := 601 * time.Second; cues[0].Start != want {
+		t.Fatalf("seek cue start = %v, want %v without re-adding audio offset", cues[0].Start, want)
+	}
+	if want := time.Duration(2.25 * float64(time.Second)); cues[1].Start != want {
+		t.Fatalf("head cue start = %v, want %v with audio offset", cues[1].Start, want)
+	}
+}
+
+func TestTranscribeIncrementalKeepsProgressIndeterminateWhenDurationUnknown(t *testing.T) {
+	client := &fakeASRClient{
+		language: "en",
+		perChunk: map[string][]llm.TranscriptionSegment{
+			"head.wav": {{Start: 0, End: 1, Text: "head"}},
+		},
+	}
+	tr := &WhisperTranscriber{
+		client: client,
+		incrementalExtract: func(_ context.Context, _ string, _ int, dir, _ string, _ float64, _ int,
+			onSegment func(playback.AudioChunk) error) error {
+			p := filepath.Join(dir, "head.wav")
+			if err := os.WriteFile(p, []byte("RIFF"), 0o644); err != nil {
+				return err
+			}
+			return onSegment(playback.AudioChunk{Path: p, Start: 0})
+		},
+		probeOffset: func(context.Context, string, int, string) float64 { return 0 },
+	}
+	tr.SetExtraction("", 600)
+
+	var gotDone, gotTotal int
+	_, _, err := tr.Transcribe(context.Background(), TranscribeJobRequest{
+		FilePath:    "/x.mkv",
+		Incremental: true,
+	}, func(_ []SubtitleCue, _ string, done, total int) {
+		gotDone = done
+		gotTotal = total
+	})
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if gotDone != 1 || gotTotal != 0 {
+		t.Fatalf("progress = %d/%d, want 1/0 for indeterminate total", gotDone, gotTotal)
+	}
+}
+
 // Cue timing must use the muxer-reported chunk start (not index*chunkSeconds)
 // plus the probed audio start offset, or sync drifts on long files and
 // delayed-audio containers.
@@ -356,6 +626,15 @@ func TestTranscribeUsesExactChunkStartsAndAudioOffset(t *testing.T) {
 	if want := time.Duration(602.75 * float64(time.Second)); cues[1].Start != want {
 		t.Errorf("cue 1 start = %v, want %v (600.5s chunk + 1s segment + 1.25s offset)", cues[1].Start, want)
 	}
+}
+
+func traceIndexString(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestNormalizeDetectedLanguage(t *testing.T) {
