@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -54,7 +55,7 @@ func (s *PostgresUserStore) UpdateProgress(ctx context.Context, profileID, media
 	if duration > 0 && position > 0 && position/duration < userstore.MinResumeFraction(thresholds.MinResumePct) {
 		return nil
 	}
-	now := nowUTC()
+	now := time.Now().UTC()
 	completed := false
 	if duration > 0 && position/duration > userstore.WatchedFraction(thresholds.WatchedPct) {
 		completed = true
@@ -66,8 +67,22 @@ func (s *PostgresUserStore) UpdateProgress(ctx context.Context, profileID, media
 	// Watching through plain GREATEST (stored position is 0) while the
 	// watched flag survives.
 	_, err := s.pool.Exec(ctx, `
+		WITH visible AS (
+			SELECT
+				CASE
+					WHEN hhi.hidden_before IS NOT NULL AND $7::timestamptz <= hhi.hidden_before
+					THEN hhi.hidden_before + interval '1 second'
+					ELSE $7::timestamptz
+				END AS updated_at
+			FROM (SELECT 1) seed
+			LEFT JOIN user_history_hidden_items hhi
+			  ON hhi.user_id = $1
+			 AND hhi.profile_id = $2
+			 AND hhi.media_item_id = $3
+		)
 		INSERT INTO user_watch_progress (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		SELECT $1, $2, $3, $4, $5, $6, updated_at
+		FROM visible
 		ON CONFLICT(user_id, profile_id, media_item_id) DO UPDATE SET
 			position_seconds = CASE WHEN excluded.completed THEN 0
 				ELSE GREATEST(excluded.position_seconds, user_watch_progress.position_seconds) END,
@@ -83,19 +98,34 @@ func (s *PostgresUserStore) UpdateProgress(ctx context.Context, profileID, media
 	return nil
 }
 
+// SetProgress bypasses the forward-only guard after the min-resume threshold.
 func (s *PostgresUserStore) SetProgress(ctx context.Context, profileID, mediaItemID string, position, duration float64, thresholds userstore.ProgressThresholds) error {
 	if duration > 0 && position > 0 && position/duration < userstore.MinResumeFraction(thresholds.MinResumePct) {
 		return nil
 	}
-	now := nowUTC()
+	now := time.Now().UTC()
 	completed := false
 	if duration > 0 && position/duration > userstore.WatchedFraction(thresholds.WatchedPct) {
 		completed = true
 		position = 0 // match MarkWatched() — completed rows hold no resume point
 	}
 	_, err := s.pool.Exec(ctx, `
+		WITH visible AS (
+			SELECT
+				CASE
+					WHEN hhi.hidden_before IS NOT NULL AND $7::timestamptz <= hhi.hidden_before
+					THEN hhi.hidden_before + interval '1 second'
+					ELSE $7::timestamptz
+				END AS updated_at
+			FROM (SELECT 1) seed
+			LEFT JOIN user_history_hidden_items hhi
+			  ON hhi.user_id = $1
+			 AND hhi.profile_id = $2
+			 AND hhi.media_item_id = $3
+		)
 		INSERT INTO user_watch_progress (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		SELECT $1, $2, $3, $4, $5, $6, updated_at
+		FROM visible
 		ON CONFLICT(user_id, profile_id, media_item_id) DO UPDATE SET
 			position_seconds = excluded.position_seconds,
 			duration_seconds = excluded.duration_seconds,
@@ -171,11 +201,11 @@ func (s *PostgresUserStore) SetProgressIfNewer(ctx context.Context, profileID, m
 		INSERT INTO user_watch_progress (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT(user_id, profile_id, media_item_id) DO UPDATE SET
-			position_seconds = EXCLUDED.position_seconds,
-			duration_seconds = EXCLUDED.duration_seconds,
-			completed = EXCLUDED.completed,
-			updated_at = EXCLUDED.updated_at
-		WHERE EXCLUDED.updated_at > user_watch_progress.updated_at`,
+				position_seconds = EXCLUDED.position_seconds,
+				duration_seconds = EXCLUDED.duration_seconds,
+				completed = user_watch_progress.completed OR EXCLUDED.completed,
+				updated_at = EXCLUDED.updated_at
+			WHERE EXCLUDED.updated_at > user_watch_progress.updated_at`,
 		s.userID, profileID, mediaItemID, position, duration, completed, updatedAt.UTC(),
 	)
 	if err != nil {
@@ -189,10 +219,24 @@ func (s *PostgresUserStore) MarkWatched(ctx context.Context, profileID, mediaIte
 		duration = 0
 	}
 
-	now := nowUTC()
+	now := time.Now().UTC()
 	_, err := s.pool.Exec(ctx, `
+		WITH visible AS (
+			SELECT
+				CASE
+					WHEN hhi.hidden_before IS NOT NULL AND $5::timestamptz <= hhi.hidden_before
+					THEN hhi.hidden_before + interval '1 second'
+					ELSE $5::timestamptz
+				END AS updated_at
+			FROM (SELECT 1) seed
+			LEFT JOIN user_history_hidden_items hhi
+			  ON hhi.user_id = $1
+			 AND hhi.profile_id = $2
+			 AND hhi.media_item_id = $3
+		)
 		INSERT INTO user_watch_progress (user_id, profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES ($1, $2, $3, 0, $4, TRUE, $5)
+		SELECT $1, $2, $3, 0, $4, TRUE, updated_at
+		FROM visible
 		ON CONFLICT(user_id, profile_id, media_item_id) DO UPDATE SET
 			position_seconds = 0,
 			duration_seconds = excluded.duration_seconds,
@@ -230,10 +274,27 @@ func (s *PostgresUserStore) MarkProgressBatch(ctx context.Context, profileID str
 		updatedAt = time.Now().UTC()
 	}
 	_, err := s.pool.Exec(ctx, `
+		WITH target(media_item_id) AS (
+			SELECT unnest($3::text[])
+		),
+		visible AS (
+			SELECT
+				t.media_item_id,
+				CASE
+					WHEN hhi.hidden_before IS NOT NULL AND $4::timestamptz <= hhi.hidden_before
+					THEN hhi.hidden_before + interval '1 second'
+					ELSE $4::timestamptz
+				END AS updated_at
+			FROM target t
+			LEFT JOIN user_history_hidden_items hhi
+			  ON hhi.user_id = $1
+			 AND hhi.profile_id = $2
+			 AND hhi.media_item_id = t.media_item_id
+		)
 		INSERT INTO user_watch_progress
 			(user_id, profile_id, media_item_id, completed, position_seconds, duration_seconds, updated_at)
-		SELECT $1, $2, mid, TRUE, 0, 0, $4
-		FROM unnest($3::text[]) AS mid
+		SELECT $1, $2, media_item_id, TRUE, 0, 0, updated_at
+		FROM visible
 		ON CONFLICT (user_id, profile_id, media_item_id) DO UPDATE
 		SET completed = TRUE,
 		    position_seconds = 0,
@@ -488,6 +549,48 @@ func (s *PostgresUserStore) AddHistory(ctx context.Context, entry userstore.Watc
 	return nil
 }
 
+func (s *PostgresUserStore) AddVisibleHistory(ctx context.Context, entry userstore.WatchHistoryEntry) (userstore.WatchHistoryEntry, error) {
+	if entry.ID == "" {
+		entry.ID = generateUUID()
+	}
+	if entry.WatchedAt == "" {
+		entry.WatchedAt = nowUTC()
+	}
+	if entry.Source == "" {
+		entry.Source = userstore.WatchHistorySourceLegacy
+	}
+	identityJSON, err := json.Marshal(entry.Identity)
+	if err != nil {
+		return entry, fmt.Errorf("marshaling watch identity: %w", err)
+	}
+	var watchedAt time.Time
+	if err := s.pool.QueryRow(ctx, `
+		WITH visible AS (
+			SELECT
+				CASE
+					WHEN hhi.hidden_before IS NOT NULL AND $5::timestamptz <= hhi.hidden_before
+					THEN hhi.hidden_before + interval '1 second'
+					ELSE $5::timestamptz
+				END AS watched_at
+			FROM (SELECT 1) seed
+			LEFT JOIN user_history_hidden_items hhi
+			  ON hhi.user_id = $2
+			 AND hhi.profile_id = $3
+			 AND hhi.media_item_id = $4
+		)
+		INSERT INTO user_watch_history (id, user_id, profile_id, media_item_id, watched_at, duration_seconds, completed, source, watch_identity)
+		SELECT $1, $2, $3, $4, watched_at, $6, $7, $8, $9
+		FROM visible
+		RETURNING watched_at`,
+		entry.ID, s.userID, entry.ProfileID, entry.MediaItemID, entry.WatchedAt,
+		entry.DurationSeconds, entry.Completed, entry.Source, string(identityJSON),
+	).Scan(&watchedAt); err != nil {
+		return entry, fmt.Errorf("adding visible history entry: %w", err)
+	}
+	entry.WatchedAt = timeToString(watchedAt)
+	return entry, nil
+}
+
 func (s *PostgresUserStore) AddHistoryIfMissing(ctx context.Context, entry userstore.WatchHistoryEntry) (bool, error) {
 	if entry.WatchedAt == "" {
 		entry.WatchedAt = nowUTC()
@@ -560,15 +663,7 @@ func (s *PostgresUserStore) ListCompletedHistory(ctx context.Context, query user
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	sources := make([]string, 0, len(query.ExcludeSources))
-	for _, source := range query.ExcludeSources {
-		sources = append(sources, string(source))
-	}
-	includeSources := make([]string, 0, len(query.IncludeSources))
-	for _, source := range query.IncludeSources {
-		includeSources = append(includeSources, string(source))
-	}
-	mediaItemIDs := compactMediaItemIDs(query.MediaItemIDs)
+	includeSources, excludeSources, mediaItemIDs := completedHistoryFilterArgs(query.MediaItemIDs, query.IncludeSources, query.ExcludeSources)
 	rows, err := s.pool.Query(ctx, `
 		SELECT h.id, h.profile_id, h.media_item_id, h.watched_at, h.duration_seconds, h.completed, h.source, h.watch_identity::text
 		FROM user_watch_history h
@@ -578,17 +673,10 @@ func (s *PostgresUserStore) ListCompletedHistory(ctx context.Context, query user
 		  AND (cardinality($3::text[]) = 0 OR h.source = ANY($3::text[]))
 		  AND (cardinality($4::text[]) = 0 OR h.source <> ALL($4::text[]))
 		  AND (cardinality($5::text[]) = 0 OR h.media_item_id = ANY($5::text[]))
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM user_history_hidden_items hhi
-			WHERE hhi.user_id = h.user_id
-			  AND hhi.profile_id = h.profile_id
-			  AND hhi.media_item_id = h.media_item_id
-			  AND h.watched_at <= hhi.hidden_before
-		)
-		ORDER BY h.watched_at ASC
+		`+completedHistoryVisibleSQL+`
+		ORDER BY h.watched_at ASC, h.id ASC
 		LIMIT $6 OFFSET $7`,
-		s.userID, query.ProfileID, includeSources, sources, mediaItemIDs, limit, query.Offset,
+		s.userID, query.ProfileID, includeSources, excludeSources, mediaItemIDs, limit, query.Offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing completed history: %w", err)
@@ -607,6 +695,106 @@ func (s *PostgresUserStore) ListCompletedHistory(ctx context.Context, query user
 		return nil, fmt.Errorf("iterating completed history rows: %w", err)
 	}
 	return results, nil
+}
+
+func (s *PostgresUserStore) ListCompletedHistoryItems(ctx context.Context, query userstore.CompletedHistoryItemQuery) ([]userstore.CompletedHistoryItem, error) {
+	includeSources, excludeSources, mediaItemIDs := completedHistoryFilterArgs(query.MediaItemIDs, query.IncludeSources, query.ExcludeSources)
+	rows, err := s.pool.Query(ctx, `
+		SELECT h.media_item_id, MAX(h.watched_at)
+		FROM user_watch_history h
+		WHERE h.user_id = $1
+		  AND h.profile_id = $2
+		  AND h.completed = true
+		  AND (cardinality($3::text[]) = 0 OR h.source = ANY($3::text[]))
+		  AND (cardinality($4::text[]) = 0 OR h.source <> ALL($4::text[]))
+		  AND (cardinality($5::text[]) = 0 OR h.media_item_id = ANY($5::text[]))
+		`+completedHistoryVisibleSQL+`
+		GROUP BY h.media_item_id
+		ORDER BY h.media_item_id ASC`,
+		s.userID, query.ProfileID, includeSources, excludeSources, mediaItemIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing completed history items: %w", err)
+	}
+	defer rows.Close()
+
+	var results []userstore.CompletedHistoryItem
+	for rows.Next() {
+		var item userstore.CompletedHistoryItem
+		var watchedAt time.Time
+		if err := rows.Scan(&item.MediaItemID, &watchedAt); err != nil {
+			return nil, fmt.Errorf("scanning completed history item: %w", err)
+		}
+		item.WatchedAt = timeToString(watchedAt)
+		results = append(results, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating completed history items: %w", err)
+	}
+	return results, nil
+}
+
+func (s *PostgresUserStore) VisibleHistoryTimestamps(ctx context.Context, profileID string, mediaItemIDs []string, at time.Time) (map[string]string, error) {
+	mediaItemIDs = compactMediaItemIDs(mediaItemIDs)
+	result := make(map[string]string, len(mediaItemIDs))
+	if len(mediaItemIDs) == 0 {
+		return result, nil
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.media_item_id, hhi.hidden_before
+		FROM unnest($3::text[]) AS t(media_item_id)
+		LEFT JOIN user_history_hidden_items hhi
+		  ON hhi.user_id = $1
+		 AND hhi.profile_id = $2
+		 AND hhi.media_item_id = t.media_item_id`,
+		s.userID, profileID, mediaItemIDs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing visible history timestamps: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var mediaItemID string
+		var hiddenBefore sql.NullTime
+		if err := rows.Scan(&mediaItemID, &hiddenBefore); err != nil {
+			return nil, fmt.Errorf("scanning visible history timestamp: %w", err)
+		}
+		result[mediaItemID] = visibleTimestampAfterHiddenTime(at, hiddenBefore)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating visible history timestamps: %w", err)
+	}
+	return result, nil
+}
+
+const completedHistoryVisibleSQL = `
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM user_history_hidden_items hhi
+			WHERE hhi.user_id = h.user_id
+			  AND hhi.profile_id = h.profile_id
+			  AND hhi.media_item_id = h.media_item_id
+			  AND h.watched_at <= hhi.hidden_before
+		)`
+
+func completedHistoryFilterArgs(
+	mediaItemIDs []string,
+	includeSources []userstore.WatchHistorySource,
+	excludeSources []userstore.WatchHistorySource,
+) ([]string, []string, []string) {
+	include := make([]string, 0, len(includeSources))
+	for _, source := range includeSources {
+		include = append(include, string(source))
+	}
+	exclude := make([]string, 0, len(excludeSources))
+	for _, source := range excludeSources {
+		exclude = append(exclude, string(source))
+	}
+	return include, exclude, compactMediaItemIDs(mediaItemIDs)
 }
 
 func (s *PostgresUserStore) RemoveHistoryItems(
@@ -630,8 +818,23 @@ func (s *PostgresUserStore) RemoveHistoryItems(
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `
+		WITH target(media_item_id) AS (
+			SELECT unnest($3::text[])
+		),
+		watermark AS (
+			SELECT
+				t.media_item_id,
+				GREATEST($4::timestamptz, COALESCE(MAX(h.watched_at), $4::timestamptz)) AS hidden_before
+			FROM target t
+			LEFT JOIN user_watch_history h
+			  ON h.user_id = $1
+			 AND h.profile_id = $2
+			 AND h.media_item_id = t.media_item_id
+			GROUP BY t.media_item_id
+		)
 		INSERT INTO user_history_hidden_items (user_id, profile_id, media_item_id, hidden_before, updated_at)
-		SELECT $1, $2, unnest($3::text[]), $4, $4
+		SELECT $1, $2, media_item_id, hidden_before, $4
+		FROM watermark
 		ON CONFLICT (user_id, profile_id, media_item_id) DO UPDATE SET
 			hidden_before = GREATEST(user_history_hidden_items.hidden_before, EXCLUDED.hidden_before),
 			updated_at = EXCLUDED.updated_at
@@ -640,12 +843,16 @@ func (s *PostgresUserStore) RemoveHistoryItems(
 	}
 
 	if _, err := tx.Exec(ctx, `
-		DELETE FROM user_watch_history
-		WHERE user_id = $1
-		  AND profile_id = $2
-		  AND media_item_id = ANY($3::text[])
-		  AND watched_at <= $4
-	`, s.userID, profileID, mediaItemIDs, removedAt.UTC()); err != nil {
+		DELETE FROM user_watch_history h
+		USING user_history_hidden_items hhi
+		WHERE h.user_id = $1
+		  AND h.profile_id = $2
+		  AND h.media_item_id = ANY($3::text[])
+		  AND hhi.user_id = h.user_id
+		  AND hhi.profile_id = h.profile_id
+		  AND hhi.media_item_id = h.media_item_id
+		  AND h.watched_at <= hhi.hidden_before
+	`, s.userID, profileID, mediaItemIDs); err != nil {
 		return fmt.Errorf("deleting removed history rows: %w", err)
 	}
 
@@ -697,6 +904,17 @@ func (s *PostgresUserStore) historyIsHidden(
 		return false, fmt.Errorf("checking hidden history item: %w", err)
 	}
 	return exists, nil
+}
+
+func visibleTimestampAfterHiddenTime(at time.Time, hiddenBefore sql.NullTime) string {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	at = at.UTC()
+	if !hiddenBefore.Valid || at.After(hiddenBefore.Time) {
+		return timeToString(at)
+	}
+	return timeToString(hiddenBefore.Time.UTC().Add(time.Second))
 }
 
 func compactMediaItemIDs(mediaItemIDs []string) []string {

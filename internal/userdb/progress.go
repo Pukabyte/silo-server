@@ -24,13 +24,23 @@ func UpdateProgress(db *sql.DB, profileID, mediaItemID string, position, duratio
 		return nil
 	}
 	now := nowUTC()
+	completed := false
+	if duration > 0 && position/duration > userstore.WatchedFraction(thresholds.WatchedPct) {
+		completed = true
+		position = 0 // match MarkWatched() — completed rows hold no resume point
+	}
 	// Mirrors the Postgres pgstore UpdateProgress: `completed` is a one-way
 	// watched latch; position resets to 0 on completion so a rewatch
 	// heartbeat on a completed row re-enters Continue Watching through plain
 	// MAX while the watched flag survives.
 	query := `
 		INSERT INTO watch_progress (profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		SELECT ?, ?, ?, ?, ?, ` + visibleTimestampSQL + `
+		FROM (SELECT 1) seed
+		LEFT JOIN hidden_history_items hhi
+		  ON hhi.profile_id = ?
+		 AND hhi.media_item_id = ?
+		WHERE true
 		ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
 			position_seconds = CASE WHEN excluded.completed = 1 THEN 0
 				ELSE MAX(excluded.position_seconds, watch_progress.position_seconds) END,
@@ -39,23 +49,20 @@ func UpdateProgress(db *sql.DB, profileID, mediaItemID string, position, duratio
 				THEN 1 ELSE watch_progress.completed END,
 			updated_at = excluded.updated_at
 	`
-	completed := false
-	if duration > 0 && position/duration > userstore.WatchedFraction(thresholds.WatchedPct) {
-		completed = true
-		position = 0 // match MarkWatched() — completed rows hold no resume point
-	}
-	_, err := db.Exec(query, profileID, mediaItemID, position, duration, completed, now)
+	_, err := db.Exec(query, profileID, mediaItemID, position, duration, completed, now, now, profileID, mediaItemID)
 	if err != nil {
 		return fmt.Errorf("updating progress: %w", err)
 	}
 	return nil
 }
 
-// SetProgress bypasses the forward-only guard (for rewatches/explicit seek).
-// It unconditionally sets the position to the given value. The completed flag
-// stays a one-way watched latch: only ClearProgress/ClearProgressBatch (mark
-// unwatched) release it.
+// SetProgress bypasses the forward-only guard (for rewatches/explicit seek)
+// after the min-resume threshold. The completed flag stays a one-way watched
+// latch: only ClearProgress/ClearProgressBatch (mark unwatched) release it.
 func SetProgress(db *sql.DB, profileID, mediaItemID string, position, duration float64, thresholds userstore.ProgressThresholds) error {
+	if duration > 0 && position > 0 && position/duration < userstore.MinResumeFraction(thresholds.MinResumePct) {
+		return nil
+	}
 	now := nowUTC()
 	completed := false
 	if duration > 0 && position/duration > userstore.WatchedFraction(thresholds.WatchedPct) {
@@ -64,14 +71,19 @@ func SetProgress(db *sql.DB, profileID, mediaItemID string, position, duration f
 	}
 	query := `
 		INSERT INTO watch_progress (profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		SELECT ?, ?, ?, ?, ?, ` + visibleTimestampSQL + `
+		FROM (SELECT 1) seed
+		LEFT JOIN hidden_history_items hhi
+		  ON hhi.profile_id = ?
+		 AND hhi.media_item_id = ?
+		WHERE true
 		ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
 			position_seconds = excluded.position_seconds,
 			duration_seconds = excluded.duration_seconds,
 			completed = watch_progress.completed OR excluded.completed,
 			updated_at = excluded.updated_at
 	`
-	_, err := db.Exec(query, profileID, mediaItemID, position, duration, completed, now)
+	_, err := db.Exec(query, profileID, mediaItemID, position, duration, completed, now, now, profileID, mediaItemID)
 	if err != nil {
 		return fmt.Errorf("setting progress: %w", err)
 	}
@@ -166,14 +178,19 @@ func MarkWatched(db *sql.DB, profileID, mediaItemID string, duration float64) er
 	now := nowUTC()
 	query := `
 		INSERT INTO watch_progress (profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-		VALUES (?, ?, 0, ?, 1, ?)
+		SELECT ?, ?, 0, ?, 1, ` + visibleTimestampSQL + `
+		FROM (SELECT 1) seed
+		LEFT JOIN hidden_history_items hhi
+		  ON hhi.profile_id = ?
+		 AND hhi.media_item_id = ?
+		WHERE true
 		ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
 			position_seconds = 0,
 			duration_seconds = excluded.duration_seconds,
 			completed = 1,
 			updated_at = excluded.updated_at
 	`
-	_, err := db.Exec(query, profileID, mediaItemID, duration, now)
+	_, err := db.Exec(query, profileID, mediaItemID, duration, now, now, profileID, mediaItemID)
 	if err != nil {
 		return fmt.Errorf("marking watched: %w", err)
 	}
@@ -194,9 +211,7 @@ func ClearProgress(db *sql.DB, profileID, mediaItemID string) error {
 }
 
 // MarkProgressBatch marks every (profile, media_item_id) pair as completed in a
-// single transaction. SQLite has no UNNEST, so each row goes through the same
-// MarkWatched UPSERT but inside one BEGIN/COMMIT — still much cheaper than
-// per-call autocommit.
+// single SQLite statement.
 func MarkProgressBatch(db *sql.DB, profileID string, mediaItemIDs []string, updatedAt time.Time) error {
 	mediaItemIDs = compactText(mediaItemIDs)
 	if len(mediaItemIDs) == 0 {
@@ -205,28 +220,39 @@ func MarkProgressBatch(db *sql.DB, profileID string, mediaItemIDs []string, upda
 	if updatedAt.IsZero() {
 		updatedAt = time.Now().UTC()
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin mark progress batch: %w", err)
-	}
-	defer tx.Rollback()
 	updatedAtText := updatedAt.UTC().Format(time.RFC3339)
-	for _, mediaItemID := range mediaItemIDs {
-		if _, err := tx.Exec(`
-			INSERT INTO watch_progress (profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
-			VALUES (?, ?, 0, 0, 1, ?)
-			ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
-				completed = 1,
-				position_seconds = 0,
-				updated_at = excluded.updated_at
-			WHERE watch_progress.completed != 1
-			   OR watch_progress.updated_at < excluded.updated_at
-		`, profileID, mediaItemID, updatedAtText); err != nil {
-			return fmt.Errorf("mark progress batch row: %w", err)
-		}
+	targetValues := make([]string, len(mediaItemIDs))
+	args := make([]any, 0, len(mediaItemIDs)+4)
+	for i, mediaItemID := range mediaItemIDs {
+		targetValues[i] = "(?)"
+		args = append(args, mediaItemID)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit mark progress batch: %w", err)
+	args = append(args, updatedAtText, updatedAtText, profileID, profileID)
+	if _, err := db.Exec(`
+		WITH target(media_item_id) AS (
+			VALUES `+strings.Join(targetValues, ",")+`
+		),
+		visible AS (
+			SELECT
+				t.media_item_id,
+				`+visibleTimestampSQL+` AS updated_at
+			FROM target t
+			LEFT JOIN hidden_history_items hhi
+			  ON hhi.profile_id = ?
+			 AND hhi.media_item_id = t.media_item_id
+		)
+		INSERT INTO watch_progress (profile_id, media_item_id, position_seconds, duration_seconds, completed, updated_at)
+		SELECT ?, media_item_id, 0, 0, 1, updated_at
+		FROM visible
+		WHERE true
+		ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
+			completed = 1,
+			position_seconds = 0,
+			updated_at = excluded.updated_at
+		WHERE watch_progress.completed != 1
+		   OR watch_progress.updated_at < excluded.updated_at
+	`, args...); err != nil {
+		return fmt.Errorf("marking progress batch: %w", err)
 	}
 	return nil
 }
@@ -492,6 +518,35 @@ func AddHistory(db *sql.DB, entry WatchHistoryEntry) error {
 	return nil
 }
 
+func AddVisibleHistory(db *sql.DB, entry WatchHistoryEntry) (WatchHistoryEntry, error) {
+	if entry.ID == "" {
+		entry.ID = generateUUID()
+	}
+	if entry.WatchedAt == "" {
+		entry.WatchedAt = nowUTC()
+	}
+	if entry.Source == "" {
+		entry.Source = userstore.WatchHistorySourceLegacy
+	}
+	identityJSON, err := json.Marshal(entry.Identity)
+	if err != nil {
+		return entry, fmt.Errorf("marshaling watch identity: %w", err)
+	}
+	if err := db.QueryRow(`
+		INSERT INTO watch_history (id, profile_id, media_item_id, watched_at, duration_seconds, completed, source, watch_identity)
+		SELECT ?, ?, ?, `+visibleTimestampSQL+`, ?, ?, ?, ?
+		FROM (SELECT 1) seed
+		LEFT JOIN hidden_history_items hhi
+		  ON hhi.profile_id = ?
+		 AND hhi.media_item_id = ?
+		WHERE true
+		RETURNING watched_at
+	`, entry.ID, entry.ProfileID, entry.MediaItemID, entry.WatchedAt, entry.WatchedAt, entry.DurationSeconds, entry.Completed, entry.Source, string(identityJSON), entry.ProfileID, entry.MediaItemID).Scan(&entry.WatchedAt); err != nil {
+		return entry, fmt.Errorf("adding visible history entry: %w", err)
+	}
+	return entry, nil
+}
+
 func AddHistoryIfMissing(db *sql.DB, entry WatchHistoryEntry) (bool, error) {
 	if entry.WatchedAt == "" {
 		entry.WatchedAt = nowUTC()
@@ -574,49 +629,15 @@ func ListCompletedHistory(db *sql.DB, query userstore.CompletedHistoryQuery) ([]
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	args := []any{query.ProfileID}
-	includeSourceFilter := ""
-	if len(query.IncludeSources) > 0 {
-		placeholders := make([]string, 0, len(query.IncludeSources))
-		for _, source := range query.IncludeSources {
-			placeholders = append(placeholders, "?")
-			args = append(args, string(source))
-		}
-		includeSourceFilter = " AND h.source IN (" + strings.Join(placeholders, ",") + ")"
-	}
-	sourceFilter := ""
-	if len(query.ExcludeSources) > 0 {
-		placeholders := make([]string, 0, len(query.ExcludeSources))
-		for _, source := range query.ExcludeSources {
-			placeholders = append(placeholders, "?")
-			args = append(args, string(source))
-		}
-		sourceFilter = " AND h.source NOT IN (" + strings.Join(placeholders, ",") + ")"
-	}
-	mediaFilter := ""
-	if len(query.MediaItemIDs) > 0 {
-		placeholders := make([]string, 0, len(query.MediaItemIDs))
-		for _, mediaItemID := range query.MediaItemIDs {
-			placeholders = append(placeholders, "?")
-			args = append(args, mediaItemID)
-		}
-		mediaFilter = " AND h.media_item_id IN (" + strings.Join(placeholders, ",") + ")"
-	}
+	filters, args := completedHistoryFilterSQL(query.ProfileID, query.MediaItemIDs, query.IncludeSources, query.ExcludeSources)
 	args = append(args, limit, query.Offset)
 	rows, err := db.Query(`
 		SELECT h.id, h.profile_id, h.media_item_id, h.watched_at, h.duration_seconds, h.completed, h.source, h.watch_identity
 		FROM watch_history h
 		WHERE h.profile_id = ?
 		  AND h.completed = 1
-		`+includeSourceFilter+sourceFilter+mediaFilter+`
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM hidden_history_items hhi
-			WHERE hhi.profile_id = h.profile_id
-			  AND hhi.media_item_id = h.media_item_id
-			  AND h.watched_at <= hhi.hidden_before
-		  )
-		ORDER BY h.watched_at ASC
+		`+filters+completedHistoryVisibleSQL+`
+		ORDER BY h.watched_at ASC, h.id ASC
 		LIMIT ? OFFSET ?
 	`, args...)
 	if err != nil {
@@ -646,6 +667,89 @@ func ListCompletedHistory(db *sql.DB, query userstore.CompletedHistoryQuery) ([]
 	return results, nil
 }
 
+func ListCompletedHistoryItems(db *sql.DB, query userstore.CompletedHistoryItemQuery) ([]userstore.CompletedHistoryItem, error) {
+	filters, args := completedHistoryFilterSQL(query.ProfileID, query.MediaItemIDs, query.IncludeSources, query.ExcludeSources)
+	rows, err := db.Query(`
+		SELECT h.media_item_id, MAX(h.watched_at)
+		FROM watch_history h
+		WHERE h.profile_id = ?
+		  AND h.completed = 1
+		`+filters+completedHistoryVisibleSQL+`
+		GROUP BY h.media_item_id
+		ORDER BY h.media_item_id ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing completed history items: %w", err)
+	}
+	defer rows.Close()
+
+	var results []userstore.CompletedHistoryItem
+	for rows.Next() {
+		var item userstore.CompletedHistoryItem
+		if err := rows.Scan(&item.MediaItemID, &item.WatchedAt); err != nil {
+			return nil, fmt.Errorf("scanning completed history item: %w", err)
+		}
+		results = append(results, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating completed history items: %w", err)
+	}
+	return results, nil
+}
+
+const completedHistoryVisibleSQL = `
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM hidden_history_items hhi
+			WHERE hhi.profile_id = h.profile_id
+			  AND hhi.media_item_id = h.media_item_id
+			  AND h.watched_at <= hhi.hidden_before
+		  )`
+
+const visibleTimestampSQL = `
+			CASE
+				WHEN hhi.hidden_before IS NOT NULL AND ? <= hhi.hidden_before
+				THEN strftime('%Y-%m-%dT%H:%M:%SZ', hhi.hidden_before, '+1 second')
+				ELSE ?
+			END`
+
+func completedHistoryFilterSQL(
+	profileID string,
+	mediaItemIDs []string,
+	includeSources []userstore.WatchHistorySource,
+	excludeSources []userstore.WatchHistorySource,
+) (string, []any) {
+	args := []any{profileID}
+	var filters strings.Builder
+	if len(includeSources) > 0 {
+		placeholders := make([]string, 0, len(includeSources))
+		for _, source := range includeSources {
+			placeholders = append(placeholders, "?")
+			args = append(args, string(source))
+		}
+		filters.WriteString(" AND h.source IN (" + strings.Join(placeholders, ",") + ")")
+	}
+	if len(excludeSources) > 0 {
+		placeholders := make([]string, 0, len(excludeSources))
+		for _, source := range excludeSources {
+			placeholders = append(placeholders, "?")
+			args = append(args, string(source))
+		}
+		filters.WriteString(" AND h.source NOT IN (" + strings.Join(placeholders, ",") + ")")
+	}
+	mediaItemIDs = compactText(mediaItemIDs)
+	if len(mediaItemIDs) > 0 {
+		placeholders := make([]string, 0, len(mediaItemIDs))
+		for _, mediaItemID := range mediaItemIDs {
+			placeholders = append(placeholders, "?")
+			args = append(args, mediaItemID)
+		}
+		filters.WriteString(" AND h.media_item_id IN (" + strings.Join(placeholders, ",") + ")")
+	}
+	return filters.String(), args
+}
+
 func RemoveHistoryItems(db *sql.DB, profileID string, mediaItemIDs []string, removedAt time.Time) error {
 	mediaItemIDs = compactText(mediaItemIDs)
 	if len(mediaItemIDs) == 0 {
@@ -662,35 +766,63 @@ func RemoveHistoryItems(db *sql.DB, profileID string, mediaItemIDs []string, rem
 	defer tx.Rollback()
 
 	removedAtText := removedAt.UTC().Format(time.RFC3339)
-	for _, mediaItemID := range mediaItemIDs {
-		if _, err := tx.Exec(`
-			INSERT INTO hidden_history_items (profile_id, media_item_id, hidden_before, updated_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
-				hidden_before = CASE
-					WHEN excluded.hidden_before > hidden_history_items.hidden_before
-					THEN excluded.hidden_before
-					ELSE hidden_history_items.hidden_before
-				END,
-				updated_at = excluded.updated_at
-		`, profileID, mediaItemID, removedAtText, removedAtText); err != nil {
-			return fmt.Errorf("upserting hidden history item: %w", err)
-		}
+	targetValues := make([]string, len(mediaItemIDs))
+	watermarkArgs := make([]any, 0, len(mediaItemIDs)+5)
+	for i, mediaItemID := range mediaItemIDs {
+		targetValues[i] = "(?)"
+		watermarkArgs = append(watermarkArgs, mediaItemID)
+	}
+	watermarkArgs = append(watermarkArgs, removedAtText, removedAtText, profileID, profileID, removedAtText)
+	if _, err := tx.Exec(`
+		WITH target(media_item_id) AS (
+			VALUES `+strings.Join(targetValues, ",")+`
+		),
+		watermark AS (
+			SELECT
+				t.media_item_id,
+				CASE
+					WHEN MAX(h.watched_at) IS NOT NULL AND MAX(h.watched_at) > ?
+					THEN MAX(h.watched_at)
+					ELSE ?
+				END AS hidden_before
+			FROM target t
+			LEFT JOIN watch_history h
+			  ON h.profile_id = ?
+			 AND h.media_item_id = t.media_item_id
+			GROUP BY t.media_item_id
+		)
+		INSERT INTO hidden_history_items (profile_id, media_item_id, hidden_before, updated_at)
+		SELECT ?, media_item_id, hidden_before, ?
+		FROM watermark
+		WHERE true
+		ON CONFLICT(profile_id, media_item_id) DO UPDATE SET
+			hidden_before = CASE
+				WHEN excluded.hidden_before > hidden_history_items.hidden_before
+				THEN excluded.hidden_before
+				ELSE hidden_history_items.hidden_before
+			END,
+			updated_at = excluded.updated_at
+	`, watermarkArgs...); err != nil {
+		return fmt.Errorf("upserting hidden history items: %w", err)
 	}
 
 	placeholders := make([]string, len(mediaItemIDs))
-	args := make([]any, 0, len(mediaItemIDs)+2)
+	args := make([]any, 0, len(mediaItemIDs)+1)
 	args = append(args, profileID)
 	for i, mediaItemID := range mediaItemIDs {
 		placeholders[i] = "?"
 		args = append(args, mediaItemID)
 	}
-	args = append(args, removedAtText)
 	if _, err := tx.Exec(`
 		DELETE FROM watch_history
 		WHERE profile_id = ?
 		  AND media_item_id IN (`+strings.Join(placeholders, ",")+`)
-		  AND watched_at <= ?
+		  AND watched_at <= (
+			SELECT hhi.hidden_before
+			FROM hidden_history_items hhi
+			WHERE hhi.profile_id = watch_history.profile_id
+			  AND hhi.media_item_id = watch_history.media_item_id
+		  )
 	`, args...); err != nil {
 		return fmt.Errorf("deleting removed history rows: %w", err)
 	}
@@ -748,6 +880,66 @@ func historyIsHidden(db *sql.DB, profileID, mediaItemID, watchedAt string) (bool
 		return false, fmt.Errorf("checking hidden history item: %w", err)
 	}
 	return exists, nil
+}
+
+func VisibleHistoryTimestamps(db *sql.DB, profileID string, mediaItemIDs []string, at time.Time) (map[string]string, error) {
+	mediaItemIDs = compactText(mediaItemIDs)
+	result := make(map[string]string, len(mediaItemIDs))
+	if len(mediaItemIDs) == 0 {
+		return result, nil
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	targetValues := make([]string, len(mediaItemIDs))
+	args := make([]any, 0, len(mediaItemIDs)+1)
+	for i, mediaItemID := range mediaItemIDs {
+		targetValues[i] = "(?)"
+		args = append(args, mediaItemID)
+	}
+	args = append(args, profileID)
+	rows, err := db.Query(`
+		WITH target(media_item_id) AS (
+			VALUES `+strings.Join(targetValues, ",")+`
+		)
+		SELECT t.media_item_id, hhi.hidden_before
+		FROM target t
+		LEFT JOIN hidden_history_items hhi
+		  ON hhi.media_item_id = t.media_item_id
+		 AND hhi.profile_id = ?
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing visible history timestamps: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var mediaItemID string
+		var hiddenBefore sql.NullString
+		if err := rows.Scan(&mediaItemID, &hiddenBefore); err != nil {
+			return nil, fmt.Errorf("scanning visible history timestamp: %w", err)
+		}
+		result[mediaItemID] = visibleTimestampAfterHiddenString(at, hiddenBefore)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating visible history timestamps: %w", err)
+	}
+	return result, nil
+}
+
+func visibleTimestampAfterHiddenString(at time.Time, hiddenBefore sql.NullString) string {
+	timestamp := at.UTC().Format(time.RFC3339)
+	if !hiddenBefore.Valid {
+		return timestamp
+	}
+	hiddenAt, err := time.Parse(time.RFC3339, hiddenBefore.String)
+	if err != nil {
+		return timestamp
+	}
+	if at.UTC().After(hiddenAt) {
+		return timestamp
+	}
+	return hiddenAt.UTC().Add(time.Second).Format(time.RFC3339)
 }
 
 func compactText(values []string) []string {

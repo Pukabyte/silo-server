@@ -155,6 +155,18 @@ type CompletedHistoryQuery struct {
 	Offset         int
 }
 
+type CompletedHistoryItemQuery struct {
+	ProfileID      string
+	MediaItemIDs   []string
+	IncludeSources []WatchHistorySource
+	ExcludeSources []WatchHistorySource
+}
+
+type CompletedHistoryItem struct {
+	MediaItemID string
+	WatchedAt   string
+}
+
 // Favorite represents a favorited media item.
 type Favorite struct {
 	ProfileID   string

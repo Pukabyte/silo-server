@@ -60,7 +60,7 @@ func (s *Service) RecordManualMarkUnwatched(ctx context.Context, userID int, pro
 }
 
 func (s *Service) RecordManualMarkUnwatchedWithResult(ctx context.Context, userID int, profileID string, targetIDs []string) (ManualMarkResult, error) {
-	return s.recordMarkUnwatched(ctx, userID, profileID, targetIDs, userstore.WatchHistorySourceManual)
+	return s.recordMarkUnwatched(ctx, userID, profileID, targetIDs)
 }
 
 func (s *Service) RecordPlaybackStop(
@@ -86,6 +86,9 @@ func (s *Service) RecordPlaybackStop(
 	if err != nil {
 		return result, err
 	}
+	if watchedAt.IsZero() {
+		watchedAt = time.Now().UTC()
+	}
 	if err := store.SetProgress(ctx, profileID, targetID, position, duration, thresholds); err != nil {
 		return result, err
 	}
@@ -105,7 +108,8 @@ func (s *Service) RecordPlaybackStop(
 		Source:          userstore.WatchHistorySourcePlayback,
 	}
 	s.applyStableIdentity(ctx, &entry)
-	if err := store.AddHistory(ctx, entry); err != nil {
+	entry, err = userstore.AddVisibleHistory(ctx, store, entry)
+	if err != nil {
 		return result, err
 	}
 	result.Completed = entry.Completed
@@ -140,6 +144,26 @@ func (s *Service) RecordImportedWatchWithSource(
 		return false, err
 	}
 	if err := store.SetProgressAt(ctx, profileID, targetID, position, duration, completed, updatedAt); err != nil {
+		return false, err
+	}
+	return s.addImportedHistoryIfMissingWithSource(ctx, store, profileID, targetID, duration, completed, watchedAt, source)
+}
+
+func (s *Service) RecordImportedWatchIfNewerWithSource(
+	ctx context.Context,
+	userID int,
+	profileID, targetID string,
+	duration, position float64,
+	completed bool,
+	updatedAt time.Time,
+	watchedAt *time.Time,
+	source userstore.WatchHistorySource,
+) (bool, error) {
+	store, err := s.storeForUser(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := store.SetProgressIfNewer(ctx, profileID, targetID, position, duration, completed, updatedAt); err != nil {
 		return false, err
 	}
 	return s.addImportedHistoryIfMissingWithSource(ctx, store, profileID, targetID, duration, completed, watchedAt, source)
@@ -226,7 +250,7 @@ func (s *Service) RecordJellycompatMarkPlayed(ctx context.Context, userID int, p
 }
 
 func (s *Service) RecordJellycompatMarkUnplayed(ctx context.Context, userID int, profileID, targetID string) error {
-	_, err := s.recordMarkUnwatched(ctx, userID, profileID, []string{targetID}, userstore.WatchHistorySourceJellycompat)
+	_, err := s.recordMarkUnwatched(ctx, userID, profileID, []string{targetID})
 	return err
 }
 
@@ -238,11 +262,10 @@ func (s *Service) RecordJellycompatMarkPlayedBatch(ctx context.Context, userID i
 	return s.recordMarkWatchedBatch(ctx, userID, profileID, targetIDs, watchedAt, userstore.WatchHistorySourceJellycompat)
 }
 
-// RecordJellycompatMarkUnplayedBatch clears progress and deletes
-// jellycompat-sourced history entries for all targets in a single statement
-// each (audit 2026-05-01 §2.7).
+// RecordJellycompatMarkUnplayedBatch hides prior visible history and clears
+// progress for all targets in a single store operation.
 func (s *Service) RecordJellycompatMarkUnplayedBatch(ctx context.Context, userID int, profileID string, targetIDs []string) error {
-	return s.recordMarkUnwatchedBatch(ctx, userID, profileID, targetIDs, userstore.WatchHistorySourceJellycompat)
+	return s.recordMarkUnwatchedBatch(ctx, userID, profileID, targetIDs)
 }
 
 func (s *Service) storeForUser(ctx context.Context, userID int) (userstore.UserStore, error) {
@@ -271,7 +294,9 @@ func (s *Service) recordMarkWatched(
 	if err != nil {
 		return ManualMarkResult{}, err
 	}
-	entryTime := formatWatchedAt(watchedAt)
+	if watchedAt.IsZero() {
+		watchedAt = time.Now().UTC()
+	}
 	result := ManualMarkResult{Entries: make([]userstore.WatchHistoryEntry, 0, len(targets))}
 	for _, target := range targets {
 		if err := store.MarkWatched(ctx, profileID, target.MediaItemID, target.DurationSeconds); err != nil {
@@ -281,13 +306,14 @@ func (s *Service) recordMarkWatched(
 			ID:              uuid.NewString(),
 			ProfileID:       profileID,
 			MediaItemID:     target.MediaItemID,
-			WatchedAt:       entryTime,
+			WatchedAt:       formatWatchedAt(watchedAt),
 			DurationSeconds: target.DurationSeconds,
 			Completed:       true,
 			Source:          source,
 		}
 		s.applyStableIdentity(ctx, &histEntry)
-		if err := store.AddHistory(ctx, histEntry); err != nil {
+		histEntry, err = userstore.AddVisibleHistory(ctx, store, histEntry)
+		if err != nil {
 			return result, err
 		}
 		result.Entries = append(result.Entries, histEntry)
@@ -300,22 +326,16 @@ func (s *Service) recordMarkUnwatched(
 	userID int,
 	profileID string,
 	targetIDs []string,
-	source userstore.WatchHistorySource,
 ) (ManualMarkResult, error) {
 	store, err := s.storeForUser(ctx, userID)
 	if err != nil {
 		return ManualMarkResult{}, err
 	}
-	result, err := s.completedHistoryForTargets(ctx, store, profileID, targetIDs, source)
+	result, err := s.completedHistoryForTargets(ctx, store, profileID, targetIDs, []userstore.WatchHistorySource{userstore.WatchHistorySourceManual})
 	if err != nil {
 		return ManualMarkResult{}, err
 	}
-	for _, targetID := range targetIDs {
-		if err := store.ClearProgress(ctx, profileID, targetID); err != nil {
-			return result, err
-		}
-	}
-	return result, store.DeleteHistoryBySource(ctx, profileID, targetIDs, source)
+	return result, store.RemoveHistoryItems(ctx, profileID, targetIDs, time.Now().UTC())
 }
 
 func (s *Service) completedHistoryForTargets(
@@ -323,23 +343,55 @@ func (s *Service) completedHistoryForTargets(
 	store userstore.UserStore,
 	profileID string,
 	targetIDs []string,
-	source userstore.WatchHistorySource,
+	includeSources []userstore.WatchHistorySource,
 ) (ManualMarkResult, error) {
 	if len(targetIDs) == 0 {
 		return ManualMarkResult{}, nil
 	}
-	entries, err := store.ListCompletedHistory(ctx, userstore.CompletedHistoryQuery{
-		ProfileID:    profileID,
-		MediaItemIDs: targetIDs,
-		IncludeSources: []userstore.WatchHistorySource{
-			source,
-		},
-		Limit: len(targetIDs) * 20,
-	})
-	if err != nil {
-		return ManualMarkResult{}, err
+	const pageSize = 500
+	var entries []userstore.WatchHistoryEntry
+	for offset := 0; ; offset += pageSize {
+		page, err := store.ListCompletedHistory(ctx, userstore.CompletedHistoryQuery{
+			ProfileID:      profileID,
+			MediaItemIDs:   targetIDs,
+			IncludeSources: includeSources,
+			Limit:          pageSize,
+			Offset:         offset,
+		})
+		if err != nil {
+			return ManualMarkResult{}, err
+		}
+		entries = append(entries, page...)
+		if len(page) < pageSize {
+			break
+		}
 	}
-	return ManualMarkResult{Entries: entries}, nil
+	return ManualMarkResult{Entries: representativeHistoryEntries(targetIDs, entries)}, nil
+}
+
+func representativeHistoryEntries(targetIDs []string, entries []userstore.WatchHistoryEntry) []userstore.WatchHistoryEntry {
+	if len(targetIDs) == 0 || len(entries) == 0 {
+		return nil
+	}
+	latestByTarget := make(map[string]userstore.WatchHistoryEntry, len(targetIDs))
+	for _, entry := range entries {
+		current, ok := latestByTarget[entry.MediaItemID]
+		if !ok || entry.WatchedAt > current.WatchedAt || (entry.WatchedAt == current.WatchedAt && entry.ID > current.ID) {
+			latestByTarget[entry.MediaItemID] = entry
+		}
+	}
+	result := make([]userstore.WatchHistoryEntry, 0, len(latestByTarget))
+	seen := make(map[string]struct{}, len(targetIDs))
+	for _, targetID := range targetIDs {
+		if _, ok := seen[targetID]; ok {
+			continue
+		}
+		seen[targetID] = struct{}{}
+		if entry, ok := latestByTarget[targetID]; ok {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func (s *Service) recordMarkWatchedBatch(
@@ -366,17 +418,16 @@ func (s *Service) recordMarkWatchedBatch(
 	// Strategy A (audit 2026-05-01 §2.7): batch the progress upsert because it
 	// powers hot Continue-Watching queries. History inserts stay per-target so
 	// per-episode stable-identity resolution still applies.
-	entryTime := formatWatchedAt(watchedAt)
 	for _, targetID := range targetIDs {
 		histEntry := userstore.WatchHistoryEntry{
 			ProfileID:   profileID,
 			MediaItemID: targetID,
-			WatchedAt:   entryTime,
+			WatchedAt:   formatWatchedAt(watchedAt),
 			Completed:   true,
 			Source:      source,
 		}
 		s.applyStableIdentity(ctx, &histEntry)
-		if err := store.AddHistory(ctx, histEntry); err != nil {
+		if _, err := userstore.AddVisibleHistory(ctx, store, histEntry); err != nil {
 			return err
 		}
 	}
@@ -388,7 +439,6 @@ func (s *Service) recordMarkUnwatchedBatch(
 	userID int,
 	profileID string,
 	targetIDs []string,
-	source userstore.WatchHistorySource,
 ) error {
 	if len(targetIDs) == 0 {
 		return nil
@@ -397,10 +447,7 @@ func (s *Service) recordMarkUnwatchedBatch(
 	if err != nil {
 		return err
 	}
-	if err := store.ClearProgressBatch(ctx, profileID, targetIDs, time.Now().UTC()); err != nil {
-		return err
-	}
-	return store.DeleteHistoryBySource(ctx, profileID, targetIDs, source)
+	return store.RemoveHistoryItems(ctx, profileID, targetIDs, time.Now().UTC())
 }
 
 // buildMarkPlayedBatchSQL returns the upsert that marks every media_item_id in
@@ -418,25 +465,6 @@ func buildMarkPlayedBatchSQL() (string, []any) {
             updated_at = EXCLUDED.updated_at
         WHERE user_watch_progress.completed IS DISTINCT FROM TRUE
            OR user_watch_progress.updated_at < EXCLUDED.updated_at`, nil
-}
-
-// buildMarkUnplayedBatchSQL returns the update that clears the completed flag
-// and resets position to 0 for every media_item_id in $3 for a given
-// (user, profile). Pairs with the jellycompat unplayed-batch path; the matching
-// history-row deletion uses DeleteHistoryBySource which already takes a slice.
-//
-// The `completed = TRUE OR position_seconds <> 0` predicate clears partially-
-// watched rows in addition to fully-completed ones — the prior single-item
-// ClearProgress path DELETE-d unconditionally, so any non-default state must
-// be cleared (otherwise "mark unplayed" leaves resume position untouched).
-// Skip rows already in the target state to avoid pointless writes.
-func buildMarkUnplayedBatchSQL() (string, []any) {
-	return `
-        UPDATE user_watch_progress
-        SET completed = FALSE, position_seconds = 0, updated_at = $4
-        WHERE user_id = $1 AND profile_id = $2
-          AND media_item_id = ANY($3::text[])
-          AND (completed = TRUE OR position_seconds <> 0)`, nil
 }
 
 func (s *Service) addImportedHistoryIfMissing(
