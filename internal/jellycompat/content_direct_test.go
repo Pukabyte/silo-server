@@ -241,6 +241,9 @@ func (s *progressCountingStore) ListHistory(context.Context, string, int, int) (
 func (s *progressCountingStore) ListCompletedHistory(context.Context, userstore.CompletedHistoryQuery) ([]userstore.WatchHistoryEntry, error) {
 	panic("unused")
 }
+func (s *progressCountingStore) ListCompletedHistoryItems(context.Context, userstore.CompletedHistoryItemQuery) ([]userstore.CompletedHistoryItem, error) {
+	return nil, nil
+}
 func (s *progressCountingStore) RemoveHistoryItems(context.Context, string, []string, time.Time) error {
 	panic("unused")
 }
