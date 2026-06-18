@@ -51,7 +51,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/database"
 	"github.com/Silo-Server/silo-server/internal/ebooks"
-	"github.com/Silo-Server/silo-server/internal/manga"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
 	"github.com/Silo-Server/silo-server/internal/imagecache"
@@ -62,6 +61,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/logfilter"
 	"github.com/Silo-Server/silo-server/internal/logstream"
 	"github.com/Silo-Server/silo-server/internal/mail"
+	"github.com/Silo-Server/silo-server/internal/manga"
 	"github.com/Silo-Server/silo-server/internal/markers"
 	"github.com/Silo-Server/silo-server/internal/mdblist"
 	"github.com/Silo-Server/silo-server/internal/metadata"
@@ -1042,6 +1042,7 @@ func main() {
 
 	// Step 4b: Create metadata service and match worker (if needed).
 	var metadataService *metadata.MetadataService
+	var metadataImageCacheProcessor *metadata.ImageCacheProcessor
 	var personRefreshService *metadata.PersonRefreshService
 	var matchWorker *metadata.MatchWorker
 	var libraryIngestExecutor *libraryingest.Executor
@@ -1169,26 +1170,47 @@ func main() {
 		if deps.S3Public != nil {
 			imageCacher := imagecache.New(deps.S3Public)
 			metadataService.SetImageCacher(imageCacher)
+			imageCacheJobs := metadata.NewImageCacheJobRepository(deps.DB)
+			metadataService.SetImageCacheJobEnqueuer(imageCacheJobs)
+			metadataImageCacheProcessor = metadata.NewImageCacheProcessorWithTargets(
+				imageCacheJobs,
+				imageCacher,
+				imageResolver,
+				metadata.ImageCacheProcessorTargets{
+					Items:               itemRepo,
+					Seasons:             seasonRepo,
+					Episodes:            episodeRepo,
+					ItemLocalizations:   catalog.NewMediaItemLocalizationRepository(deps.DB),
+					SeasonLocalizations: catalog.NewSeasonLocalizationRepository(deps.DB),
+					People:              personRepo,
+				},
+			)
 			metadataService.SetAutoCacheImages(cfg.Metadata.CacheImages)
+			metadataImageCacheProcessor.SetEnabled(cfg.Metadata.CacheImages)
 			configWatcher.OnChange(func(_, updated *config.Config) {
 				metadataService.SetAutoCacheImages(updated.Metadata.CacheImages)
+				metadataImageCacheProcessor.SetEnabled(updated.Metadata.CacheImages)
 			})
 			if deps.Scanner != nil {
 				deps.Scanner.SetImageCacher(imageCacher)
 			}
 			if cfg.Metadata.CacheImages {
 				personRefreshService.SetImageCacher(imageCacher)
+				personRefreshService.SetImageCacheJobEnqueuer(imageCacheJobs)
 				slog.Info("metadata image caching enabled")
 			}
 			if audiobookEnricher != nil {
 				audiobookEnricher.SetImageCacher(imageCacher)
+				audiobookEnricher.SetImageCacheJobEnqueuer(imageCacheJobs)
 				audiobookEnricher.SetFFmpegPath(scanner.FFmpegPathFromFFprobe(scanner.FFprobePathFromFFmpeg(cfg.Playback.FFmpegPath)))
 			}
 			if ebookEnricher != nil {
 				ebookEnricher.SetImageCacher(imageCacher)
+				ebookEnricher.SetImageCacheJobEnqueuer(imageCacheJobs)
 			}
 			if mangaEnricher != nil {
 				mangaEnricher.SetImageCacher(imageCacher)
+				mangaEnricher.SetImageCacheJobEnqueuer(imageCacheJobs)
 			}
 		}
 
@@ -1720,6 +1742,9 @@ func main() {
 		}
 		if refreshWorker != nil && metadataService != nil {
 			taskMgr.Register(tasks.NewRefreshMetadataTask(refreshWorker, metadataService))
+		}
+		if metadataImageCacheProcessor != nil {
+			taskMgr.Register(tasks.NewCacheMetadataImagesTask(metadataImageCacheProcessor))
 		}
 		if pluginAutoUpdater != nil {
 			taskMgr.Register(tasks.NewCheckPluginUpdatesTask(pluginAutoUpdater))
