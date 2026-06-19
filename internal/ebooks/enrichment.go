@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -776,12 +777,34 @@ func filterEbookPeople(people []models.ItemPerson) []models.ItemPerson {
 // path-fallback titles keep a trailing " - <Author>" segment. Both wreck a
 // title search, so collapse underscores to spaces and drop a trailing author
 // suffix (the author is searched as its own field).
+// ebookTrailingGroupRE matches a single trailing (...) or [...] group.
+var ebookTrailingGroupRE = regexp.MustCompile(`\s*[\(\[]([^\)\]]*)[\)\]]\s*$`)
+
+// ebookSeriesNoiseRE flags a parenthetical as series/edition noise rather than
+// part of the real title: a book/volume/part marker, a "#N", or a bare year.
+var ebookSeriesNoiseRE = regexp.MustCompile(`(?i)\b(book|bk|vol|volume|series|part|saga|edition|novella?)\b|#\s*\d|^\s*\d{1,4}\s*$|\b(19|20)\d{2}\b`)
+
 func cleanEbookSearchTitle(title, author string) string {
 	title = strings.ReplaceAll(title, "_", " ")
 	if a := strings.TrimSpace(author); a != "" {
 		if idx := strings.LastIndex(strings.ToLower(title), " - "+strings.ToLower(a)); idx >= 0 {
 			title = title[:idx]
 		}
+	}
+	// Strip trailing series/book-number parentheticals ("(The Raven Brothers
+	// Book 4)", "[#3]", "(2019)") that wreck provider title search. Only groups
+	// matching the noise pattern are removed, so meaningful parentheticals in a
+	// real title survive. Loop to peel stacked groups.
+	for {
+		m := ebookTrailingGroupRE.FindStringSubmatch(title)
+		if m == nil || !ebookSeriesNoiseRE.MatchString(m[1]) {
+			break
+		}
+		stripped := strings.TrimSpace(title[:len(title)-len(m[0])])
+		if stripped == "" {
+			break // never reduce the title to nothing
+		}
+		title = stripped
 	}
 	return strings.Join(strings.Fields(title), " ")
 }
