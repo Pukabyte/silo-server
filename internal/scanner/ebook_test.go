@@ -1984,7 +1984,7 @@ func TestEbookAuthorFromPath(t *testing.T) {
 		{
 			name: "case and spacing differences still match",
 			path: "/books/Books_English/A. F. Carter/All of Us (57890)/All of Us - a. f.  carter.pdf",
-			want: "a. f.  carter",
+			want: "A. F. Carter",
 		},
 		{
 			name: "no dash in filename",
@@ -2000,6 +2000,21 @@ func TestEbookAuthorFromPath(t *testing.T) {
 			name: "empty suffix",
 			path: "/books/X/Author/Title/Title - .pdf",
 			want: "",
+		},
+		{
+			name: "inverted series folder rejected (grandparent is title)",
+			path: "/books/Books_Dutch/De legenden van de Alfen/Heinz, Markus (2118)/Heinz, Markus - De legenden van de Alfen.epub",
+			want: "",
+		},
+		{
+			name: "comma surname form accepted",
+			path: "/books/Books_Dutch/Mersbergen, Jan van/De laatste ontsnapping (8702)/De laatste ontsnapping - Mersbergen, Jan van.epub",
+			want: "Mersbergen, Jan van",
+		},
+		{
+			name: "particle in name accepted",
+			path: "/books/Books_English/Dean R. Koontz/Midnight (7408)/Midnight - Dean R. Koontz.epub",
+			want: "Dean R. Koontz",
 		},
 	}
 	for _, tc := range cases {
