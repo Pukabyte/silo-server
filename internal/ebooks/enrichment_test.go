@@ -582,6 +582,12 @@ func TestCleanEbookSearchTitle(t *testing.T) {
 		{"All of Us - A. F. Carter", "a. f. carter", "All of Us"},
 		{"Plain Title", "Some Author", "Plain Title"},
 		{"  spaced   out  ", "", "spaced out"},
+		{"Just One Night (The Raven Brothers Book 4)", "", "Just One Night"},
+		{"Mistborn (The Mistborn Saga #1)", "", "Mistborn"},
+		{"White Out [Badlands Thriller]", "", "White Out [Badlands Thriller]"},
+		{"Salem's Lot (2019)", "", "Salem's Lot"},
+		{"The Hobbit (Illustrated)", "", "The Hobbit (Illustrated)"},
+		{"Exit Strategy_ Murderbot Di - Martha Wells (Book 4)", "Martha Wells", "Exit Strategy Murderbot Di"},
 	}
 	for _, tc := range cases {
 		if got := cleanEbookSearchTitle(tc.title, tc.author); got != tc.want {
