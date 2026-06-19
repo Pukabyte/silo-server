@@ -777,6 +777,7 @@ func buildEbookSearchQuery(item enrichmentItemRow) (metadata.SearchQuery, map[st
 	}
 	return metadata.SearchQuery{
 		Title:       item.Title,
+		Author:      item.Author,
 		Year:        item.Year,
 		ContentType: ebookContentType(),
 		ProviderIDs: accumulatedIDs,
