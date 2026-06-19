@@ -5,6 +5,7 @@
 -- episodes.season_id, while the existing episode index is keyed by
 -- (series_id, season_number, episode_number). On large catalogs this forced a
 -- parallel scan of the full episodes table for each season page load.
+-- +goose StatementBegin
 DO $$
 BEGIN
     IF EXISTS (
@@ -18,10 +19,11 @@ BEGIN
     ) THEN
         DROP INDEX public.idx_episodes_season_id_episode_number;
     END IF;
-END
+END;
 $$;
+-- +goose StatementEnd
 
-CREATE INDEX CONCURRENTLY idx_episodes_season_id_episode_number
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_episodes_season_id_episode_number
 ON public.episodes USING btree (season_id, episode_number);
 
 -- +goose Down
