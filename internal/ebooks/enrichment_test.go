@@ -571,3 +571,21 @@ func (f *fakeEbookImageCacher) CacheImage(_ context.Context, req metadata.CacheI
 		Ext:       ".webp",
 	}, nil
 }
+
+func TestCleanEbookSearchTitle(t *testing.T) {
+	cases := []struct {
+		title, author, want string
+	}{
+		{"Exit Strategy_ The Murderbot Di - Martha Wells", "Martha Wells", "Exit Strategy The Murderbot Di"},
+		{"LTB.067_-_Micky_Maus_Superstar", "", "LTB.067 - Micky Maus Superstar"},
+		{"Club Dark Lace_ Complete Dark Lace", "", "Club Dark Lace Complete Dark Lace"},
+		{"All of Us - A. F. Carter", "a. f. carter", "All of Us"},
+		{"Plain Title", "Some Author", "Plain Title"},
+		{"  spaced   out  ", "", "spaced out"},
+	}
+	for _, tc := range cases {
+		if got := cleanEbookSearchTitle(tc.title, tc.author); got != tc.want {
+			t.Errorf("cleanEbookSearchTitle(%q,%q)=%q want %q", tc.title, tc.author, got, tc.want)
+		}
+	}
+}

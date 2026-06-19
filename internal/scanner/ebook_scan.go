@@ -453,6 +453,16 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 	if parsed.Title == "" {
 		parsed.Title = ebookTitleFromPath(filePath)
 	}
+	if len(parsed.Authors) == 0 {
+		if author := ebookAuthorFromPath(filePath); author != "" {
+			parsed.Authors = []string{author}
+			// A path-derived title carries the same " - Author" suffix; drop it
+			// so the title, group key, and enrichment query stay clean.
+			if suffix := " - " + author; strings.HasSuffix(parsed.Title, suffix) {
+				parsed.Title = strings.TrimSpace(strings.TrimSuffix(parsed.Title, suffix))
+			}
+		}
+	}
 
 	groupKey := ebookContentGroupKey(&parsed, filePath)
 	unlock := groupLocks.lock(groupKey)
@@ -883,6 +893,34 @@ func ebookTitleFromPath(filePath string) string {
 		return base[:len(base)-len(".fb2.zip")]
 	}
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// ebookAuthorFromPath recovers an author for libraries that shelve books as
+// ".../<Author>/<Title>/<Title> - <Author>.ext" but embed no author in the file
+// (common for PDF/MOBI/AZW3). It returns a value only when two independent path
+// signals agree: the grandparent directory name and the filename's trailing
+// " - X" segment. Authorless layouts — magazines, language courses, flat dumps —
+// satisfy neither or only one signal, so they never get a junk author that would
+// poison the enrichment search.
+func ebookAuthorFromPath(filePath string) string {
+	base := ebookTitleFromPath(filePath)
+	idx := strings.LastIndex(base, " - ")
+	if idx < 0 {
+		return ""
+	}
+	fromName := strings.TrimSpace(base[idx+len(" - "):])
+	if fromName == "" {
+		return ""
+	}
+	grandparent := strings.TrimSpace(filepath.Base(filepath.Dir(filepath.Dir(filePath))))
+	switch grandparent {
+	case "", ".", string(filepath.Separator):
+		return ""
+	}
+	if normalizeEbookIdentityPart(fromName) != normalizeEbookIdentityPart(grandparent) {
+		return ""
+	}
+	return fromName
 }
 
 func normalizeEbookIdentityPart(value string) string {
