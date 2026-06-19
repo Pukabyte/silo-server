@@ -3,6 +3,7 @@ package scanner
 import (
 	"archive/zip"
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1892,5 +1893,79 @@ func TestParseEbookFB2RejectsOversizedFile(t *testing.T) {
 	_, err := parseEbookFile(path)
 	if err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("parseEbookFile error = %v, want size-cap rejection", err)
+	}
+}
+
+// buildTestMOBI assembles a minimal but valid MOBI/AZW container: a PDB header,
+// a single record-info entry pointing at record 0, and record 0 holding a
+// PalmDOC header, a MOBI header, an EXTH block, and the full-title string.
+func buildTestMOBI(t *testing.T) string {
+	t.Helper()
+
+	exthRec := func(typ uint32, val string) []byte {
+		b := make([]byte, 8+len(val))
+		binary.BigEndian.PutUint32(b[0:4], typ)
+		binary.BigEndian.PutUint32(b[4:8], uint32(8+len(val)))
+		copy(b[8:], val)
+		return b
+	}
+	var recs []byte
+	recs = append(recs, exthRec(100, "A H Lee")...)          // author
+	recs = append(recs, exthRec(503, "The Sea: A Novel")...) // updated title
+	recs = append(recs, exthRec(104, "9780306406157")...)    // ISBN
+	exth := make([]byte, 12)
+	copy(exth[0:4], "EXTH")
+	binary.BigEndian.PutUint32(exth[4:8], uint32(12+len(recs)))
+	binary.BigEndian.PutUint32(exth[8:12], 3)
+	exth = append(exth, recs...)
+
+	const mobiHeaderLen = 232
+	mobi := make([]byte, mobiHeaderLen)
+	copy(mobi[0:4], "MOBI")
+	binary.BigEndian.PutUint32(mobi[4:8], mobiHeaderLen)
+	binary.BigEndian.PutUint32(mobi[12:16], 65001) // text encoding: UTF-8
+
+	fullName := []byte("The Sea")
+	nameOff := 16 + mobiHeaderLen + len(exth) // relative to record 0 start
+	binary.BigEndian.PutUint32(mobi[0x44:0x48], uint32(nameOff))
+	binary.BigEndian.PutUint32(mobi[0x48:0x4C], uint32(len(fullName)))
+
+	var rec0 []byte
+	rec0 = append(rec0, make([]byte, 16)...) // PalmDOC header (zeroed)
+	rec0 = append(rec0, mobi...)
+	rec0 = append(rec0, exth...)
+	rec0 = append(rec0, fullName...)
+
+	const rec0Off = 86 // 78-byte PDB header + one 8-byte record-info entry
+	pdb := make([]byte, rec0Off)
+	copy(pdb[0:32], "The Sea") // PDB database name (last-resort title)
+	copy(pdb[60:64], "BOOK")
+	copy(pdb[64:68], "MOBI")
+	binary.BigEndian.PutUint16(pdb[76:78], 1)       // record count
+	binary.BigEndian.PutUint32(pdb[78:82], rec0Off) // record 0 offset
+
+	path := filepath.Join(t.TempDir(), "book.mobi")
+	if err := os.WriteFile(path, append(pdb, rec0...), 0o644); err != nil {
+		t.Fatalf("write test mobi: %v", err)
+	}
+	return path
+}
+
+func TestParseEbookMOBIEXTH(t *testing.T) {
+	got, err := parseEbookFile(buildTestMOBI(t))
+	if err != nil {
+		t.Fatalf("parseEbookFile error = %v", err)
+	}
+	if got.Format != "mobi" {
+		t.Fatalf("Format = %q, want mobi", got.Format)
+	}
+	if got.Title != "The Sea: A Novel" {
+		t.Fatalf("Title = %q, want EXTH updated title", got.Title)
+	}
+	if len(got.Authors) != 1 || got.Authors[0] != "A H Lee" {
+		t.Fatalf("Authors = %v, want [A H Lee]", got.Authors)
+	}
+	if got.ISBN != "9780306406157" {
+		t.Fatalf("ISBN = %q, want 9780306406157", got.ISBN)
 	}
 }
