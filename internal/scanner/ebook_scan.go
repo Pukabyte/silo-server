@@ -920,7 +920,53 @@ func ebookAuthorFromPath(filePath string) string {
 	if normalizeEbookIdentityPart(fromName) != normalizeEbookIdentityPart(grandparent) {
 		return ""
 	}
-	return fromName
+	// Position alone cannot tell author from title: some libraries shelve
+	// books as "<Title>/<Author>/<Author> - <Title>" (inverted) which also
+	// satisfies the grandparent==suffix check and would assign the title as
+	// the author. Require the candidate to look like a person name; series and
+	// title folders ("De legenden van de Alfen") fail this and are rejected.
+	if !looksLikePersonName(grandparent) {
+		return ""
+	}
+	// Return the directory form, which carries canonical casing ("A. F. Carter"
+	// rather than a lowercased filename suffix).
+	return grandparent
+}
+
+// looksLikePersonName reports whether value is shaped like an author name. A
+// "Last, First" comma form is accepted outright; otherwise every token must be
+// capitalized or a known name particle (van, de, von, ...). Title/series
+// strings contain lowercase content words and so are rejected.
+func looksLikePersonName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.ContainsAny(value, "0123456789") {
+		return false
+	}
+	if strings.Contains(value, ",") {
+		return true
+	}
+	particles := map[string]struct{}{
+		"van": {}, "von": {}, "de": {}, "der": {}, "den": {}, "het": {}, "di": {},
+		"da": {}, "del": {}, "della": {}, "la": {}, "le": {}, "el": {}, "du": {},
+		"dos": {}, "das": {}, "bin": {}, "al": {}, "ter": {}, "te": {}, "ten": {},
+		"op": {}, "'t": {},
+	}
+	hasUpper := false
+	for _, token := range strings.Fields(value) {
+		r := []rune(token)[0]
+		if unicode.IsUpper(r) {
+			hasUpper = true
+			continue
+		}
+		if _, ok := particles[strings.ToLower(token)]; ok {
+			continue
+		}
+		return false
+	}
+	return hasUpper
 }
 
 func normalizeEbookIdentityPart(value string) string {
