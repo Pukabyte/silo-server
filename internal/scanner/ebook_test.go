@@ -1969,3 +1969,44 @@ func TestParseEbookMOBIEXTH(t *testing.T) {
 		t.Fatalf("ISBN = %q, want 9780306406157", got.ISBN)
 	}
 }
+
+func TestEbookAuthorFromPath(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "corroborated grandparent and filename suffix",
+			path: "/books/Books_English/Lisa Jewell/The House We Grew Up In (135563)/The House We Grew Up In - Lisa Jewell.azw3",
+			want: "Lisa Jewell",
+		},
+		{
+			name: "case and spacing differences still match",
+			path: "/books/Books_English/A. F. Carter/All of Us (57890)/All of Us - a. f.  carter.pdf",
+			want: "a. f.  carter",
+		},
+		{
+			name: "no dash in filename",
+			path: "/books/Books_German/Schweizer Familie 11.04.2019.pdf",
+			want: "",
+		},
+		{
+			name: "suffix does not match grandparent dir",
+			path: "/books/Books_English/Stephen King/Salem's Lot (8507)/Salem's Lot - Some Other Name.pdf",
+			want: "",
+		},
+		{
+			name: "empty suffix",
+			path: "/books/X/Author/Title/Title - .pdf",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ebookAuthorFromPath(tc.path); got != tc.want {
+				t.Fatalf("ebookAuthorFromPath(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}

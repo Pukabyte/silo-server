@@ -770,13 +770,29 @@ func filterEbookPeople(people []models.ItemPerson) []models.ItemPerson {
 	return authors
 }
 
+// cleanEbookSearchTitle normalizes a stored title for provider search. Scanner
+// titles are often filesystem-derived: underscores stand in for colons or
+// spaces ("Exit Strategy_ The Murderbot" / "LTB_067_Micky_Maus"), and
+// path-fallback titles keep a trailing " - <Author>" segment. Both wreck a
+// title search, so collapse underscores to spaces and drop a trailing author
+// suffix (the author is searched as its own field).
+func cleanEbookSearchTitle(title, author string) string {
+	title = strings.ReplaceAll(title, "_", " ")
+	if a := strings.TrimSpace(author); a != "" {
+		if idx := strings.LastIndex(strings.ToLower(title), " - "+strings.ToLower(a)); idx >= 0 {
+			title = title[:idx]
+		}
+	}
+	return strings.Join(strings.Fields(title), " ")
+}
+
 func buildEbookSearchQuery(item enrichmentItemRow) (metadata.SearchQuery, map[string]string) {
 	accumulatedIDs := filterEbookProviderIDs(item.ProviderIDs)
 	if accumulatedIDs == nil {
 		accumulatedIDs = map[string]string{}
 	}
 	return metadata.SearchQuery{
-		Title:       item.Title,
+		Title:       cleanEbookSearchTitle(item.Title, item.Author),
 		Author:      item.Author,
 		Year:        item.Year,
 		ContentType: ebookContentType(),
