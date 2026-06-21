@@ -62,9 +62,16 @@ func ExtractToken(r *http.Request) (string, bool) {
 	if token := strings.TrimSpace(r.Header.Get("X-Mediabrowser-Token")); token != "" {
 		return token, true
 	}
-	// Case-insensitive: Jellyfin clients vary the casing (api_key / Api_Key / API_KEY).
-	if token := strings.TrimSpace(newCaseInsensitiveQuery(r.URL.Query()).Get("api_key")); token != "" {
-		return token, true
+	// Query-param token. Jellyfin's current spelling is "ApiKey" (PascalCase,
+	// always enabled); "api_key" is the legacy spelling (gated behind
+	// EnableLegacyAuthorization on a real server). Clients vary the casing
+	// further (Api_Key / API_KEY), so match both keys case-insensitively.
+	// Ref: jellyfin Jellyfin.Server.Implementations/Security/AuthorizationContext.cs.
+	query := newCaseInsensitiveQuery(r.URL.Query())
+	for _, key := range []string{"ApiKey", "api_key"} {
+		if token := strings.TrimSpace(query.Get(key)); token != "" {
+			return token, true
+		}
 	}
 
 	return "", false
