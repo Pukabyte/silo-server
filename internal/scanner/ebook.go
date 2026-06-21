@@ -531,6 +531,14 @@ func parseMOBIEXTH(data []byte, encoding uint32, book *parsedEbook) {
 	if len(data) < 12 || string(data[0:4]) != "EXTH" {
 		return
 	}
+	// data carries the rest of record 0, not just the EXTH block. Bound parsing
+	// to the declared EXTH length so a bad record count can't walk full-text
+	// bytes and assign junk metadata.
+	exthLen := int(binary.BigEndian.Uint32(data[4:8]))
+	if exthLen < 12 || exthLen > len(data) {
+		return
+	}
+	data = data[:exthLen]
 	count := int(binary.BigEndian.Uint32(data[8:12]))
 	pos := 12
 	var isbn string
