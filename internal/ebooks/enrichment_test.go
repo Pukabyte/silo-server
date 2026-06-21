@@ -637,6 +637,8 @@ func TestCleanEbookSearchTitle(t *testing.T) {
 		{"LTB.067_-_Micky_Maus_Superstar", "", "LTB.067 - Micky Maus Superstar"},
 		{"Club Dark Lace_ Complete Dark Lace", "", "Club Dark Lace Complete Dark Lace"},
 		{"All of Us - A. F. Carter", "a. f. carter", "All of Us"},
+		// A " - <token>" that is not the trailing author must be preserved.
+		{"Alice - Bob and Carol", "Bob", "Alice - Bob and Carol"},
 		{"Plain Title", "Some Author", "Plain Title"},
 		{"  spaced   out  ", "", "spaced out"},
 		// Series/volume markers are kept (unwrapped) so distinct volumes search

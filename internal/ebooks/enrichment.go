@@ -827,9 +827,11 @@ var ebookYearOnlyRE = regexp.MustCompile(`^\s*(19|20)\d{2}\s*$`)
 func cleanEbookSearchTitle(title, author string) string {
 	title = strings.ReplaceAll(title, "_", " ")
 	if a := strings.TrimSpace(author); a != "" {
-		if idx := strings.LastIndex(strings.ToLower(title), " - "+strings.ToLower(a)); idx >= 0 {
-			title = title[:idx]
-		}
+		// Strip the author only when it is a true trailing suffix (optionally
+		// followed by a series/volume parenthetical). Anchoring to the end avoids
+		// truncating valid title text when " - <author>" appears mid-title.
+		authorSuffixRE := regexp.MustCompile(`(?i)\s-\s*` + regexp.QuoteMeta(a) + `(?:\s*[\(\[][^)\]]*[\)\]])*\s*$`)
+		title = authorSuffixRE.ReplaceAllString(title, "")
 	}
 	// Normalize trailing series/edition parentheticals. A bare year ("(2019)")
 	// is dropped because SearchQuery.Year already carries it. A series/volume

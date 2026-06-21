@@ -457,9 +457,14 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 		if author := ebookAuthorFromPath(filePath); author != "" {
 			parsed.Authors = []string{author}
 			// A path-derived title carries the same " - Author" suffix; drop it
-			// so the title, group key, and enrichment query stay clean.
-			if suffix := " - " + author; strings.HasSuffix(parsed.Title, suffix) {
-				parsed.Title = strings.TrimSpace(strings.TrimSuffix(parsed.Title, suffix))
+			// so the title, group key, and enrichment query stay clean. Compare
+			// normalized so case/spacing variants (e.g. "a. f.  carter") match
+			// the recovered author and don't leave a duplicated suffix.
+			if idx := strings.LastIndex(parsed.Title, " - "); idx >= 0 {
+				suffixAuthor := strings.TrimSpace(parsed.Title[idx+len(" - "):])
+				if normalizeEbookIdentityPart(suffixAuthor) == normalizeEbookIdentityPart(author) {
+					parsed.Title = strings.TrimSpace(parsed.Title[:idx])
+				}
 			}
 		}
 	}
