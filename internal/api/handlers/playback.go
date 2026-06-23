@@ -134,12 +134,12 @@ type PlaybackHandler struct {
 	// hwaccel, transcode dir). Wired to the live config in integrated mode
 	// so admin changes apply to newly started transcodes. Read it through
 	// playbackConfig(), which falls back to defaults when unset.
-	PlaybackConfig func() config.PlaybackConfig
-	FFmpegLogSink  playback.FFmpegLogSink
-	transcodeMu             sync.RWMutex
-	transcodes              map[string]*playback.TranscodeSession
-	realtimeCommandMu       sync.Mutex
-	realtimeCommands        map[string]playbackCommandRecord
+	PlaybackConfig    func() config.PlaybackConfig
+	FFmpegLogSink     playback.FFmpegLogSink
+	transcodeMu       sync.RWMutex
+	transcodes        map[string]*playback.TranscodeSession
+	realtimeCommandMu sync.Mutex
+	realtimeCommands  map[string]playbackCommandRecord
 }
 
 type PlaybackWatchScrobbler interface {
@@ -1262,10 +1262,12 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	clientInfo := playbackClientInfoFromRequest(r)
+	sessionCtx := playback.WithClientInfo(r.Context(), clientInfo)
 	var session *playback.Session
 	if starter, ok := h.sessionMgr.(sessionStarterWithFilesContext); ok {
 		session, err = starter.StartSessionWithFilesContext(
-			r.Context(),
+			sessionCtx,
 			userID,
 			profileID,
 			effectiveFile.ID,
@@ -1321,6 +1323,9 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 		AudioTrackIndex:   audioTrackIndex,
 		TranscodeAudio:    session.TranscodeAudio,
 		ClientIP:          clientip.FromContext(r.Context()),
+		ClientName:        clientInfo.Name,
+		ClientVersion:     clientInfo.Version,
+		ClientUserAgent:   clientInfo.UserAgent,
 		StreamBitrateKbps: streamBitrateKbps,
 		TargetAudioCodec:  targetAudioCodec,
 	}); err != nil {
@@ -1440,6 +1445,17 @@ func (h *PlaybackHandler) HandleStartPlayback(w http.ResponseWriter, r *http.Req
 
 	h.syncSessionsNow(r.Context(), "start")
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func playbackClientInfoFromRequest(r *http.Request) playback.ClientInfo {
+	if r == nil {
+		return playback.ClientInfo{}
+	}
+	return playback.ClientInfo{
+		Name:      strings.TrimSpace(r.Header.Get("X-Silo-Client")),
+		Version:   strings.TrimSpace(r.Header.Get("X-Silo-Client-Version")),
+		UserAgent: r.UserAgent(),
+	}
 }
 
 // subtitleURLExt returns the URL file extension for a subtitle codec.

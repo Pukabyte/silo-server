@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 type sessionContextKey string
@@ -152,7 +153,47 @@ func safeTokenPrefix(token string) string {
 // and continues the handler chain.
 func serveWithSession(next http.Handler, w http.ResponseWriter, r *http.Request, session *Session) {
 	ctx := context.WithValue(r.Context(), compatSessionKey, session)
+	ctx = playback.WithClientInfo(ctx, compatPlaybackClientInfo(r))
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func compatPlaybackClientInfo(r *http.Request) playback.ClientInfo {
+	if r == nil {
+		return playback.ClientInfo{}
+	}
+	return playback.ClientInfo{
+		Name:      firstMediaBrowserAuthorizationValue(r, "Client"),
+		Version:   firstMediaBrowserAuthorizationValue(r, "Version"),
+		UserAgent: r.UserAgent(),
+	}
+}
+
+func firstMediaBrowserAuthorizationValue(r *http.Request, key string) string {
+	for _, headerName := range []string{"X-Emby-Authorization", "Authorization"} {
+		if value := mediaBrowserAuthorizationValue(r.Header.Get(headerName), key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mediaBrowserAuthorizationValue(header, key string) string {
+	header = strings.TrimSpace(header)
+	if !strings.HasPrefix(strings.ToLower(header), "mediabrowser ") {
+		return ""
+	}
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(strings.ToLower(part), "mediabrowser ") {
+			part = strings.TrimSpace(part[len("MediaBrowser "):])
+		}
+		name, value, ok := strings.Cut(part, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), key) {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return ""
 }
 
 // resolveCompatToken resolves a token to a compat session: a session-store token

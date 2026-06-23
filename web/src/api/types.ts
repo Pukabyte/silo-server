@@ -2276,6 +2276,10 @@ export interface AdminSession {
   is_paused: boolean;
   has_playback_control?: boolean;
   client_ip?: string;
+  client_name?: string;
+  client_version?: string;
+  client_label?: string;
+  client_user_agent?: string;
   audio_track_index: number;
   transcode_audio: boolean;
   stream_bitrate_kbps: number | null;
