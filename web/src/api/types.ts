@@ -1528,6 +1528,7 @@ export interface LibraryTabUngrouped {
 
 export interface LibraryTabResponse {
   library_id: number;
+  collections?: LibraryCollection[];
   groups: LibraryTabGroup[];
   ungrouped?: LibraryTabUngrouped;
 }
