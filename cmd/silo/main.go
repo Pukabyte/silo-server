@@ -1074,33 +1074,14 @@ func main() {
 		<-pluginAutoUpdateDone
 
 		imageResolver := metadata.NewPluginImageResolver()
-		if pluginService != nil {
-			// Register image resolver sources for all enabled plugin metadata providers.
-			rows, err := deps.DB.Query(appCtx,
-				`SELECT pc.plugin_installation_id, pc.capability_id
-				 FROM plugin_capabilities pc
-				 JOIN plugin_installations pi ON pi.id = pc.plugin_installation_id
-				 WHERE pc.capability_type = 'metadata_provider.v1' AND pi.enabled = true`)
-			if err != nil {
-				slog.Warn("failed to list capabilities for image resolver registration", "error", err)
-			} else {
-				defer rows.Close()
-				for rows.Next() {
-					var instID int
-					var capID string
-					if err := rows.Scan(&instID, &capID); err != nil {
-						slog.Warn("failed to scan capability for image resolver", "error", err)
-						continue
-					}
-					source := metadata.NewPluginClientSource(instID, capID, func(
-						ctx context.Context, installationID int, capabilityID string,
-					) (metadata.PluginMetadataClient, error) {
-						return pluginService.MetadataProviderClient(ctx, installationID, capabilityID)
-					})
-					imageResolver.RegisterSource(capID, source)
-					slog.Info("registered plugin image resolver", "capability_id", capID, "installation_id", instID)
+		if pluginService != nil && installationStore != nil {
+			reloadImageResolvers := func(ctx context.Context) {
+				if err := reloadPluginImageResolvers(ctx, installationStore, imageResolver, pluginService); err != nil {
+					slog.Warn("failed to reload plugin image resolvers", "error", err)
 				}
 			}
+			pluginService.AddLifecycleHook(reloadImageResolvers)
+			reloadImageResolvers(appCtx)
 		}
 		if deps.S3Public != nil {
 			presignTTL := cfg.S3.MetadataPresignExpiry
@@ -2481,6 +2462,180 @@ func configureS3Clients(cfg *config.Config, deps *api.Dependencies) {
 	}); s3UserDB != nil {
 		deps.S3UserDB = s3UserDB
 		slog.Info("S3 user-db client configured", "bucket", s3UserDB.Bucket())
+	}
+}
+
+type pluginImageResolverCapabilityStore interface {
+	ListEnabled(ctx context.Context) ([]*plugins.Installation, error)
+	ListCapabilities(ctx context.Context, installationID int) ([]*plugins.Capability, error)
+}
+
+func reloadPluginImageResolvers(
+	ctx context.Context,
+	store pluginImageResolverCapabilityStore,
+	resolver *metadata.PluginImageResolver,
+	service *plugins.Service,
+) error {
+	if resolver == nil {
+		return nil
+	}
+	if store == nil || service == nil {
+		resolver.ReplaceSources(nil)
+		return nil
+	}
+
+	installations, err := store.ListEnabled(ctx)
+	if err != nil {
+		return fmt.Errorf("list enabled plugin installations: %w", err)
+	}
+	sort.Slice(installations, func(i, j int) bool {
+		if installations[i] == nil {
+			return false
+		}
+		if installations[j] == nil {
+			return true
+		}
+		return installations[i].ID < installations[j].ID
+	})
+
+	var registrations []metadata.PluginImageResolverSourceRegistration
+	for _, installation := range installations {
+		if installation == nil {
+			continue
+		}
+		capabilities, err := store.ListCapabilities(ctx, installation.ID)
+		if err != nil {
+			return fmt.Errorf("list image resolver capabilities for installation %d: %w", installation.ID, err)
+		}
+		sort.Slice(capabilities, func(i, j int) bool {
+			if capabilities[i] == nil {
+				return false
+			}
+			if capabilities[j] == nil {
+				return true
+			}
+			if capabilities[i].Type != capabilities[j].Type {
+				return capabilities[i].Type < capabilities[j].Type
+			}
+			return capabilities[i].ID < capabilities[j].ID
+		})
+
+		for _, capability := range capabilities {
+			if capability == nil {
+				continue
+			}
+			switch capability.Type {
+			case sdkcapability.ImageResolver:
+				schemes, priority := imageResolverCapabilityConfig(capability)
+				if len(schemes) == 0 {
+					slog.Warn("plugin image resolver capability has no valid schemes",
+						"installation_id", installation.ID,
+						"capability_id", capability.ID)
+					continue
+				}
+				for _, scheme := range schemes {
+					source := metadata.NewPluginClientSource(installation.ID, capability.ID, func(
+						ctx context.Context, installationID int, capabilityID string,
+					) (metadata.PluginMetadataClient, error) {
+						return service.ImageResolverClient(ctx, installationID, capabilityID)
+					})
+					registrations = append(registrations, metadata.PluginImageResolverSourceRegistration{
+						Scheme:         scheme,
+						Source:         source,
+						Kind:           metadata.PluginImageResolverSourceExplicit,
+						Priority:       priority,
+						InstallationID: installation.ID,
+						CapabilityID:   capability.ID,
+					})
+				}
+			case sdkcapability.MetadataProvider:
+				scheme := strings.TrimSpace(capability.ID)
+				if !metadata.ValidImageResolverScheme(scheme) {
+					slog.Warn("skipping legacy metadata image resolver with invalid scheme",
+						"installation_id", installation.ID,
+						"capability_id", capability.ID)
+					continue
+				}
+				source := metadata.NewPluginClientSource(installation.ID, capability.ID, func(
+					ctx context.Context, installationID int, capabilityID string,
+				) (metadata.PluginMetadataClient, error) {
+					return service.MetadataProviderClient(ctx, installationID, capabilityID)
+				})
+				registrations = append(registrations, metadata.PluginImageResolverSourceRegistration{
+					Scheme:         scheme,
+					Source:         source,
+					Kind:           metadata.PluginImageResolverSourceLegacy,
+					InstallationID: installation.ID,
+					CapabilityID:   capability.ID,
+				})
+			}
+		}
+	}
+
+	resolver.ReplaceSources(registrations)
+	slog.Info("reloaded plugin image resolvers", "sources", len(registrations))
+	return nil
+}
+
+func imageResolverCapabilityConfig(capability *plugins.Capability) ([]string, int) {
+	if capability == nil {
+		return nil, 0
+	}
+	meta := capabilityMetadataFields(capability.Metadata)
+	return metadataStringList(meta["schemes"]), metadataInt(meta["priority"])
+}
+
+func capabilityMetadataFields(raw map[string]any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	if nested, ok := raw["metadata"]; ok {
+		switch typed := nested.(type) {
+		case map[string]any:
+			return typed
+		}
+	}
+	return raw
+}
+
+func metadataStringList(value any) []string {
+	var out []string
+	switch typed := value.(type) {
+	case []string:
+		for _, item := range typed {
+			if scheme := strings.TrimSpace(item); metadata.ValidImageResolverScheme(scheme) {
+				out = append(out, scheme)
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if scheme := strings.TrimSpace(text); metadata.ValidImageResolverScheme(scheme) {
+				out = append(out, scheme)
+			}
+		}
+	}
+	return out
+}
+
+func metadataInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		n, _ := typed.Int64()
+		return int(n)
+	default:
+		return 0
 	}
 }
 
