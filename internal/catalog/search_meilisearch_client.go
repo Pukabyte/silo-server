@@ -75,6 +75,8 @@ type meilisearchStatsResponse struct {
 	NumberOfDocuments int `json:"numberOfDocuments"`
 }
 
+const defaultMeilisearchTaskWaitTimeout = 5 * time.Minute
+
 func newMeilisearchClient(rawURL, apiKey string, timeout time.Duration) (*meilisearchClient, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -174,6 +176,11 @@ func (c *meilisearchClient) Stats(ctx context.Context, uid string) (int, error) 
 func (c *meilisearchClient) WaitTask(ctx context.Context, taskUID int64) error {
 	if taskUID == 0 {
 		return nil
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultMeilisearchTaskWaitTimeout)
+		defer cancel()
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()

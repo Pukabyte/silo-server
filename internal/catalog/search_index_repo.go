@@ -17,8 +17,7 @@ const (
 	SearchIndexEventDelete = "delete"
 	SearchIndexEventRename = "rename"
 
-	searchIndexSyncLockID    int64 = 0x53494c4f5345531
-	searchIndexRebuildLockID int64 = 0x53494c4f5345532
+	searchIndexMaintenanceLockID int64 = 0x53494c4f5345531
 )
 
 type SearchIndexEvent struct {

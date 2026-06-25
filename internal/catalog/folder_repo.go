@@ -542,37 +542,49 @@ func (r *FolderRepository) DeleteWithStats(
 		for _, d := range dirs {
 			rawDirs[d] = struct{}{}
 		}
-		var deleted int64
+		var deletedContentIDs []string
 		if err := retryOnDeadlock(ctx, func() error {
+			tx, e := r.pool.Begin(ctx)
+			if e != nil {
+				return e
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+
 			// Re-check the orphan invariant inside the delete. A concurrent
 			// scan/import may have attached one of these content IDs to another
 			// library after collectOrphanBatch returned; without this guard the
 			// cascade would delete the shared media_items row (and the
 			// newly-added membership), dropping the item from the other library.
-			tag, e := r.pool.Exec(ctx, `
+			rows, e := tx.Query(ctx, `
 				DELETE FROM media_items
 				WHERE content_id = ANY($1)
 				AND NOT EXISTS (
 					SELECT 1 FROM media_item_libraries other
 					WHERE other.content_id = media_items.content_id
 					AND other.media_folder_id <> $2
-				)`, ids, id)
+				)
+				RETURNING content_id`, ids, id)
 			if e != nil {
 				return e
 			}
-			deleted = tag.RowsAffected()
+			attemptDeletedIDs, e := pgx.CollectRows(rows, pgx.RowTo[string])
+			if e != nil {
+				return fmt.Errorf("collecting deleted orphaned item IDs: %w", e)
+			}
+			for _, contentID := range attemptDeletedIDs {
+				if err := EnqueueSearchIndexDelete(ctx, tx, contentID); err != nil {
+					return fmt.Errorf("enqueueing catalog search orphan delete: %w", err)
+				}
+			}
+			if e := tx.Commit(ctx); e != nil {
+				return e
+			}
+			deletedContentIDs = attemptDeletedIDs
 			return nil
 		}); err != nil {
 			return nil, fmt.Errorf("deleting orphaned items: %w", err)
 		}
-		if deleted > 0 {
-			for _, contentID := range ids {
-				if err := EnqueueSearchIndexDelete(ctx, r.pool, contentID); err != nil {
-					return nil, fmt.Errorf("enqueueing catalog search orphan delete: %w", err)
-				}
-			}
-		}
-		stats.OrphanedItems += int(deleted)
+		stats.OrphanedItems += len(deletedContentIDs)
 		if progress != nil {
 			progress(stats.OrphanedItems, orphanTotal, "Deleting orphaned items")
 		}

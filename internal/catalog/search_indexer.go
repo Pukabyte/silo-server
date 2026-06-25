@@ -86,15 +86,15 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 	}
 	stats.Configured = true
 
-	lock, locked, err := i.events.TryAdvisoryLock(ctx, searchIndexSyncLockID)
+	lock, locked, err := i.events.TryAdvisoryLock(ctx, searchIndexMaintenanceLockID)
 	if err != nil {
 		return stats, err
 	}
 	if !locked {
 		stats.Skipped = true
-		stats.Reason = "another sync is running"
+		stats.Reason = "another search index maintenance task is running"
 		setSearchIndexTaskResult(progress, stats)
-		reportSearchIndexProgress(progress, 100, "Another catalog search sync is already running")
+		reportSearchIndexProgress(progress, 100, "Another catalog search index maintenance task is already running")
 		return stats, nil
 	}
 	defer lock.Close(context.Background())
@@ -211,15 +211,15 @@ func (i *CatalogSearchIndexer) Rebuild(ctx context.Context, progress SearchIndex
 	}
 	stats.Configured = true
 
-	lock, locked, err := i.events.TryAdvisoryLock(ctx, searchIndexRebuildLockID)
+	lock, locked, err := i.events.TryAdvisoryLock(ctx, searchIndexMaintenanceLockID)
 	if err != nil {
 		return stats, err
 	}
 	if !locked {
 		stats.Skipped = true
-		stats.Reason = "another rebuild is running"
+		stats.Reason = "another search index maintenance task is running"
 		setSearchIndexTaskResult(progress, stats)
-		reportSearchIndexProgress(progress, 100, "Another catalog search rebuild is already running")
+		reportSearchIndexProgress(progress, 100, "Another catalog search index maintenance task is already running")
 		return stats, nil
 	}
 	defer lock.Close(context.Background())

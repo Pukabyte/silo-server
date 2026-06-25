@@ -4385,7 +4385,13 @@ func (s *MetadataService) deleteCreatedSkeleton(ctx context.Context, contentID s
 	if s.dbPool == nil {
 		return nil
 	}
-	tag, err := s.dbPool.Exec(ctx, `
+	tx, err := s.dbPool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
 		DELETE FROM media_items
 		WHERE content_id = $1
 		  AND NOT EXISTS (
@@ -4396,11 +4402,11 @@ func (s *MetadataService) deleteCreatedSkeleton(ctx context.Context, contentID s
 		return err
 	}
 	if tag.RowsAffected() > 0 {
-		if err := catalog.EnqueueSearchIndexDelete(ctx, s.dbPool, contentID); err != nil {
+		if err := catalog.EnqueueSearchIndexDelete(ctx, tx, contentID); err != nil {
 			return err
 		}
 	}
-	return err
+	return tx.Commit(ctx)
 }
 
 // claimRoot records a canonical root path claim for dedup. Failures are logged
