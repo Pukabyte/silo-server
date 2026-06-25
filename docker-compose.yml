@@ -36,9 +36,9 @@ services:
     restart: unless-stopped
     profiles: [search]
     environment:
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?Set MEILI_MASTER_KEY in .env - generate one with openssl rand -base64 32}
     ports:
-      - "${MEILISEARCH_PORT:-7700}:7700"
+      - "${MEILISEARCH_HOST:-127.0.0.1}:${MEILISEARCH_PORT:-7700}:7700"
     volumes:
       - ${SILO_DATA_ROOT:-/opt/silo}/meilisearch:/meili_data
 
