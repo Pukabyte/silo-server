@@ -73,6 +73,13 @@ func NewCatalogSearchServiceFromSettings(
 	return service
 }
 
+func ActiveCatalogSearchProvider(settings CatalogSearchSettings) string {
+	if settings.Provider == SearchProviderMeilisearch && settings.MeilisearchURL != "" {
+		return SearchProviderMeilisearch
+	}
+	return SearchProviderPostgres
+}
+
 func (s *CatalogSearchService) Provider() CatalogSearchProvider {
 	if s == nil || s.provider == nil {
 		return nil
@@ -129,7 +136,7 @@ func (s *CatalogSearchService) Status(ctx context.Context) CatalogSearchRuntimeS
 			}
 		}
 		if s.itemRepo != nil && s.itemRepo.pool != nil {
-			if vectorCount, err := countCatalogSearchVectorDocuments(ctx, s.itemRepo.pool, settings.IndexTypes); err == nil {
+			if vectorCount, err := countCatalogSearchVectorDocuments(ctx, s.itemRepo.pool, settings.IndexTypes, ""); err == nil {
 				status.Index.VectorDocumentCount = vectorCount
 			}
 		}

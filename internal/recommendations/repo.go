@@ -152,11 +152,9 @@ func embeddingEligibilityWhereClause() string {
 }
 
 func recommendationItemEligibilityWhereClause(alias string) string {
-	alias = strings.TrimSpace(alias)
-	if alias == "" {
-		alias = "media_items"
-	}
-	return fmt.Sprintf("(%s.status = 'matched' OR %s.type = 'audiobook' OR %s.type = 'ebook')", alias, alias, alias)
+	// Delegate to the shared embed-eligibility predicate so the recommendations
+	// population stays identical to the catalog coverage denominator.
+	return embeddingvectors.ItemEligibilityWhereClause(alias)
 }
 
 // UpsertEmbedding stores or updates an embedding for a media item.
