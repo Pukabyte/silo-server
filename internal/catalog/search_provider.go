@@ -433,7 +433,16 @@ func catalogSearchMeilisearchEmbedderSettings(embedder string) map[string]any {
 	}
 }
 
-func catalogSearchMeilisearchSchemaVersion(embedder string, itemTypes []string) int {
+// catalogSearchMeilisearchSchemaVersion derives the expected index schema
+// version from the inputs that change a document's on-index shape: the embedder,
+// the canonical vector dimensions, the indexed media scope, and whether semantic
+// search is enabled. semanticEnabled is part of the identity because
+// attachDocumentVectors omits _vectors entirely when semantic is off; toggling it
+// on must therefore make the existing (vector-less) index look stale so it is
+// rebuilt rather than serving silently degraded hybrid ranking. A mismatch forces
+// a rebuild (SyncOutbox skips, the provider falls back to keyword) and surfaces as
+// an ExpectedSchemaVersion divergence in the admin status.
+func catalogSearchMeilisearchSchemaVersion(embedder string, itemTypes []string, semanticEnabled bool) int {
 	embedder, err := NormalizeCatalogSearchEmbedderName(embedder)
 	if err != nil {
 		embedder = DefaultMeilisearchEmbedder
@@ -441,10 +450,11 @@ func catalogSearchMeilisearchSchemaVersion(embedder string, itemTypes []string) 
 	h := fnv.New32a()
 	_, _ = fmt.Fprintf(
 		h,
-		"embedder=%s;dimensions=%d;index_types=%s",
+		"embedder=%s;dimensions=%d;index_types=%s;semantic=%t",
 		embedder,
 		embeddingvectors.CanonicalDimensions,
 		strings.Join(normalizeCatalogSearchItemTypes(itemTypes), ","),
+		semanticEnabled,
 	)
 	return SearchMeilisearchSchemaVersion*1_000_000 + int(h.Sum32()%1_000_000)
 }

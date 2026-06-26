@@ -151,7 +151,7 @@ func (p *MeilisearchSearchProvider) Search(ctx context.Context, req CatalogSearc
 	if strings.TrimSpace(state.ActiveIndexUID) == "" {
 		return p.fallbackSearch(ctx, req, "meilisearch index has not been built")
 	}
-	if state.SchemaVersion != catalogSearchMeilisearchSchemaVersion(p.config.Embedder, p.config.IndexTypes) {
+	if state.SchemaVersion != catalogSearchMeilisearchSchemaVersion(p.config.Embedder, p.config.IndexTypes, p.config.SemanticEnabled) {
 		return p.fallbackSearch(ctx, req, "meilisearch index schema mismatch")
 	}
 	pending, err := p.stateRepo.PendingCount(ctx, SearchProviderMeilisearch)

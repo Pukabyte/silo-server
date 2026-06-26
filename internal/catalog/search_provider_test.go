@@ -403,8 +403,8 @@ func TestNormalizeCatalogSearchIndexTypesValueFormatsCanonicalList(t *testing.T)
 }
 
 func TestMeilisearchSchemaVersionChangesWithEmbedder(t *testing.T) {
-	defaultVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil)
-	customVersion := catalogSearchMeilisearchSchemaVersion("custom_embedder", nil)
+	defaultVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil, false)
+	customVersion := catalogSearchMeilisearchSchemaVersion("custom_embedder", nil, false)
 	if defaultVersion == customVersion {
 		t.Fatal("schema version should change when embedder changes")
 	}
@@ -414,10 +414,23 @@ func TestMeilisearchSchemaVersionChangesWithEmbedder(t *testing.T) {
 }
 
 func TestMeilisearchSchemaVersionChangesWithIndexTypes(t *testing.T) {
-	allTypesVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil)
-	videoOnlyVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, []string{"movie", "series"})
+	allTypesVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil, false)
+	videoOnlyVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, []string{"movie", "series"}, false)
 	if allTypesVersion == videoOnlyVersion {
 		t.Fatal("schema version should change when indexed media scope changes")
+	}
+}
+
+func TestMeilisearchSchemaVersionChangesWithSemanticEnabled(t *testing.T) {
+	// Toggling semantic search must change the expected schema version so a
+	// previously built (vector-less) index is treated as stale and forced to
+	// rebuild. Without this, enabling semantic without a rebuild leaves indexed
+	// documents missing _vectors while the Postgres coverage gate reports ready,
+	// silently degrading hybrid ranking.
+	disabledVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil, false)
+	enabledVersion := catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil, true)
+	if disabledVersion == enabledVersion {
+		t.Fatal("schema version should change when semantic search is toggled")
 	}
 }
 
