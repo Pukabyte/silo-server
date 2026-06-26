@@ -54,21 +54,32 @@ The review returns a verdict plus findings:
 - **`needs-attention`** → there is at least one material risk. Each finding names
   a file, a line range, an impact, and a concrete recommendation.
 
-For every material finding, do one of two things — never ignore it:
+LLM reviewers systematically **over-flag** — they report gaps even when the work is
+sound. So for every finding, in order:
 
-1. **Fix it**, then re-run the review (go back to step 2 after committing the fix), or
-2. **Rebut it** with a defensible, written reason it doesn't apply to this change
-   (and capture that reasoning in the PR's "Adversarial review" section).
+1. **Confirm it's real.** Open the cited file/lines and verify the finding is
+   grounded in the actual code and actually reachable. Drop findings that reference
+   code that doesn't exist, lines outside the diff, or behavior the code doesn't have
+   — don't fix phantom nits.
+2. For a confirmed finding, do one of two things — never silently ignore it:
+   - **Fix it** if it affects correctness or the issue's stated requirements, then
+     re-run the review (go back to step 2 after committing the fix); or
+   - **Rebut it** with a defensible, written reason it doesn't apply, and capture
+     that reasoning in the PR's "Adversarial review" section.
+3. Treat style/naming/speculative/low-value findings as **optional** — don't
+   gold-plate. The adversarial prompt is told not to emit these, but if any slip
+   through, note and move on; don't add abstraction or defensive code for cases that
+   can't happen.
 
-Style/naming/low-value nits are out of scope for this gate; the adversarial
-prompt is instructed not to emit them, but if any slip through, don't block on them.
-
-## 4. Loop until clean
+## 4. Loop — but cap it
 
 Repeat implement → verify → commit → review until the review is `approve` or every
-material finding is fixed or defensibly rebutted. Only then open the PR. If the
-review keeps surfacing material findings you can't resolve, stop and bring it to
-the user rather than shipping over a standing objection.
+material finding is fixed or defensibly rebutted.
+
+**Cap the loop at 2 iterations (3 absolute max).** Debugging effectiveness decays
+sharply after ~2–3 attempts — if material findings still stand after the cap, stop
+and escalate to the user with a summary rather than thrashing or shipping over a
+standing objection. Only open the PR once the review is clean within the cap.
 
 ## 5. Record it in the PR
 
