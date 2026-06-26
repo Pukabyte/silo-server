@@ -463,20 +463,38 @@ func (r *Repo) findTasteProfileCandidates(
 	return items, genreMap, nil
 }
 
-// ItemsNeedingEmbedding returns content IDs of media items that either have no
-// embedding or whose embedding was generated with a different model.
-// Books bypass the status='matched' gate because their scanner/plugin-derived
-// metadata is authoritative as soon as the scan/enrichment completes.
-func (r *Repo) ItemsNeedingEmbedding(ctx context.Context, currentModel string, limit int) ([]string, error) {
-	query := fmt.Sprintf(`
+// buildItemsNeedingEmbeddingSQL returns the cheap missing/model-stale candidate
+// query. It deliberately avoids the per-row item_people LATERAL joins that the
+// text-staleness CTE (ListEmbeddingTextCandidates) needs, so the active-backfill
+// pass stays cheap: a single LEFT JOIN on the embeddings table is enough to find
+// rows that have no embedding or were embedded under a different model. Ordering
+// by content_id makes the $2 cursor stable across calls.
+// Args: $1 = current model, $2 = afterID cursor (empty for the first page), $3 = limit.
+func buildItemsNeedingEmbeddingSQL() string {
+	return fmt.Sprintf(`
 		SELECT mi.content_id
 		FROM   media_items mi
 		LEFT JOIN media_item_embeddings e ON e.media_item_id = mi.content_id
 		WHERE  %s
 		  AND  (e.media_item_id IS NULL OR e.model != $1)
-		LIMIT  $2
+		  AND  ($2 = '' OR mi.content_id > $2)
+		ORDER  BY mi.content_id
+		LIMIT  $3
 	`, embeddingEligibilityWhereClause())
-	rows, err := r.pool.Query(ctx, query, currentModel, limit)
+}
+
+// ItemsNeedingEmbedding returns content IDs of media items that either have no
+// embedding or whose embedding was generated with a different model, ordered by
+// content_id and paged via afterID (pass "" for the first page). This is the
+// "cheap" pass of the embedding backfill: it intentionally does NOT detect
+// text-staleness (which would require the expensive item_people LATERAL joins);
+// re-embedding text-changed items is handled separately by
+// ListEmbeddingTextCandidates.
+//
+// Books bypass the status='matched' gate because their scanner/plugin-derived
+// metadata is authoritative as soon as the scan/enrichment completes.
+func (r *Repo) ItemsNeedingEmbedding(ctx context.Context, currentModel, afterID string, limit int) ([]string, error) {
+	rows, err := r.pool.Query(ctx, buildItemsNeedingEmbeddingSQL(), currentModel, afterID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("items needing embedding: %w", err)
 	}
