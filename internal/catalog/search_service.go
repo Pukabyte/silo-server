@@ -148,7 +148,7 @@ func (s *CatalogSearchService) Status(ctx context.Context) CatalogSearchRuntimeS
 			Embedder:         settings.Embedder,
 		},
 		Index: CatalogSearchIndexStateStatus{
-			ExpectedSchemaVersion: catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes),
+			ExpectedSchemaVersion: catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes, settings.SemanticEnabled),
 		},
 		Tasks: []CatalogSearchTaskLink{
 			{Key: "sync_catalog_search_index", Name: "Sync Catalog Search Index", Href: "/admin/tasks/sync_catalog_search_index"},
