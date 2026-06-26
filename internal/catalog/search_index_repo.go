@@ -18,6 +18,7 @@ const (
 	SearchIndexEventRename = "rename"
 
 	searchIndexMaintenanceLockID int64 = 0x53494c4f5345531
+	searchIndexEventMaxAttempts        = 10
 )
 
 type SearchIndexEvent struct {
@@ -62,6 +63,10 @@ func (r *SearchIndexEventRepository) WithActiveProvider(provider string) *Search
 	r.activeProvider = provider
 	r.activeProviderKnown = true
 	return r
+}
+
+func (r *SearchIndexEventRepository) disabledByActiveProvider() bool {
+	return r != nil && r.activeProviderKnown && r.activeProvider != SearchProviderMeilisearch
 }
 
 func (r *SearchIndexEventRepository) EnqueueUpsert(ctx context.Context, execer itemExecer, contentID string) error {
@@ -330,6 +335,40 @@ func (r *SearchIndexEventRepository) MarkProcessed(ctx context.Context, ids []in
 	return err
 }
 
+func (r *SearchIndexEventRepository) MaxEventID(ctx context.Context, provider string) (int64, error) {
+	if r == nil || r.pool == nil {
+		return 0, nil
+	}
+	var maxID int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(MAX(id), 0)
+		FROM catalog_search_index_events
+		WHERE provider = $1
+	`, provider).Scan(&maxID)
+	if isSearchIndexSchemaUnavailable(err) {
+		return 0, nil
+	}
+	return maxID, err
+}
+
+func (r *SearchIndexEventRepository) MarkProcessedThrough(ctx context.Context, provider string, maxID int64) error {
+	if r == nil || r.pool == nil || maxID <= 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE catalog_search_index_events
+		SET processed_at = NOW(),
+		    last_error = ''
+		WHERE provider = $1
+		  AND id <= $2
+		  AND processed_at IS NULL
+	`, provider, maxID)
+	if isSearchIndexSchemaUnavailable(err) {
+		return nil
+	}
+	return err
+}
+
 func (r *SearchIndexEventRepository) MarkFailed(ctx context.Context, ids []int64, cause error) error {
 	if r == nil || r.pool == nil || len(ids) == 0 {
 		return nil
@@ -341,10 +380,20 @@ func (r *SearchIndexEventRepository) MarkFailed(ctx context.Context, ids []int64
 	_, err := r.pool.Exec(ctx, `
 		UPDATE catalog_search_index_events
 		SET attempts = attempts + 1,
-		    available_at = NOW() + LEAST(((attempts + 1) * INTERVAL '30 seconds'), INTERVAL '15 minutes'),
-		    last_error = $2
+		    available_at = CASE
+		        WHEN attempts + 1 >= $3 THEN available_at
+		        ELSE NOW() + LEAST(((attempts + 1) * INTERVAL '30 seconds'), INTERVAL '15 minutes')
+		    END,
+		    processed_at = CASE
+		        WHEN attempts + 1 >= $3 THEN NOW()
+		        ELSE processed_at
+		    END,
+		    last_error = CASE
+		        WHEN attempts + 1 >= $3 THEN 'dead-lettered after ' || $3::text || ' attempts: ' || $2
+		        ELSE $2
+		    END
 		WHERE id = ANY($1)
-	`, ids, message)
+	`, ids, message, searchIndexEventMaxAttempts)
 	if isSearchIndexSchemaUnavailable(err) {
 		return nil
 	}
@@ -377,24 +426,25 @@ func (r *SearchIndexEventRepository) GetState(ctx context.Context, provider stri
 	return state, err
 }
 
-func (r *SearchIndexEventRepository) UpdateStateAfterRebuild(ctx context.Context, provider, activeIndexUID string, schemaVersion, documentCount int) error {
+func (r *SearchIndexEventRepository) UpdateStateAfterRebuild(ctx context.Context, provider, activeIndexUID string, schemaVersion, documentCount int, lastProcessedEventID int64) error {
 	if r == nil || r.pool == nil {
 		return nil
 	}
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO catalog_search_index_state (
 			provider, active_index_uid, schema_version, document_count,
-			last_rebuild_at, last_sync_at, updated_at
+			last_rebuild_at, last_sync_at, last_processed_event_id, updated_at
 		)
-		VALUES ($1, $2, $3, $4, NOW(), NOW(), NOW())
+		VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, NOW())
 		ON CONFLICT (provider) DO UPDATE SET
 			active_index_uid = EXCLUDED.active_index_uid,
 			schema_version = EXCLUDED.schema_version,
 			document_count = EXCLUDED.document_count,
 			last_rebuild_at = EXCLUDED.last_rebuild_at,
 			last_sync_at = EXCLUDED.last_sync_at,
+			last_processed_event_id = GREATEST(catalog_search_index_state.last_processed_event_id, EXCLUDED.last_processed_event_id),
 			updated_at = NOW()
-	`, provider, activeIndexUID, schemaVersion, documentCount)
+	`, provider, activeIndexUID, schemaVersion, documentCount, lastProcessedEventID)
 	if isSearchIndexSchemaUnavailable(err) {
 		return nil
 	}

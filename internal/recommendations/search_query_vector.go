@@ -32,8 +32,26 @@ func (e *Engine) EmbedSearchQuery(ctx context.Context, query string) ([]float32,
 	if len(vectors) == 0 || len(vectors[0]) == 0 {
 		return nil, fmt.Errorf("embedding API returned no query vector")
 	}
-	if err := e.ensureEmbeddingLock(ctx, vectors[0]); err != nil {
+	if err := e.validateQueryEmbeddingLock(ctx, vectors[0]); err != nil {
 		return nil, err
 	}
 	return ensureCanonicalDimensions(vectors[0])
+}
+
+func (e *Engine) validateQueryEmbeddingLock(ctx context.Context, vector []float32) error {
+	lock, err := e.repo.GetEmbeddingLock(ctx)
+	if err != nil {
+		return fmt.Errorf("load embedding lock: %w", err)
+	}
+	if lock == nil {
+		return nil
+	}
+	return validateQueryEmbeddingLock(lock, e.cfg.EmbeddingBaseURL, e.cfg.EmbeddingModel, len(vector))
+}
+
+func validateQueryEmbeddingLock(lock *EmbeddingLock, baseURL, model string, sourceDimensions int) error {
+	if lock == nil {
+		return nil
+	}
+	return lock.Validate(baseURL, model, sourceDimensions)
 }

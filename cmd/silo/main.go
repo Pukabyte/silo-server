@@ -520,6 +520,12 @@ func main() {
 	// still encrypts/decrypts — no raw settings repo may escape into later wiring.
 	settingsRepo = catalog.NewEncryptedSettingsRepo(catalog.NewServerSettingsRepo(pool), dataCipher)
 	nodeID := resolveNodeIdentity()
+	catalogSearchStartupSettings, err := catalog.CatalogSearchSettingsFromMap(settings)
+	if err != nil {
+		slog.Warn("catalog search: failed to load settings for startup wiring; using postgres", "err", err)
+		catalogSearchStartupSettings = catalog.DefaultCatalogSearchSettings()
+	}
+	activeCatalogSearchProvider := catalog.ActiveCatalogSearchProvider(catalogSearchStartupSettings)
 
 	// Step 9: Validate
 	if err := cfg.Validate(); err != nil {
@@ -818,6 +824,7 @@ func main() {
 
 		ffprobePath := scanner.FFprobePathFromFFmpeg(cfg.Playback.FFmpegPath)
 		s := scanner.NewScanner(fileRepo, ffprobePath, deps.S3Public, cfg.Scanner.Workers, cfg.Scanner.EmptyTrashAfterScan)
+		s.SetSearchIndexProvider(activeCatalogSearchProvider)
 		configWatcher.OnChange(func(_, updated *config.Config) {
 			s.SetWorkers(updated.Scanner.Workers)
 		})
@@ -1064,7 +1071,7 @@ func main() {
 	if needsWorkers && deps.DB != nil && deps.FileRepo != nil {
 		chainRepo := metadata.NewChainRepository(deps.DB)
 		skippedRootRepo = metadata.NewSkippedRootRepository(deps.DB)
-		itemRepo = catalog.NewItemRepository(deps.DB)
+		itemRepo = catalog.NewItemRepository(deps.DB).WithActiveSearchProvider(activeCatalogSearchProvider)
 		episodeRepo = catalog.NewEpisodeRepository(deps.DB)
 		seasonRepo = catalog.NewSeasonRepository(deps.DB)
 		personRepo := catalog.NewPersonRepository(deps.DB)

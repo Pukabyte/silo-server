@@ -265,9 +265,10 @@ type itemListImageURLs struct {
 
 // browseResponse is the paginated response for the /items endpoint.
 type browseResponse struct {
-	Total   int                `json:"total"`
-	HasMore bool               `json:"has_more"`
-	Items   []itemListResponse `json:"items"`
+	Total      int                `json:"total"`
+	TotalExact bool               `json:"total_exact"`
+	HasMore    bool               `json:"has_more"`
+	Items      []itemListResponse `json:"items"`
 }
 
 type itemFiltersResponse struct {
@@ -600,9 +601,10 @@ func (h *ItemsHandler) writeCatalogBrowseResponse(w http.ResponseWriter, r *http
 	}
 
 	writeJSON(w, http.StatusOK, browseResponse{
-		Total:   result.Total,
-		HasMore: result.HasMore,
-		Items:   items,
+		Total:      result.Total,
+		TotalExact: result.TotalExact,
+		HasMore:    result.HasMore,
+		Items:      items,
 	})
 	return true
 }
