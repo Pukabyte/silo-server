@@ -79,6 +79,10 @@ var restartRequiredKeys = map[string]bool{
 	"catalog.search.meilisearch.index":             true,
 	"catalog.search.meilisearch.timeout_ms":        true,
 	"catalog.search.meilisearch.matching_strategy": true,
+	"catalog.search.meilisearch.index_types":       true,
+	"catalog.search.meilisearch.semantic_enabled":  true,
+	"catalog.search.meilisearch.semantic_ratio":    true,
+	"catalog.search.meilisearch.embedder":          true,
 }
 
 // restartRequiredPrefixes covers whole namespaces of infrastructure settings:

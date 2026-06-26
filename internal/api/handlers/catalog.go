@@ -134,33 +134,75 @@ func (h *CatalogHandler) HandleGetCatalog(w http.ResponseWriter, r *http.Request
 }
 
 func (h *CatalogHandler) catalogItemResponses(r *http.Request, resultItems []*models.MediaItem, sortField string, accessFilter catalog.AccessFilter) []itemListResponse {
-	overlaySummaries := h.itemsH.listOverlaySummaries(r.Context(), resultItems, accessFilter)
-	userStates := h.itemsH.listItemUserStates(r, resultItems)
-	episodeMetadata := h.itemsH.listEpisodeBrowseMetadata(r.Context(), resultItems)
-	store, profileID, _ := h.itemsH.userStoreForRequest(r)
-	sortMetrics := h.itemsH.listSortMetrics(
-		r.Context(),
-		resultItems,
-		sortField,
-		accessFilter,
-		overlaySummaries,
-		store,
-		apimw.GetUserID(r.Context()),
-		profileID,
+	var (
+		localizedItems   []*models.MediaItem
+		overlaySummaries map[string]*models.OverlaySummary
+		userStates       map[string]*itemUserStateResponse
+		episodeMetadata  map[string]struct {
+			SeriesTitle   string
+			SeasonNumber  *int
+			EpisodeNumber *int
+		}
 	)
-	items := make([]itemListResponse, 0, len(resultItems))
-	for _, item := range resultItems {
-		resp := h.itemsH.toItemListResponseWithOverlay(
-			r,
-			item,
-			overlaySummaries[item.ContentID],
-			userStates[item.ContentID],
+	var enrichWG sync.WaitGroup
+	enrichWG.Add(4)
+	go func() {
+		defer enrichWG.Done()
+		localizedItems = h.itemsH.localizeItemListModels(r.Context(), resultItems, accessFilter)
+	}()
+	go func() {
+		defer enrichWG.Done()
+		overlaySummaries = h.itemsH.listOverlaySummaries(r.Context(), resultItems, accessFilter)
+	}()
+	go func() {
+		defer enrichWG.Done()
+		userStates = h.itemsH.listItemUserStates(r, resultItems)
+	}()
+	go func() {
+		defer enrichWG.Done()
+		episodeMetadata = h.itemsH.listEpisodeBrowseMetadata(r.Context(), resultItems)
+	}()
+	enrichWG.Wait()
+
+	var (
+		imageURLs   map[string]itemListImageURLs
+		sortMetrics map[string]*sortMetricsResponse
+	)
+	store, profileID, _ := h.itemsH.userStoreForRequest(r)
+	var responseWG sync.WaitGroup
+	responseWG.Add(2)
+	go func() {
+		defer responseWG.Done()
+		imageURLs = h.itemsH.itemListCardImageURLs(r.Context(), localizedItems)
+	}()
+	go func() {
+		defer responseWG.Done()
+		sortMetrics = h.itemsH.listSortMetrics(
+			r.Context(),
+			resultItems,
+			sortField,
+			accessFilter,
+			overlaySummaries,
+			store,
+			apimw.GetUserID(r.Context()),
+			profileID,
 		)
+	}()
+	responseWG.Wait()
+
+	items := make([]itemListResponse, 0, len(localizedItems))
+	for _, item := range localizedItems {
+		if item == nil {
+			continue
+		}
+		resp := itemListResponseShell(item, overlaySummaries[item.ContentID], userStates[item.ContentID])
 		if meta, ok := episodeMetadata[item.ContentID]; ok {
 			resp.SeriesTitle = meta.SeriesTitle
 			resp.SeasonNumber = meta.SeasonNumber
 			resp.EpisodeNumber = meta.EpisodeNumber
 		}
+		resp.PosterURL = imageURLs[item.ContentID].posterURL
+		resp.BackdropURL = imageURLs[item.ContentID].backdropURL
 		resp.SortMetrics = sortMetrics[item.ContentID]
 		items = append(items, resp)
 	}

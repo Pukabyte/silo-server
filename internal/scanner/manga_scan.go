@@ -175,7 +175,13 @@ func (s *Scanner) deleteOrphanedMangaSeries(ctx context.Context, folderID int) e
 	if s == nil || s.fileRepo == nil {
 		return nil
 	}
-	rows, err := s.fileRepo.Pool().Query(ctx, `
+	tx, err := s.fileRepo.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin orphaned manga series delete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
 		DELETE FROM media_items mi
 		WHERE mi.type = 'manga'
 		  AND EXISTS (
@@ -202,10 +208,11 @@ func (s *Scanner) deleteOrphanedMangaSeries(ctx context.Context, folderID int) e
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterating deleted manga series ids: %w", err)
 	}
-	for _, contentID := range deletedIDs {
-		if err := catalog.EnqueueSearchIndexDelete(ctx, s.fileRepo.Pool(), contentID); err != nil {
-			return fmt.Errorf("enqueueing catalog search manga series delete: %w", err)
-		}
+	if err := catalog.EnqueueSearchIndexDeletes(ctx, tx, deletedIDs); err != nil {
+		return fmt.Errorf("enqueueing catalog search manga series delete: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit orphaned manga series delete tx: %w", err)
 	}
 	if len(deletedIDs) > 0 {
 		slog.Info("manga scan: removed orphaned series", "folder_id", folderID, "deleted", len(deletedIDs))
@@ -389,15 +396,23 @@ func (s *Scanner) findOrCreateMangaSeries(ctx context.Context, folderID int, ser
 			return "", lookupErr
 		}
 		if winner != "" && winner != id {
-			if _, delErr := s.fileRepo.Pool().Exec(ctx,
-				`DELETE FROM media_items WHERE content_id = $1`, id); delErr != nil {
+			tx, txErr := s.fileRepo.Pool().Begin(ctx)
+			if txErr != nil {
+				return "", fmt.Errorf("begin duplicate manga series delete tx: %w", txErr)
+			}
+			_, delErr := tx.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, id)
+			if delErr != nil {
+				_ = tx.Rollback(ctx)
 				slog.Warn("manga scan: failed to delete duplicate series item",
 					"folder_id", folderID,
 					"content_id", id,
 					"error", delErr,
 				)
-			} else if eventErr := catalog.EnqueueSearchIndexDelete(ctx, s.fileRepo.Pool(), id); eventErr != nil {
+			} else if eventErr := catalog.EnqueueSearchIndexDelete(ctx, tx, id); eventErr != nil {
+				_ = tx.Rollback(ctx)
 				return "", fmt.Errorf("enqueue catalog search duplicate manga series delete: %w", eventErr)
+			} else if commitErr := tx.Commit(ctx); commitErr != nil {
+				return "", fmt.Errorf("commit duplicate manga series delete tx: %w", commitErr)
 			}
 			return winner, nil
 		}

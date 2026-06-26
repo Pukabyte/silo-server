@@ -282,6 +282,7 @@ func (r *CatalogResolver) resolveDirectSearchSource(ctx context.Context, req Cat
 		Limit:     req.Limit,
 		Offset:    req.Offset,
 		Access:    searchAccess,
+		SkipTotal: req.SkipTotal,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("searching catalog items: %w", err)

@@ -20,6 +20,13 @@ const MEILI_KEYS = [
   "catalog.search.meilisearch.index",
   "catalog.search.meilisearch.timeout_ms",
   "catalog.search.meilisearch.matching_strategy",
+  "catalog.search.meilisearch.sync_batch_size",
+  "catalog.search.meilisearch.rebuild_batch_size",
+  "catalog.search.meilisearch.rebuild_task_queue_depth",
+  "catalog.search.meilisearch.index_types",
+  "catalog.search.meilisearch.semantic_enabled",
+  "catalog.search.meilisearch.semantic_ratio",
+  "catalog.search.meilisearch.embedder",
 ];
 
 const KEYS = ["catalog.search.provider", ...MEILI_KEYS];
@@ -126,6 +133,62 @@ export default function SearchSettings() {
             ]}
             disabled={!meiliEnabled}
           />
+          <SettingField
+            label="Sync Batch Size"
+            type="number"
+            value={form.getValue("catalog.search.meilisearch.sync_batch_size") || "500"}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.sync_batch_size", value)}
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Rebuild Batch Size"
+            type="number"
+            value={form.getValue("catalog.search.meilisearch.rebuild_batch_size") || "5000"}
+            onChange={(value) =>
+              form.setValue("catalog.search.meilisearch.rebuild_batch_size", value)
+            }
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Rebuild Queue Depth"
+            type="number"
+            value={form.getValue("catalog.search.meilisearch.rebuild_task_queue_depth") || "4"}
+            onChange={(value) =>
+              form.setValue("catalog.search.meilisearch.rebuild_task_queue_depth", value)
+            }
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Indexed Types"
+            value={form.getValue("catalog.search.meilisearch.index_types")}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.index_types", value)}
+            hint="all, video, or movie,series"
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Semantic Search"
+            type="toggle"
+            value={form.getValue("catalog.search.meilisearch.semantic_enabled") || "false"}
+            onChange={(value) =>
+              form.setValue("catalog.search.meilisearch.semantic_enabled", value)
+            }
+            hint="Uses existing recommendation embeddings for hybrid catalog search."
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Semantic Ratio"
+            type="number"
+            value={form.getValue("catalog.search.meilisearch.semantic_ratio") || "0.30"}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.semantic_ratio", value)}
+            hint="0.30"
+            disabled={!meiliEnabled}
+          />
+          <SettingField
+            label="Embedder"
+            value={form.getValue("catalog.search.meilisearch.embedder") || "silo_recommendations"}
+            onChange={(value) => form.setValue("catalog.search.meilisearch.embedder", value)}
+            disabled={!meiliEnabled}
+          />
           <div className="py-3">
             <ConnectionCheckAction
               onClick={handleCheckConnection}
@@ -161,6 +224,23 @@ export default function SearchSettings() {
                 badge={`schema ${status.index.schema_version}/${status.index.expected_schema_version}`}
               />
               <StatusRow label="Documents" value={String(status.index.document_count)} />
+              <StatusRow
+                label="Indexed Types"
+                value={formatIndexedTypes(status.meilisearch.index_types)}
+              />
+              <StatusRow
+                label="Semantic Search"
+                value={status.meilisearch.semantic_enabled ? "Enabled" : "Disabled"}
+                badge={status.meilisearch.embedder}
+              />
+              <StatusRow
+                label="Semantic Ratio"
+                value={formatSemanticRatio(status.meilisearch.semantic_ratio)}
+              />
+              <StatusRow
+                label="Vectorized Documents"
+                value={String(status.index.vector_document_count)}
+              />
               <StatusRow label="Pending Events" value={String(status.index.pending_events)} />
               <StatusRow
                 label="Last Sync"
@@ -210,4 +290,14 @@ function formatStatusDate(value?: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleString();
+}
+
+function formatIndexedTypes(value?: string[]) {
+  if (!value || value.length === 0) return "All";
+  return value.join(", ");
+}
+
+function formatSemanticRatio(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "0";
+  return value.toFixed(2);
 }

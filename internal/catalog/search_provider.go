@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/Silo-Server/silo-server/internal/embeddingvectors"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -21,11 +24,29 @@ const (
 	SearchSettingMeilisearchIndex            = "catalog.search.meilisearch.index"
 	SearchSettingMeilisearchTimeoutMS        = "catalog.search.meilisearch.timeout_ms"
 	SearchSettingMeilisearchMatchingStrategy = "catalog.search.meilisearch.matching_strategy"
+	SearchSettingMeilisearchSyncBatchSize    = "catalog.search.meilisearch.sync_batch_size"
+	SearchSettingMeilisearchRebuildBatchSize = "catalog.search.meilisearch.rebuild_batch_size"
+	SearchSettingMeilisearchRebuildQueue     = "catalog.search.meilisearch.rebuild_task_queue_depth"
+	SearchSettingMeilisearchIndexTypes       = "catalog.search.meilisearch.index_types"
+	SearchSettingMeilisearchSemanticEnabled  = "catalog.search.meilisearch.semantic_enabled"
+	SearchSettingMeilisearchSemanticRatio    = "catalog.search.meilisearch.semantic_ratio"
+	SearchSettingMeilisearchEmbedder         = "catalog.search.meilisearch.embedder"
 
 	DefaultMeilisearchIndex            = "silo_media_items"
 	DefaultMeilisearchTimeoutMS        = 800
 	DefaultMeilisearchMatchingStrategy = "last"
-	SearchMeilisearchSchemaVersion     = 1
+	SearchMeilisearchSchemaVersion     = 2
+
+	DefaultMeilisearchSyncBatchSize     = 500
+	DefaultMeilisearchRebuildBatchSize  = 5000
+	DefaultMeilisearchRebuildQueueDepth = 4
+	DefaultMeilisearchSemanticEnabled   = false
+	DefaultMeilisearchSemanticRatio     = 0.30
+	DefaultMeilisearchEmbedder          = "silo_recommendations"
+
+	MaxMeilisearchSyncBatchSize     = 10000
+	MaxMeilisearchRebuildBatchSize  = 25000
+	MaxMeilisearchRebuildQueueDepth = 16
 )
 
 var ErrSearchProviderFallback = errors.New("catalog search provider fallback")
@@ -36,6 +57,7 @@ type CatalogSearchRequest struct {
 	Limit     int
 	Offset    int
 	Access    AccessFilter
+	SkipTotal bool
 }
 
 type CatalogSearchResult struct {
@@ -51,6 +73,14 @@ type CatalogSearchProvider interface {
 	Search(ctx context.Context, req CatalogSearchRequest) (*CatalogSearchResult, error)
 }
 
+type CatalogSearchQueryVectorizer interface {
+	EmbedSearchQuery(ctx context.Context, query string) ([]float32, error)
+}
+
+type CatalogSearchCandidateRetriever interface {
+	CandidateIDs(ctx context.Context, vector []float32, itemTypes []string, limit int) ([]string, error)
+}
+
 type PostgresSearchProvider struct {
 	itemRepo *ItemRepository
 }
@@ -63,15 +93,15 @@ func (p *PostgresSearchProvider) Search(ctx context.Context, req CatalogSearchRe
 	if p == nil || p.itemRepo == nil {
 		return nil, fmt.Errorf("postgres search provider requires item repository")
 	}
-	items, total, err := p.itemRepo.Search(ctx, req.Query, req.ItemTypes, req.Limit, req.Offset, req.Access)
+	items, total, hasMore, totalExact, err := p.itemRepo.SearchPage(ctx, req.Query, req.ItemTypes, req.Limit, req.Offset, req.Access, !req.SkipTotal)
 	if err != nil {
 		return nil, err
 	}
 	return &CatalogSearchResult{
 		Items:      items,
 		Total:      total,
-		HasMore:    total > req.Offset+len(items),
-		TotalExact: true,
+		HasMore:    hasMore,
+		TotalExact: totalExact,
 		Provider:   SearchProviderPostgres,
 	}, nil
 }
@@ -83,14 +113,27 @@ type CatalogSearchSettings struct {
 	MeilisearchIndex  string
 	Timeout           time.Duration
 	MatchingStrategy  string
+	SyncBatchSize     int
+	RebuildBatchSize  int
+	RebuildQueueDepth int
+	IndexTypes        []string
+	SemanticEnabled   bool
+	SemanticRatio     float64
+	Embedder          string
 }
 
 func DefaultCatalogSearchSettings() CatalogSearchSettings {
 	return CatalogSearchSettings{
-		Provider:         SearchProviderPostgres,
-		MeilisearchIndex: DefaultMeilisearchIndex,
-		Timeout:          time.Duration(DefaultMeilisearchTimeoutMS) * time.Millisecond,
-		MatchingStrategy: DefaultMeilisearchMatchingStrategy,
+		Provider:          SearchProviderPostgres,
+		MeilisearchIndex:  DefaultMeilisearchIndex,
+		Timeout:           time.Duration(DefaultMeilisearchTimeoutMS) * time.Millisecond,
+		MatchingStrategy:  DefaultMeilisearchMatchingStrategy,
+		SyncBatchSize:     DefaultMeilisearchSyncBatchSize,
+		RebuildBatchSize:  DefaultMeilisearchRebuildBatchSize,
+		RebuildQueueDepth: DefaultMeilisearchRebuildQueueDepth,
+		SemanticEnabled:   DefaultMeilisearchSemanticEnabled,
+		SemanticRatio:     DefaultMeilisearchSemanticRatio,
+		Embedder:          DefaultMeilisearchEmbedder,
 	}
 }
 
@@ -120,6 +163,11 @@ func CatalogSearchSettingsFromMap(values map[string]string) (CatalogSearchSettin
 	if index := strings.TrimSpace(values[SearchSettingMeilisearchIndex]); index != "" {
 		settings.MeilisearchIndex = index
 	}
+	if embedder, err := NormalizeCatalogSearchEmbedderName(values[SearchSettingMeilisearchEmbedder]); err != nil {
+		return settings, err
+	} else {
+		settings.Embedder = embedder
+	}
 	if raw := strings.TrimSpace(values[SearchSettingMeilisearchTimeoutMS]); raw != "" {
 		timeoutMS, err := strconv.Atoi(raw)
 		if err != nil || timeoutMS <= 0 {
@@ -133,7 +181,108 @@ func CatalogSearchSettingsFromMap(values map[string]string) (CatalogSearchSettin
 		}
 		settings.MatchingStrategy = strategy
 	}
+	if raw := strings.TrimSpace(values[SearchSettingMeilisearchSyncBatchSize]); raw != "" {
+		n, err := parseCatalogSearchIntSetting(
+			SearchSettingMeilisearchSyncBatchSize, raw, 1, MaxMeilisearchSyncBatchSize)
+		if err != nil {
+			return settings, err
+		}
+		settings.SyncBatchSize = n
+	}
+	if raw := strings.TrimSpace(values[SearchSettingMeilisearchRebuildBatchSize]); raw != "" {
+		n, err := parseCatalogSearchIntSetting(
+			SearchSettingMeilisearchRebuildBatchSize, raw, 1, MaxMeilisearchRebuildBatchSize)
+		if err != nil {
+			return settings, err
+		}
+		settings.RebuildBatchSize = n
+	}
+	if raw := strings.TrimSpace(values[SearchSettingMeilisearchRebuildQueue]); raw != "" {
+		n, err := parseCatalogSearchIntSetting(
+			SearchSettingMeilisearchRebuildQueue, raw, 1, MaxMeilisearchRebuildQueueDepth)
+		if err != nil {
+			return settings, err
+		}
+		settings.RebuildQueueDepth = n
+	}
+	if raw := strings.TrimSpace(values[SearchSettingMeilisearchSemanticEnabled]); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return settings, fmt.Errorf("%s must be true or false", SearchSettingMeilisearchSemanticEnabled)
+		}
+		settings.SemanticEnabled = enabled
+	}
+	if raw := strings.TrimSpace(values[SearchSettingMeilisearchSemanticRatio]); raw != "" {
+		ratio, err := strconv.ParseFloat(raw, 64)
+		if err != nil || ratio < 0 || ratio > 1 {
+			return settings, fmt.Errorf("%s must be a number between 0 and 1", SearchSettingMeilisearchSemanticRatio)
+		}
+		settings.SemanticRatio = ratio
+	}
+	indexTypes, err := NormalizeCatalogSearchIndexTypesValue(values[SearchSettingMeilisearchIndexTypes])
+	if err != nil {
+		return settings, err
+	}
+	settings.IndexTypes = indexTypes
 	return settings, nil
+}
+
+func parseCatalogSearchIntSetting(key, value string, minValue, maxValue int) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < minValue || n > maxValue {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", key, minValue, maxValue)
+	}
+	return n, nil
+}
+
+func NormalizeCatalogSearchEmbedderName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return DefaultMeilisearchEmbedder, nil
+	}
+	if len(value) > 128 {
+		return "", fmt.Errorf("%s must be 128 characters or fewer", SearchSettingMeilisearchEmbedder)
+	}
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' || r == '-' {
+			continue
+		}
+		return "", fmt.Errorf("%s may only contain letters, numbers, underscores, and hyphens", SearchSettingMeilisearchEmbedder)
+	}
+	return value, nil
+}
+
+func NormalizeCatalogSearchIndexTypesValue(value string) ([]string, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || value == "all" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(strings.ToLower(part))
+		if part == "" {
+			continue
+		}
+		if !IsValidMediaScope(part) {
+			return nil, fmt.Errorf("%s must be all, video, or a comma-separated list of media item types", SearchSettingMeilisearchIndexTypes)
+		}
+		for _, itemType := range MediaScopeItemTypes(part) {
+			if itemType == "" {
+				continue
+			}
+			if _, ok := seen[itemType]; ok {
+				continue
+			}
+			seen[itemType] = struct{}{}
+			out = append(out, itemType)
+		}
+	}
+	return out, nil
+}
+
+func FormatCatalogSearchIndexTypesValue(itemTypes []string) string {
+	return strings.Join(normalizeCatalogSearchItemTypes(itemTypes), ",")
 }
 
 func normalizeCatalogSearchProvider(value string) string {
@@ -145,6 +294,26 @@ func normalizeCatalogSearchProvider(value string) string {
 	default:
 		return ""
 	}
+}
+
+func normalizeCatalogSearchItemTypes(itemTypes []string) []string {
+	if len(itemTypes) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(itemTypes))
+	for _, itemType := range itemTypes {
+		itemType = strings.TrimSpace(strings.ToLower(itemType))
+		if itemType == "" {
+			continue
+		}
+		if _, ok := seen[itemType]; ok {
+			continue
+		}
+		seen[itemType] = struct{}{}
+		out = append(out, itemType)
+	}
+	return out
 }
 
 type CatalogSearchRuntimeStatus struct {
@@ -164,6 +333,10 @@ type CatalogSearchMeiliStatus struct {
 	LastFallback     string     `json:"last_fallback,omitempty"`
 	TimeoutMS        int        `json:"timeout_ms"`
 	MatchingStrategy string     `json:"matching_strategy"`
+	IndexTypes       []string   `json:"index_types,omitempty"`
+	SemanticEnabled  bool       `json:"semantic_enabled"`
+	SemanticRatio    float64    `json:"semantic_ratio"`
+	Embedder         string     `json:"embedder"`
 }
 
 type CatalogSearchIndexStateStatus struct {
@@ -171,6 +344,7 @@ type CatalogSearchIndexStateStatus struct {
 	SchemaVersion         int        `json:"schema_version"`
 	ExpectedSchemaVersion int        `json:"expected_schema_version"`
 	DocumentCount         int        `json:"document_count"`
+	VectorDocumentCount   int        `json:"vector_document_count"`
 	PendingEvents         int        `json:"pending_events"`
 	LastRebuildAt         *time.Time `json:"last_rebuild_at,omitempty"`
 	LastSyncAt            *time.Time `json:"last_sync_at,omitempty"`
@@ -185,4 +359,29 @@ type CatalogSearchTaskLink struct {
 
 type CatalogSearchStatusProvider interface {
 	Status(ctx context.Context) CatalogSearchRuntimeStatus
+}
+
+func catalogSearchMeilisearchEmbedderSettings(embedder string) map[string]any {
+	return map[string]any{
+		embedder: map[string]any{
+			"source":     "userProvided",
+			"dimensions": embeddingvectors.CanonicalDimensions,
+		},
+	}
+}
+
+func catalogSearchMeilisearchSchemaVersion(embedder string, itemTypes []string) int {
+	embedder, err := NormalizeCatalogSearchEmbedderName(embedder)
+	if err != nil {
+		embedder = DefaultMeilisearchEmbedder
+	}
+	h := fnv.New32a()
+	_, _ = fmt.Fprintf(
+		h,
+		"embedder=%s;dimensions=%d;index_types=%s",
+		embedder,
+		embeddingvectors.CanonicalDimensions,
+		strings.Join(normalizeCatalogSearchItemTypes(itemTypes), ","),
+	)
+	return SearchMeilisearchSchemaVersion*1_000_000 + int(h.Sum32()%1_000_000)
 }

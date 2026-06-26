@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/embeddingvectors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgvector/pgvector-go"
 )
-
-const catalogSearchIndexBatchSize = 500
 
 type SearchIndexProgressReporter interface {
 	Report(percent float64, message string)
@@ -27,6 +28,7 @@ type CatalogSearchIndexSyncStats struct {
 	Deleted         int    `json:"deleted"`
 	ActiveIndexUID  string `json:"active_index_uid,omitempty"`
 	DocumentCount   int    `json:"document_count"`
+	VectorDocCount  int    `json:"vector_document_count"`
 	LastProcessedID int64  `json:"last_processed_event_id,omitempty"`
 }
 
@@ -36,7 +38,16 @@ type CatalogSearchIndexRebuildStats struct {
 	Reason         string `json:"reason,omitempty"`
 	ActiveIndexUID string `json:"active_index_uid,omitempty"`
 	DocumentCount  int    `json:"document_count"`
+	VectorDocCount int    `json:"vector_document_count"`
 }
+
+type queuedMeilisearchTask struct {
+	id       int64
+	docCount int
+	vecCount int
+}
+
+const meilisearchMaxDocumentPayloadBytes = 80 * 1024 * 1024
 
 type CatalogSearchIndexer struct {
 	pool          *pgxpool.Pool
@@ -61,7 +72,7 @@ func (i *CatalogSearchIndexer) ShouldSyncRun(ctx context.Context) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	if state.ActiveIndexUID == "" || state.SchemaVersion != SearchMeilisearchSchemaVersion {
+	if state.ActiveIndexUID == "" || state.SchemaVersion != catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes) {
 		return false, nil
 	}
 	pending, err := i.events.PendingCount(ctx, SearchProviderMeilisearch)
@@ -73,7 +84,7 @@ func (i *CatalogSearchIndexer) ShouldSyncRun(ctx context.Context) (bool, error) 
 
 func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIndexProgressReporter) (CatalogSearchIndexSyncStats, error) {
 	stats := CatalogSearchIndexSyncStats{}
-	_, client, ok, err := i.loadClient(ctx)
+	settings, client, ok, err := i.loadClient(ctx)
 	if err != nil {
 		return stats, err
 	}
@@ -103,7 +114,7 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 	if err != nil {
 		return stats, err
 	}
-	if state.ActiveIndexUID == "" || state.SchemaVersion != SearchMeilisearchSchemaVersion {
+	if state.ActiveIndexUID == "" || state.SchemaVersion != catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes) {
 		stats.Skipped = true
 		stats.Reason = "active search index is missing or stale; run rebuild_catalog_search_index"
 		setSearchIndexTaskResult(progress, stats)
@@ -113,12 +124,15 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 	stats.ActiveIndexUID = state.ActiveIndexUID
 
 	reportSearchIndexProgress(progress, 0, "Loading pending catalog search events")
-	events, err := i.events.ListPending(ctx, SearchProviderMeilisearch, catalogSearchIndexBatchSize)
+	events, err := i.events.ListPending(ctx, SearchProviderMeilisearch, settings.SyncBatchSize)
 	if err != nil {
 		return stats, err
 	}
 	if len(events) == 0 {
 		stats.DocumentCount = state.DocumentCount
+		if vectorCount, err := countCatalogSearchVectorDocuments(ctx, i.pool, settings.IndexTypes); err == nil {
+			stats.VectorDocCount = vectorCount
+		}
 		setSearchIndexTaskResult(progress, stats)
 		reportSearchIndexProgress(progress, 100, "Catalog search index is already current")
 		return stats, nil
@@ -135,7 +149,7 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 
 	upsertIDs, deleteIDs := coalesceSearchIndexEvents(events)
 	reportSearchIndexProgress(progress, 20, "Building changed catalog search documents")
-	docs, err := i.LoadDocumentsByIDs(ctx, upsertIDs)
+	docs, err := i.LoadDocumentsByIDs(ctx, upsertIDs, settings.IndexTypes, settings.Embedder)
 	if err != nil {
 		_ = i.events.MarkFailed(ctx, ids, err)
 		return stats, err
@@ -166,16 +180,18 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 	}
 	if len(docs) > 0 {
 		reportSearchIndexProgress(progress, 70, "Upserting catalog search documents")
-		taskID, err := client.AddDocuments(ctx, state.ActiveIndexUID, docs)
-		if err != nil {
-			_ = i.events.MarkFailed(ctx, ids, err)
-			return stats, err
+		for _, batch := range catalogSearchDocumentPayloadBatches(docs, meilisearchMaxDocumentPayloadBytes) {
+			taskID, err := client.AddDocuments(ctx, state.ActiveIndexUID, batch)
+			if err != nil {
+				_ = i.events.MarkFailed(ctx, ids, err)
+				return stats, err
+			}
+			if err := client.WaitTask(ctx, taskID); err != nil {
+				_ = i.events.MarkFailed(ctx, ids, err)
+				return stats, err
+			}
+			stats.Upserted += len(batch)
 		}
-		if err := client.WaitTask(ctx, taskID); err != nil {
-			_ = i.events.MarkFailed(ctx, ids, err)
-			return stats, err
-		}
-		stats.Upserted = len(docs)
 	}
 
 	docCount, err := client.Stats(ctx, state.ActiveIndexUID)
@@ -184,6 +200,9 @@ func (i *CatalogSearchIndexer) SyncOutbox(ctx context.Context, progress SearchIn
 		return stats, err
 	}
 	stats.DocumentCount = docCount
+	if vectorCount, err := countCatalogSearchVectorDocuments(ctx, i.pool, settings.IndexTypes); err == nil {
+		stats.VectorDocCount = vectorCount
+	}
 	stats.LastProcessedID = maxID
 	if err := i.events.MarkProcessed(ctx, ids); err != nil {
 		return stats, err
@@ -234,7 +253,7 @@ func (i *CatalogSearchIndexer) Rebuild(ctx context.Context, progress SearchIndex
 	if err := client.WaitTask(ctx, taskID); err != nil {
 		return stats, err
 	}
-	taskID, err = client.UpdateSettings(ctx, buildIndexUID, catalogSearchMeilisearchSettings())
+	taskID, err = client.UpdateSettings(ctx, buildIndexUID, catalogSearchMeilisearchSettings(settings.Embedder))
 	if err != nil {
 		return stats, err
 	}
@@ -243,36 +262,138 @@ func (i *CatalogSearchIndexer) Rebuild(ctx context.Context, progress SearchIndex
 	}
 
 	lastID := ""
+	queuedTasks := make([]queuedMeilisearchTask, 0, settings.RebuildQueueDepth)
 	for {
-		docs, err := i.LoadDocumentsAfter(ctx, lastID, catalogSearchIndexBatchSize)
+		docs, err := i.LoadDocumentsAfter(ctx, lastID, settings.RebuildBatchSize, settings.IndexTypes, settings.Embedder)
 		if err != nil {
 			return stats, err
 		}
 		if len(docs) == 0 {
 			break
 		}
-		taskID, err := client.AddDocuments(ctx, buildIndexUID, docs)
-		if err != nil {
-			return stats, err
+		for _, batch := range catalogSearchDocumentPayloadBatches(docs, meilisearchMaxDocumentPayloadBytes) {
+			taskID, err := client.AddDocuments(ctx, buildIndexUID, batch)
+			if err != nil {
+				return stats, err
+			}
+			queuedTasks = append(queuedTasks, queuedMeilisearchTask{
+				id:       taskID,
+				docCount: len(batch),
+				vecCount: catalogSearchVectorDocumentCount(batch),
+			})
+			reportSearchIndexProgress(progress, 25, fmt.Sprintf("Submitted %d catalog items", stats.DocumentCount+queuedDocumentCount(queuedTasks)))
+			if len(queuedTasks) >= settings.RebuildQueueDepth {
+				if err := waitNextMeilisearchTask(ctx, client, &queuedTasks, &stats, progress); err != nil {
+					return stats, err
+				}
+			}
 		}
-		if err := client.WaitTask(ctx, taskID); err != nil {
-			return stats, err
-		}
-		stats.DocumentCount += len(docs)
 		lastID = docs[len(docs)-1].ContentID
-		reportSearchIndexProgress(progress, 25, fmt.Sprintf("Indexed %d catalog items", stats.DocumentCount))
+	}
+	for len(queuedTasks) > 0 {
+		if err := waitNextMeilisearchTask(ctx, client, &queuedTasks, &stats, progress); err != nil {
+			return stats, err
+		}
 	}
 	docCount, err := client.Stats(ctx, buildIndexUID)
 	if err != nil {
 		return stats, err
 	}
 	stats.DocumentCount = docCount
-	if err := i.events.UpdateStateAfterRebuild(ctx, SearchProviderMeilisearch, buildIndexUID, SearchMeilisearchSchemaVersion, docCount); err != nil {
+	if vectorCount, err := countCatalogSearchVectorDocuments(ctx, i.pool, settings.IndexTypes); err == nil {
+		stats.VectorDocCount = vectorCount
+	}
+	if err := i.events.UpdateStateAfterRebuild(ctx, SearchProviderMeilisearch, buildIndexUID, catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes), docCount); err != nil {
 		return stats, err
 	}
 	setSearchIndexTaskResult(progress, stats)
 	reportSearchIndexProgress(progress, 100, fmt.Sprintf("Rebuilt catalog search index with %d documents", docCount))
 	return stats, nil
+}
+
+func waitNextMeilisearchTask(
+	ctx context.Context,
+	client *meilisearchClient,
+	queue *[]queuedMeilisearchTask,
+	stats *CatalogSearchIndexRebuildStats,
+	progress SearchIndexProgressReporter,
+) error {
+	if len(*queue) == 0 {
+		return nil
+	}
+	next := (*queue)[0]
+	*queue = (*queue)[1:]
+	if err := client.WaitTask(ctx, next.id); err != nil {
+		return err
+	}
+	stats.DocumentCount += next.docCount
+	stats.VectorDocCount += next.vecCount
+	reportSearchIndexProgress(progress, 25, fmt.Sprintf("Indexed %d catalog items", stats.DocumentCount))
+	return nil
+}
+
+func queuedDocumentCount(queue []queuedMeilisearchTask) int {
+	total := 0
+	for _, task := range queue {
+		total += task.docCount
+	}
+	return total
+}
+
+func catalogSearchDocumentPayloadBatches(docs []catalogSearchDocument, maxBytes int) [][]catalogSearchDocument {
+	if len(docs) == 0 {
+		return nil
+	}
+	if maxBytes <= 0 {
+		return [][]catalogSearchDocument{docs}
+	}
+	batches := make([][]catalogSearchDocument, 0, int(math.Ceil(float64(len(docs))/1000)))
+	current := make([]catalogSearchDocument, 0, len(docs))
+	currentBytes := 2
+	for _, doc := range docs {
+		docBytes := estimateCatalogSearchDocumentJSONBytes(doc)
+		if len(current) > 0 && currentBytes+docBytes+1 > maxBytes {
+			batches = append(batches, current)
+			current = nil
+			currentBytes = 2
+		}
+		current = append(current, doc)
+		currentBytes += docBytes + 1
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
+}
+
+func estimateCatalogSearchDocumentJSONBytes(doc catalogSearchDocument) int {
+	size := 512 +
+		len(doc.ContentID) +
+		len(doc.Type) +
+		len(doc.Title) +
+		len(doc.SortTitle) +
+		len(doc.OriginalTitle) +
+		len(doc.Overview) +
+		len(doc.Tagline)
+	size += estimateStringSliceJSONBytes(doc.TitleVariants)
+	size += estimateStringSliceJSONBytes(doc.Genres)
+	size += estimateStringSliceJSONBytes(doc.Studios)
+	size += estimateStringSliceJSONBytes(doc.Networks)
+	size += estimateStringSliceJSONBytes(doc.Countries)
+	size += estimateStringSliceJSONBytes(doc.Keywords)
+	size += estimateStringSliceJSONBytes(doc.People)
+	for embedder, vector := range doc.Vectors {
+		size += len(embedder) + 64 + len(vector)*24
+	}
+	return size
+}
+
+func estimateStringSliceJSONBytes(values []string) int {
+	size := 2
+	for _, value := range values {
+		size += len(value) + 4
+	}
+	return size
 }
 
 func (i *CatalogSearchIndexer) loadClient(ctx context.Context) (CatalogSearchSettings, *meilisearchClient, bool, error) {
@@ -309,7 +430,11 @@ func (i *CatalogSearchIndexer) CheckConnection(ctx context.Context, settings Cat
 	return client.Health(ctx)
 }
 
-func catalogSearchMeilisearchSettings() map[string]any {
+func catalogSearchMeilisearchSettings(embedder string) map[string]any {
+	embedder, err := NormalizeCatalogSearchEmbedderName(embedder)
+	if err != nil {
+		embedder = DefaultMeilisearchEmbedder
+	}
 	return map[string]any{
 		"displayedAttributes":  []string{"content_id", "type"},
 		"filterableAttributes": []string{"type"},
@@ -329,6 +454,7 @@ func catalogSearchMeilisearchSettings() map[string]any {
 		"pagination": map[string]any{
 			"maxTotalHits": meilisearchDefaultCandidateScanCap,
 		},
+		"embedders": catalogSearchMeilisearchEmbedderSettings(embedder),
 	}
 }
 
@@ -377,64 +503,95 @@ func setSearchIndexTaskResult(progress SearchIndexProgressReporter, result any) 
 }
 
 type catalogSearchDocument struct {
-	ContentID     string   `json:"content_id"`
-	Type          string   `json:"type"`
-	Title         string   `json:"title"`
-	SortTitle     string   `json:"sort_title,omitempty"`
-	OriginalTitle string   `json:"original_title,omitempty"`
-	TitleVariants []string `json:"title_variants,omitempty"`
-	Year          int      `json:"year,omitempty"`
-	Overview      string   `json:"overview,omitempty"`
-	Tagline       string   `json:"tagline,omitempty"`
-	Genres        []string `json:"genres,omitempty"`
-	Studios       []string `json:"studios,omitempty"`
-	Networks      []string `json:"networks,omitempty"`
-	Countries     []string `json:"countries,omitempty"`
-	Keywords      []string `json:"keywords,omitempty"`
-	People        []string `json:"people,omitempty"`
-	SchemaVersion int      `json:"schema_version"`
+	ContentID     string               `json:"content_id"`
+	Type          string               `json:"type"`
+	Title         string               `json:"title"`
+	SortTitle     string               `json:"sort_title,omitempty"`
+	OriginalTitle string               `json:"original_title,omitempty"`
+	TitleVariants []string             `json:"title_variants,omitempty"`
+	Year          int                  `json:"year,omitempty"`
+	Overview      string               `json:"overview,omitempty"`
+	Tagline       string               `json:"tagline,omitempty"`
+	Genres        []string             `json:"genres,omitempty"`
+	Studios       []string             `json:"studios,omitempty"`
+	Networks      []string             `json:"networks,omitempty"`
+	Countries     []string             `json:"countries,omitempty"`
+	Keywords      []string             `json:"keywords,omitempty"`
+	People        []string             `json:"people,omitempty"`
+	SchemaVersion int                  `json:"schema_version"`
+	Vectors       map[string][]float32 `json:"_vectors,omitempty"`
 }
 
-func (i *CatalogSearchIndexer) LoadDocumentsAfter(ctx context.Context, afterContentID string, limit int) ([]catalogSearchDocument, error) {
+func (i *CatalogSearchIndexer) LoadDocumentsAfter(ctx context.Context, afterContentID string, limit int, itemTypes []string, embedder string) ([]catalogSearchDocument, error) {
 	if i == nil || i.pool == nil || limit <= 0 {
 		return nil, nil
 	}
-	rows, err := i.pool.Query(ctx, catalogSearchDocumentSelectSQL(`
-		WHERE ($1::text = '' OR mi.content_id > $1)
-		  AND NOT EXISTS (
-			SELECT 1 FROM manga_chapters mc
-			WHERE mc.chapter_content_id = mi.content_id
-		  )
-	`, `
-		ORDER BY mi.content_id ASC
-		LIMIT $2
-	`), afterContentID, limit)
+	typeFilter := normalizeCatalogSearchItemTypes(itemTypes)
+	whereClause := `
+			WHERE ($1::text = '' OR mi.content_id > $1)
+			  AND NOT EXISTS (
+				SELECT 1 FROM manga_chapters mc
+				WHERE mc.chapter_content_id = mi.content_id
+			  )`
+	args := []any{afterContentID, limit}
+	if len(typeFilter) > 0 {
+		whereClause += `
+			  AND mi.type = ANY($3)`
+		args = append(args, typeFilter)
+	}
+	rows, err := i.pool.Query(ctx, catalogSearchDocumentSelectSQL(whereClause, `
+			ORDER BY mi.content_id ASC
+			LIMIT $2
+		`), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanCatalogSearchDocuments(rows)
+	docs, err := scanCatalogSearchDocuments(rows)
+	if err != nil {
+		return nil, err
+	}
+	setCatalogSearchDocumentSchemaVersion(docs, catalogSearchMeilisearchSchemaVersion(embedder, itemTypes))
+	if err := i.attachDocumentVectors(ctx, docs, embedder); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
-func (i *CatalogSearchIndexer) LoadDocumentsByIDs(ctx context.Context, contentIDs []string) ([]catalogSearchDocument, error) {
+func (i *CatalogSearchIndexer) LoadDocumentsByIDs(ctx context.Context, contentIDs []string, itemTypes []string, embedder string) ([]catalogSearchDocument, error) {
 	contentIDs = compactNonEmptyStrings(contentIDs)
 	if i == nil || i.pool == nil || len(contentIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := i.pool.Query(ctx, catalogSearchDocumentSelectSQL(`
-		WHERE mi.content_id = ANY($1)
-		  AND NOT EXISTS (
-			SELECT 1 FROM manga_chapters mc
-			WHERE mc.chapter_content_id = mi.content_id
-		  )
-	`, `
-		ORDER BY mi.content_id ASC
-	`), contentIDs)
+	typeFilter := normalizeCatalogSearchItemTypes(itemTypes)
+	whereClause := `
+			WHERE mi.content_id = ANY($1)
+			  AND NOT EXISTS (
+				SELECT 1 FROM manga_chapters mc
+				WHERE mc.chapter_content_id = mi.content_id
+			  )`
+	args := []any{contentIDs}
+	if len(typeFilter) > 0 {
+		whereClause += `
+			  AND mi.type = ANY($2)`
+		args = append(args, typeFilter)
+	}
+	rows, err := i.pool.Query(ctx, catalogSearchDocumentSelectSQL(whereClause, `
+			ORDER BY mi.content_id ASC
+		`), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanCatalogSearchDocuments(rows)
+	docs, err := scanCatalogSearchDocuments(rows)
+	if err != nil {
+		return nil, err
+	}
+	setCatalogSearchDocumentSchemaVersion(docs, catalogSearchMeilisearchSchemaVersion(embedder, itemTypes))
+	if err := i.attachDocumentVectors(ctx, docs, embedder); err != nil {
+		return nil, err
+	}
+	return docs, nil
 }
 
 func catalogSearchDocumentSelectSQL(whereClause string, tailClause string) string {
@@ -491,6 +648,127 @@ func scanCatalogSearchDocuments(rows pgx.Rows) ([]catalogSearchDocument, error) 
 		docs = append(docs, doc)
 	}
 	return docs, rows.Err()
+}
+
+func (i *CatalogSearchIndexer) attachDocumentVectors(ctx context.Context, docs []catalogSearchDocument, embedder string) error {
+	if i == nil || i.pool == nil || len(docs) == 0 {
+		return nil
+	}
+	embedder, err := NormalizeCatalogSearchEmbedderName(embedder)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		if strings.TrimSpace(doc.ContentID) != "" {
+			ids = append(ids, doc.ContentID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	vectors, err := loadCatalogSearchVectors(ctx, i.pool, ids)
+	if err != nil {
+		return err
+	}
+	setCatalogSearchDocumentVectors(docs, vectors, embedder)
+	return nil
+}
+
+func loadCatalogSearchVectors(ctx context.Context, pool *pgxpool.Pool, contentIDs []string) (map[string][]float32, error) {
+	contentIDs = compactNonEmptyStrings(contentIDs)
+	if pool == nil || len(contentIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT media_item_id, embedding
+		FROM media_item_embeddings
+		WHERE media_item_id = ANY($1)
+	`, contentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load catalog search vectors: %w", err)
+	}
+	defer rows.Close()
+
+	vectors := make(map[string][]float32, len(contentIDs))
+	for rows.Next() {
+		var contentID string
+		var vector pgvector.Vector
+		if err := rows.Scan(&contentID, &vector); err != nil {
+			return nil, fmt.Errorf("scan catalog search vector: %w", err)
+		}
+		canonical, err := embeddingvectors.EnsureCanonicalDimensions(vector.Slice())
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize catalog search vector for %s: %w", contentID, err)
+		}
+		vectors[contentID] = canonical
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate catalog search vectors: %w", err)
+	}
+	return vectors, nil
+}
+
+func setCatalogSearchDocumentVectors(docs []catalogSearchDocument, vectors map[string][]float32, embedder string) int {
+	if len(docs) == 0 || strings.TrimSpace(embedder) == "" {
+		return 0
+	}
+	count := 0
+	for idx := range docs {
+		vector := vectors[docs[idx].ContentID]
+		docs[idx].Vectors = map[string][]float32{embedder: nil}
+		if len(vector) > 0 {
+			docs[idx].Vectors[embedder] = vector
+			count++
+		}
+	}
+	return count
+}
+
+func setCatalogSearchDocumentSchemaVersion(docs []catalogSearchDocument, schemaVersion int) {
+	for idx := range docs {
+		docs[idx].SchemaVersion = schemaVersion
+	}
+}
+
+func catalogSearchVectorDocumentCount(docs []catalogSearchDocument) int {
+	count := 0
+	for _, doc := range docs {
+		for _, vector := range doc.Vectors {
+			if len(vector) > 0 {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+func countCatalogSearchVectorDocuments(ctx context.Context, pool *pgxpool.Pool, itemTypes []string) (int, error) {
+	if pool == nil {
+		return 0, nil
+	}
+	whereClause := `
+		WHERE NOT EXISTS (
+			SELECT 1 FROM manga_chapters mc
+			WHERE mc.chapter_content_id = mi.content_id
+		)`
+	args := []any{}
+	typeFilter := normalizeCatalogSearchItemTypes(itemTypes)
+	if len(typeFilter) > 0 {
+		whereClause += `
+		  AND mi.type = ANY($1)`
+		args = append(args, typeFilter)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM media_item_embeddings e
+		JOIN media_items mi ON mi.content_id = e.media_item_id
+	`+whereClause, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count catalog search vector documents: %w", err)
+	}
+	return count, nil
 }
 
 func catalogSearchTitleVariants(doc catalogSearchDocument) []string {

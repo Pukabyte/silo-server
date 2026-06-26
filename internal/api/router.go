@@ -114,6 +114,7 @@ type Dependencies struct {
 	AdminStatsProvider           handlers.AdminStatsSource
 	Recommender                  recommendations.Recommender // nil when disabled
 	RecWorker                    *recommendations.Worker     // nil when disabled
+	CatalogSearchVectorizer      catalog.CatalogSearchQueryVectorizer
 	RatingsRepo                  *catalog.RatingsRepo
 	PersonRepo                   *catalog.PersonRepository
 	PersonRefreshQueue           handlers.PersonRefreshQueue
@@ -449,7 +450,13 @@ func NewRouter(deps Dependencies) chi.Router {
 		itemRepo = catalog.NewItemRepository(deps.DB)
 		searchIndexEvents := catalog.NewSearchIndexEventRepository(deps.DB)
 		itemRepo.WithSearchIndexEvents(searchIndexEvents)
-		catalogSearchService = catalog.NewCatalogSearchService(context.Background(), settingsRepo, itemRepo, searchIndexEvents)
+		catalogSearchService = catalog.NewCatalogSearchService(
+			context.Background(),
+			settingsRepo,
+			itemRepo,
+			searchIndexEvents,
+			deps.CatalogSearchVectorizer,
+		)
 		episodeRepo = catalog.NewEpisodeRepository(deps.DB)
 		providerIDRepo = catalog.NewProviderIDRepository(deps.DB)
 		calendarRepo = catalog.NewCalendarRepository(deps.DB)

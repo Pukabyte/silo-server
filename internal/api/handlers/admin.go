@@ -2179,6 +2179,55 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.matching_strategy must be last or all")
 			return
 		}
+	case catalog.SearchSettingMeilisearchSyncBatchSize:
+		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
+		if err != nil || n < 1 || n > catalog.MaxMeilisearchSyncBatchSize {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.sync_batch_size must be an integer between 1 and 10000")
+			return
+		}
+		req.Value = strconv.Itoa(n)
+	case catalog.SearchSettingMeilisearchRebuildBatchSize:
+		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
+		if err != nil || n < 1 || n > catalog.MaxMeilisearchRebuildBatchSize {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.rebuild_batch_size must be an integer between 1 and 25000")
+			return
+		}
+		req.Value = strconv.Itoa(n)
+	case catalog.SearchSettingMeilisearchRebuildQueue:
+		n, err := strconv.Atoi(strings.TrimSpace(req.Value))
+		if err != nil || n < 1 || n > catalog.MaxMeilisearchRebuildQueueDepth {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.rebuild_task_queue_depth must be an integer between 1 and 16")
+			return
+		}
+		req.Value = strconv.Itoa(n)
+	case catalog.SearchSettingMeilisearchIndexTypes:
+		itemTypes, err := catalog.NormalizeCatalogSearchIndexTypesValue(req.Value)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		req.Value = catalog.FormatCatalogSearchIndexTypesValue(itemTypes)
+	case catalog.SearchSettingMeilisearchSemanticEnabled:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(req.Value))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.semantic_enabled must be true or false")
+			return
+		}
+		req.Value = strconv.FormatBool(enabled)
+	case catalog.SearchSettingMeilisearchSemanticRatio:
+		ratio, err := strconv.ParseFloat(strings.TrimSpace(req.Value), 64)
+		if err != nil || ratio < 0 || ratio > 1 {
+			writeError(w, http.StatusBadRequest, "bad_request", "catalog.search.meilisearch.semantic_ratio must be a number between 0 and 1")
+			return
+		}
+		req.Value = strconv.FormatFloat(ratio, 'f', -1, 64)
+	case catalog.SearchSettingMeilisearchEmbedder:
+		embedder, err := catalog.NormalizeCatalogSearchEmbedderName(req.Value)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		req.Value = embedder
 	}
 
 	if err := h.SettingsRepo.Set(r.Context(), key, req.Value); err != nil {

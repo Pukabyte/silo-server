@@ -209,6 +209,9 @@ func (s *Service) ImportWithProgress(ctx context.Context, data []byte, opts Impo
 		}); err != nil {
 			return nil, err
 		}
+		if err := catalog.EnqueueSearchIndexUpserts(ctx, tx, catalogSeedSearchUpsertIDs(itemStates, bundle.Embeddings)); err != nil {
+			return nil, fmt.Errorf("enqueueing catalog search seed import updates: %w", err)
+		}
 		currentWork++
 		reportProgress("Importing embeddings", currentWork, totalWork)
 
@@ -385,6 +388,9 @@ func (s *Service) ImportWithProgress(ctx context.Context, data []byte, opts Impo
 		reportProgress("Importing embeddings", currentWork, totalWork)
 	}); err != nil {
 		return nil, fmt.Errorf("importing embeddings: %w", err)
+	}
+	if err := catalog.EnqueueSearchIndexUpserts(ctx, tx, catalogSeedSearchUpsertIDs(itemStates, bundle.Embeddings)); err != nil {
+		return nil, fmt.Errorf("enqueueing catalog search seed import updates: %w", err)
 	}
 	currentWork++
 	reportProgress("Importing embeddings", currentWork, totalWork)
@@ -2495,6 +2501,25 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func catalogSeedSearchUpsertIDs(itemStates map[string]bool, embeddings []EmbeddingRecord) []string {
+	ids := make([]string, 0, len(itemStates)+len(embeddings))
+	for contentID, changed := range itemStates {
+		contentID = strings.TrimSpace(contentID)
+		if changed && contentID != "" {
+			ids = append(ids, contentID)
+		}
+	}
+	for _, embedding := range embeddings {
+		contentID := strings.TrimSpace(embedding.MediaItemID)
+		if contentID != "" {
+			ids = append(ids, contentID)
+		}
+	}
+	ids = dedupeStrings(ids)
+	sort.Strings(ids)
+	return ids
 }
 
 func mapKeys(m map[string]struct{}) []string {

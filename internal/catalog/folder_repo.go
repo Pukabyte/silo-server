@@ -746,7 +746,8 @@ const collectOrphanedProvisionalIDsByContentIDSQL = `
 const deleteOrphanedProvisionalIDsByContentIDSQL = `
 	DELETE FROM public.media_items mi
 	WHERE mi.content_id = ANY($1)
-	  AND ` + orphanedProvisionalMediaItemConditions
+	  AND ` + orphanedProvisionalMediaItemConditions + `
+	RETURNING mi.content_id`
 
 func (r *FolderRepository) deleteOrphanedItemsByContentID(ctx context.Context, contentIDs []string) (int, []string, error) {
 	if len(contentIDs) == 0 {
@@ -766,18 +767,34 @@ func (r *FolderRepository) deleteOrphanedItemsByContentID(ctx context.Context, c
 		return 0, nil, err
 	}
 
-	var deleted int64
+	var deletedIDs []string
 	if err := retryOnDeadlock(ctx, func() error {
-		tag, err := r.pool.Exec(ctx, deleteOrphanedProvisionalIDsByContentIDSQL, orphanIDs)
+		tx, err := r.pool.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		deleted = tag.RowsAffected()
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		rows, err := tx.Query(ctx, deleteOrphanedProvisionalIDsByContentIDSQL, orphanIDs)
+		if err != nil {
+			return err
+		}
+		attemptDeletedIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return fmt.Errorf("collecting deleted late orphan IDs: %w", err)
+		}
+		if err := EnqueueSearchIndexDeletes(ctx, tx, attemptDeletedIDs); err != nil {
+			return fmt.Errorf("enqueueing catalog search late orphan deletes: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		deletedIDs = attemptDeletedIDs
 		return nil
 	}); err != nil {
 		return 0, nil, err
 	}
-	return int(deleted), imageDirs, nil
+	return len(deletedIDs), imageDirs, nil
 }
 
 func (r *FolderRepository) collectOrphanedProvisionalIDsByContentID(ctx context.Context, contentIDs []string) ([]string, error) {

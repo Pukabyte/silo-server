@@ -50,12 +50,19 @@ type meilisearchTask struct {
 }
 
 type meilisearchSearchRequest struct {
-	Query                string   `json:"q"`
-	Offset               int      `json:"offset"`
-	Limit                int      `json:"limit"`
-	Filter               string   `json:"filter,omitempty"`
-	AttributesToRetrieve []string `json:"attributesToRetrieve"`
-	MatchingStrategy     string   `json:"matchingStrategy,omitempty"`
+	Query                string                    `json:"q"`
+	Offset               int                       `json:"offset"`
+	Limit                int                       `json:"limit"`
+	Filter               string                    `json:"filter,omitempty"`
+	AttributesToRetrieve []string                  `json:"attributesToRetrieve"`
+	MatchingStrategy     string                    `json:"matchingStrategy,omitempty"`
+	Vector               []float32                 `json:"vector,omitempty"`
+	Hybrid               *meilisearchHybridRequest `json:"hybrid,omitempty"`
+}
+
+type meilisearchHybridRequest struct {
+	Embedder      string  `json:"embedder"`
+	SemanticRatio float64 `json:"semanticRatio"`
 }
 
 type meilisearchSearchHit struct {
@@ -75,7 +82,10 @@ type meilisearchStatsResponse struct {
 	NumberOfDocuments int `json:"numberOfDocuments"`
 }
 
-const defaultMeilisearchTaskWaitTimeout = 5 * time.Minute
+const (
+	defaultMeilisearchTaskWaitTimeout = 5 * time.Minute
+	meilisearchTaskPollInterval       = time.Second
+)
 
 func newMeilisearchClient(rawURL, apiKey string, timeout time.Duration) (*meilisearchClient, error) {
 	rawURL = strings.TrimSpace(rawURL)
@@ -182,7 +192,7 @@ func (c *meilisearchClient) WaitTask(ctx context.Context, taskUID int64) error {
 		ctx, cancel = context.WithTimeout(ctx, defaultMeilisearchTaskWaitTimeout)
 		defer cancel()
 	}
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(meilisearchTaskPollInterval)
 	defer ticker.Stop()
 	for {
 		var task meilisearchTask

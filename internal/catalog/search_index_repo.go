@@ -53,6 +53,25 @@ func (r *SearchIndexEventRepository) EnqueueUpsert(ctx context.Context, execer i
 	return r.enqueue(ctx, execer, SearchProviderMeilisearch, SearchIndexEventUpsert, contentID, "")
 }
 
+func (r *SearchIndexEventRepository) EnqueueUpserts(ctx context.Context, execer itemExecer, contentIDs []string) error {
+	if r == nil || execer == nil {
+		return nil
+	}
+	contentIDs = compactNonEmptyStrings(contentIDs)
+	if len(contentIDs) == 0 {
+		return nil
+	}
+	_, err := execer.Exec(ctx, `
+		INSERT INTO catalog_search_index_events (provider, action, content_id, previous_content_id)
+		SELECT $1, $2, ids.content_id, ''
+		FROM unnest($3::text[]) AS ids(content_id)
+	`, SearchProviderMeilisearch, SearchIndexEventUpsert, contentIDs)
+	if isSearchIndexSchemaUnavailable(err) {
+		return nil
+	}
+	return err
+}
+
 func (r *SearchIndexEventRepository) EnqueueDelete(ctx context.Context, execer itemExecer, contentID string) error {
 	return r.enqueue(ctx, execer, SearchProviderMeilisearch, SearchIndexEventDelete, contentID, "")
 }
@@ -69,12 +88,6 @@ func (r *SearchIndexEventRepository) EnqueueDeletes(ctx context.Context, execer 
 		INSERT INTO catalog_search_index_events (provider, action, content_id, previous_content_id)
 		SELECT $1, $2, ids.content_id, ''
 		FROM unnest($3::text[]) AS ids(content_id)
-		WHERE EXISTS (
-			SELECT 1
-			FROM server_settings
-			WHERE key = 'catalog.search.provider'
-			  AND lower(value) = 'meilisearch'
-		)
 	`, SearchProviderMeilisearch, SearchIndexEventDelete, contentIDs)
 	if isSearchIndexSchemaUnavailable(err) {
 		return nil
@@ -97,13 +110,7 @@ func (r *SearchIndexEventRepository) enqueue(ctx context.Context, execer itemExe
 	}
 	_, err := execer.Exec(ctx, `
 		INSERT INTO catalog_search_index_events (provider, action, content_id, previous_content_id)
-		SELECT $1, $2, $3, $4
-		WHERE EXISTS (
-			SELECT 1
-			FROM server_settings
-			WHERE key = 'catalog.search.provider'
-			  AND lower(value) = 'meilisearch'
-		)
+		VALUES ($1, $2, $3, $4)
 	`, provider, action, contentID, previousContentID)
 	if isSearchIndexSchemaUnavailable(err) {
 		return nil
@@ -113,6 +120,10 @@ func (r *SearchIndexEventRepository) enqueue(ctx context.Context, execer itemExe
 
 func EnqueueSearchIndexUpsert(ctx context.Context, execer itemExecer, contentID string) error {
 	return NewSearchIndexEventRepository(nil).EnqueueUpsert(ctx, execer, contentID)
+}
+
+func EnqueueSearchIndexUpserts(ctx context.Context, execer itemExecer, contentIDs []string) error {
+	return NewSearchIndexEventRepository(nil).EnqueueUpserts(ctx, execer, contentIDs)
 }
 
 func EnqueueSearchIndexDelete(ctx context.Context, execer itemExecer, contentID string) error {

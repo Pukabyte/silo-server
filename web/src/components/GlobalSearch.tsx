@@ -156,10 +156,11 @@ export function GlobalSearch({
       collection_id: searchState.collection_id,
       person_id: searchState.person_id,
       query_fingerprint: JSON.stringify(searchState.query_definition),
+      include_total: false,
       limit: PREVIEW_LIMIT,
       offset: 0,
     }),
-    queryFn: ({ signal }) => fetchCatalogPage(searchState, PREVIEW_LIMIT, 0, { signal }),
+    queryFn: ({ signal }) => fetchCatalogPage(searchState, PREVIEW_LIMIT, 0, { signal }, false),
     enabled: open && debouncedQuery.length > 0,
     staleTime: 60 * 1000,
   });

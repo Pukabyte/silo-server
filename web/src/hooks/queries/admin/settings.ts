@@ -30,12 +30,17 @@ export interface CatalogSearchStatus {
     last_fallback?: string;
     timeout_ms: number;
     matching_strategy: string;
+    index_types?: string[];
+    semantic_enabled: boolean;
+    semantic_ratio: number;
+    embedder: string;
   };
   index: {
     active_index_uid: string;
     schema_version: number;
     expected_schema_version: number;
     document_count: number;
+    vector_document_count: number;
     pending_events: number;
     last_rebuild_at?: string;
     last_sync_at?: string;

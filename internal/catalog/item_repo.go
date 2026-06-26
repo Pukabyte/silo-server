@@ -397,7 +397,19 @@ func scanItemsWithTotal(rows pgx.Rows) ([]*models.MediaItem, int, error) {
 // Upsert inserts a new media item or updates all mutable fields if the
 // content_id already exists. The created_at timestamp is preserved on update.
 func (r *ItemRepository) Upsert(ctx context.Context, item *models.MediaItem) error {
-	return r.upsert(ctx, r.pool, item)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin media item upsert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := r.upsert(ctx, tx, item); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit media item upsert tx: %w", err)
+	}
+	return nil
 }
 
 // UpsertTx inserts or updates a media item using the caller's transaction.
@@ -889,24 +901,57 @@ func (r *ItemRepository) Delete(ctx context.Context, contentID string) ([]string
 // (audit 2026-05-01 §3.11). This replaces a prior two-query path that
 // re-evaluated the tsvector predicates for the count.
 func (r *ItemRepository) Search(ctx context.Context, query string, itemTypes []string, limit, offset int, filter AccessFilter) ([]*models.MediaItem, int, error) {
+	items, total, _, _, err := r.SearchPage(ctx, query, itemTypes, limit, offset, filter, true)
+	return items, total, err
+}
+
+func (r *ItemRepository) SearchPage(
+	ctx context.Context,
+	query string,
+	itemTypes []string,
+	limit, offset int,
+	filter AccessFilter,
+	includeTotal bool,
+) ([]*models.MediaItem, int, bool, bool, error) {
 	if filter.AllowedLibraryIDs != nil && len(filter.AllowedLibraryIDs) == 0 {
-		return []*models.MediaItem{}, 0, nil
+		return []*models.MediaItem{}, 0, false, includeTotal, nil
 	}
-	sql, countSQL, args := r.buildSearchSQL(query, itemTypes, limit, offset, filter)
+	queryLimit := limit
+	if !includeTotal {
+		queryLimit = limit + 1
+	}
+	sql, countSQL, args := r.buildSearchSQLWithTotal(query, itemTypes, queryLimit, offset, filter, includeTotal)
 	if sql == "" {
-		return []*models.MediaItem{}, 0, nil
+		return []*models.MediaItem{}, 0, false, includeTotal, nil
 	}
 
 	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("searching media items: %w", err)
+		return nil, 0, false, includeTotal, fmt.Errorf("searching media items: %w", err)
 	}
 	defer rows.Close()
 
+	if !includeTotal {
+		items, err := scanItems(rows)
+		if err != nil {
+			return nil, 0, false, false, err
+		}
+		hasMore := len(items) > limit
+		if hasMore {
+			items = items[:limit]
+		}
+		total := offset + len(items)
+		if hasMore {
+			total++
+		}
+		return items, total, hasMore, false, nil
+	}
+
 	items, total, err := scanItemsWithTotal(rows)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, true, err
 	}
+	hasMore := total > offset+len(items)
 	// COUNT(*) OVER () emits no rows when the data SELECT is empty, so total
 	// stays 0 even when the broader result set has matching rows (e.g. OFFSET
 	// past the last page). Re-query the count to give callers the real total.
@@ -916,10 +961,11 @@ func (r *ItemRepository) Search(ctx context.Context, query string, itemTypes []s
 		// Drop the trailing limit/offset args from the data query.
 		countArgs := args[:len(args)-2]
 		if err := r.pool.QueryRow(ctx, countSQL, countArgs...).Scan(&total); err != nil {
-			return nil, 0, fmt.Errorf("count fallback for empty search page: %w", err)
+			return nil, 0, false, true, fmt.Errorf("count fallback for empty search page: %w", err)
 		}
+		hasMore = total > offset+len(items)
 	}
-	return items, total, nil
+	return items, total, hasMore, true, nil
 }
 
 // buildSearchSQL assembles the unified search query, returning the SQL string
@@ -947,6 +993,10 @@ func (r *ItemRepository) Search(ctx context.Context, query string, itemTypes []s
 //	parsed.Phrase
 //	limit, offset
 func (r *ItemRepository) buildSearchSQL(query string, itemTypes []string, limit, offset int, filter AccessFilter) (dataSQL, countSQL string, args []any) {
+	return r.buildSearchSQLWithTotal(query, itemTypes, limit, offset, filter, true)
+}
+
+func (r *ItemRepository) buildSearchSQLWithTotal(query string, itemTypes []string, limit, offset int, filter AccessFilter, includeTotal bool) (dataSQL, countSQL string, args []any) {
 	parsed := parseSearchQuery(query)
 	searchText := parsed.Text
 	if searchText == "" {
@@ -1151,11 +1201,15 @@ func (r *ItemRepository) buildSearchSQL(query string, itemTypes []string, limit,
 		WHERE scored.title_rank > 0
 		   OR scored.title_prefix_rank > 0
 		   OR (COALESCE(stats.has_title_match, 0) = 0 AND scored.overview_rank >= %g)`, overviewMatchFloor)
+	totalColumn := ""
+	if includeTotal {
+		totalColumn = ", COUNT(*) OVER () AS total_count"
+	}
 	dataSQL = scoredCTE + statsCTE + fmt.Sprintf(`
-		SELECT %s, COUNT(*) OVER () AS total_count
+		SELECT %s%s
 		%s
-		ORDER BY exact_title_match DESC, contiguous_title_match DESC, year_match DESC, phrase_rank DESC, title_rank DESC, title_prefix_rank DESC, overview_rank DESC, LOWER(title) ASC, content_id ASC
-		LIMIT $%d OFFSET $%d`, itemColumns, postFilter, argIdx, argIdx+1)
+		ORDER BY exact_title_match DESC, contiguous_title_match DESC, year_match DESC, title_rank DESC, title_prefix_rank DESC, overview_rank DESC, LOWER(title) ASC, content_id ASC
+		LIMIT $%d OFFSET $%d`, itemColumns, totalColumn, postFilter, argIdx, argIdx+1)
 	countSQL = scoredCTE + statsCTE + fmt.Sprintf(`
 		SELECT COUNT(*)
 		%s`, postFilter)

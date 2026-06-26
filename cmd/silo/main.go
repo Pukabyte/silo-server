@@ -1524,6 +1524,7 @@ func main() {
 			cfg.Recommendations,
 		)
 		deps.Recommender = recEngine
+		deps.CatalogSearchVectorizer = recEngine
 
 		var err error
 		recWorker, err = recommendations.NewWorker(

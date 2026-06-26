@@ -10,6 +10,7 @@ type CatalogSearchService struct {
 	provider CatalogSearchProvider
 	meili    *MeilisearchSearchProvider
 	state    *SearchIndexEventRepository
+	itemRepo *ItemRepository
 }
 
 func NewCatalogSearchService(
@@ -17,25 +18,28 @@ func NewCatalogSearchService(
 	settingsStore SettingsStore,
 	itemRepo *ItemRepository,
 	stateRepo *SearchIndexEventRepository,
+	vectorizer ...CatalogSearchQueryVectorizer,
 ) *CatalogSearchService {
 	settings, err := LoadCatalogSearchSettings(ctx, settingsStore)
 	if err != nil {
 		slog.Warn("catalog search: failed to load settings; using postgres", "err", err)
 		settings = DefaultCatalogSearchSettings()
 	}
-	return NewCatalogSearchServiceFromSettings(settings, itemRepo, stateRepo)
+	return NewCatalogSearchServiceFromSettings(settings, itemRepo, stateRepo, vectorizer...)
 }
 
 func NewCatalogSearchServiceFromSettings(
 	settings CatalogSearchSettings,
 	itemRepo *ItemRepository,
 	stateRepo *SearchIndexEventRepository,
+	vectorizer ...CatalogSearchQueryVectorizer,
 ) *CatalogSearchService {
 	fallback := NewPostgresSearchProvider(itemRepo)
 	service := &CatalogSearchService{
 		settings: settings,
 		provider: fallback,
 		state:    stateRepo,
+		itemRepo: itemRepo,
 	}
 	if settings.Provider != SearchProviderMeilisearch {
 		return service
@@ -44,12 +48,21 @@ func NewCatalogSearchServiceFromSettings(
 		slog.Warn("catalog search: meilisearch selected without URL; using postgres")
 		return service
 	}
+	var queryVectorizer CatalogSearchQueryVectorizer
+	if len(vectorizer) > 0 {
+		queryVectorizer = vectorizer[0]
+	}
 	meili, err := NewMeilisearchSearchProvider(itemRepo, stateRepo, fallback, MeilisearchProviderConfig{
 		URL:              settings.MeilisearchURL,
 		APIKey:           settings.MeilisearchAPIKey,
 		Index:            settings.MeilisearchIndex,
 		Timeout:          settings.Timeout,
 		MatchingStrategy: settings.MatchingStrategy,
+		IndexTypes:       settings.IndexTypes,
+		SemanticEnabled:  settings.SemanticEnabled,
+		SemanticRatio:    settings.SemanticRatio,
+		Embedder:         settings.Embedder,
+		Vectorizer:       queryVectorizer,
 	})
 	if err != nil {
 		slog.Warn("catalog search: failed to initialize meilisearch provider; using postgres", "err", err)
@@ -81,9 +94,13 @@ func (s *CatalogSearchService) Status(ctx context.Context) CatalogSearchRuntimeS
 			CircuitState:     "not_configured",
 			TimeoutMS:        int(settings.Timeout.Milliseconds()),
 			MatchingStrategy: settings.MatchingStrategy,
+			IndexTypes:       settings.IndexTypes,
+			SemanticEnabled:  settings.SemanticEnabled,
+			SemanticRatio:    settings.SemanticRatio,
+			Embedder:         settings.Embedder,
 		},
 		Index: CatalogSearchIndexStateStatus{
-			ExpectedSchemaVersion: SearchMeilisearchSchemaVersion,
+			ExpectedSchemaVersion: catalogSearchMeilisearchSchemaVersion(settings.Embedder, settings.IndexTypes),
 		},
 		Tasks: []CatalogSearchTaskLink{
 			{Key: "sync_catalog_search_index", Name: "Sync Catalog Search Index", Href: "/admin/tasks/sync_catalog_search_index"},
@@ -109,6 +126,11 @@ func (s *CatalogSearchService) Status(ctx context.Context) CatalogSearchRuntimeS
 			}
 			if pending, err := s.state.PendingCount(ctx, SearchProviderMeilisearch); err == nil {
 				status.Index.PendingEvents = pending
+			}
+		}
+		if s.itemRepo != nil && s.itemRepo.pool != nil {
+			if vectorCount, err := countCatalogSearchVectorDocuments(ctx, s.itemRepo.pool, settings.IndexTypes); err == nil {
+				status.Index.VectorDocumentCount = vectorCount
 			}
 		}
 	}

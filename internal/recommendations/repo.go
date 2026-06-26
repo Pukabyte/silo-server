@@ -10,30 +10,15 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/embeddingvectors"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
 
-// padToLength zero-pads a vector to the target dimension. If the vector is
-// already at or above the target length, it is returned as-is. This allows
-// local models producing shorter vectors (e.g. 768-dim) to be stored in a
-// fixed-dimension column (3072) without schema changes.
-func padToLength(vec []float32, dim int) []float32 {
-	if len(vec) >= dim {
-		return vec
-	}
-	padded := make([]float32, dim)
-	copy(padded, vec)
-	return padded
-}
-
 func ensureCanonicalDimensions(vec []float32) ([]float32, error) {
-	if len(vec) > CanonicalEmbeddingDimensions {
-		return nil, fmt.Errorf("embedding vector length %d exceeds canonical dimension %d", len(vec), CanonicalEmbeddingDimensions)
-	}
-	return padToLength(vec, CanonicalEmbeddingDimensions), nil
+	return embeddingvectors.EnsureCanonicalDimensions(vec)
 }
 
 const embeddingLockSettingKey = "recommendations.embedding_lock"
@@ -180,7 +165,13 @@ func (r *Repo) UpsertEmbedding(ctx context.Context, itemID string, embedding []f
 	if err != nil {
 		return fmt.Errorf("upsert embedding for item %s: %w", itemID, err)
 	}
-	_, err = r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin upsert embedding for item %s: %w", itemID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx, `
 		INSERT INTO media_item_embeddings (media_item_id, embedding, model, canonical_text)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (media_item_id) DO UPDATE
@@ -191,6 +182,12 @@ func (r *Repo) UpsertEmbedding(ctx context.Context, itemID string, embedding []f
 	`, itemID, pgvector.NewVector(padded), model, canonicalText)
 	if err != nil {
 		return fmt.Errorf("upsert embedding for item %s: %w", itemID, err)
+	}
+	if err := catalog.EnqueueSearchIndexUpsert(ctx, tx, itemID); err != nil {
+		return fmt.Errorf("enqueue catalog search embedding update for item %s: %w", itemID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit upsert embedding for item %s: %w", itemID, err)
 	}
 	return nil
 }
