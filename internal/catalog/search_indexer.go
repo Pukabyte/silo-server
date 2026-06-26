@@ -42,7 +42,7 @@ type CatalogSearchIndexRebuildStats struct {
 }
 
 type queuedMeilisearchTask struct {
-	id       int64
+	task     meilisearchTaskRef
 	docCount int
 	vecCount int
 }
@@ -255,10 +255,8 @@ func (i *CatalogSearchIndexer) Rebuild(ctx context.Context, progress SearchIndex
 	if err != nil {
 		return stats, err
 	}
-	if taskID != 0 {
-		if err := client.WaitTask(ctx, taskID); err != nil {
-			return stats, err
-		}
+	if err := client.WaitTask(ctx, taskID); err != nil {
+		return stats, err
 	}
 	taskID, err = client.UpdateSettings(ctx, buildIndexUID, catalogSearchMeilisearchSettings(settings.Embedder))
 	if err != nil {
@@ -284,7 +282,7 @@ func (i *CatalogSearchIndexer) Rebuild(ctx context.Context, progress SearchIndex
 				return stats, err
 			}
 			queuedTasks = append(queuedTasks, queuedMeilisearchTask{
-				id:       taskID,
+				task:     taskID,
 				docCount: len(batch),
 				vecCount: catalogSearchVectorDocumentCount(batch),
 			})
@@ -333,7 +331,7 @@ func waitNextMeilisearchTask(
 	}
 	next := (*queue)[0]
 	*queue = (*queue)[1:]
-	if err := client.WaitTask(ctx, next.id); err != nil {
+	if err := client.WaitTask(ctx, next.task); err != nil {
 		return err
 	}
 	stats.DocumentCount += next.docCount

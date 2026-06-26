@@ -67,6 +67,15 @@ type meilisearchTask struct {
 	} `json:"error"`
 }
 
+type meilisearchTaskRef struct {
+	uid     int64
+	hasTask bool
+}
+
+func newMeilisearchTaskRef(uid int64) meilisearchTaskRef {
+	return meilisearchTaskRef{uid: uid, hasTask: true}
+}
+
 type meilisearchSearchRequest struct {
 	Query                string                    `json:"q"`
 	Offset               int                       `json:"offset"`
@@ -157,7 +166,7 @@ func (c *meilisearchClient) Health(ctx context.Context) error {
 	return nil
 }
 
-func (c *meilisearchClient) CreateIndex(ctx context.Context, uid string) (int64, error) {
+func (c *meilisearchClient) CreateIndex(ctx context.Context, uid string) (meilisearchTaskRef, error) {
 	var task meilisearchTask
 	err := c.do(ctx, http.MethodPost, "/indexes", map[string]string{
 		"uid":        uid,
@@ -166,19 +175,19 @@ func (c *meilisearchClient) CreateIndex(ctx context.Context, uid string) (int64,
 	if err != nil {
 		var httpErr *meilisearchHTTPError
 		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusConflict || httpErr.Code == "index_already_exists") {
-			return 0, nil
+			return meilisearchTaskRef{}, nil
 		}
-		return 0, err
+		return meilisearchTaskRef{}, err
 	}
-	return task.TaskUID, nil
+	return newMeilisearchTaskRef(task.TaskUID), nil
 }
 
-func (c *meilisearchClient) UpdateSettings(ctx context.Context, uid string, settings map[string]any) (int64, error) {
+func (c *meilisearchClient) UpdateSettings(ctx context.Context, uid string, settings map[string]any) (meilisearchTaskRef, error) {
 	var task meilisearchTask
 	if err := c.do(ctx, http.MethodPatch, "/indexes/"+url.PathEscape(uid)+"/settings", settings, &task); err != nil {
-		return 0, err
+		return meilisearchTaskRef{}, err
 	}
-	return task.TaskUID, nil
+	return newMeilisearchTaskRef(task.TaskUID), nil
 }
 
 func (c *meilisearchClient) GetSettings(ctx context.Context, uid string) (meilisearchIndexSettings, error) {
@@ -195,27 +204,27 @@ func (c *meilisearchClient) Search(ctx context.Context, uid string, req meilisea
 	return out, err
 }
 
-func (c *meilisearchClient) AddDocuments(ctx context.Context, uid string, docs []catalogSearchDocument) (int64, error) {
+func (c *meilisearchClient) AddDocuments(ctx context.Context, uid string, docs []catalogSearchDocument) (meilisearchTaskRef, error) {
 	if len(docs) == 0 {
-		return 0, nil
+		return meilisearchTaskRef{}, nil
 	}
 	var task meilisearchTask
 	if err := c.do(ctx, http.MethodPost, "/indexes/"+url.PathEscape(uid)+"/documents", docs, &task); err != nil {
-		return 0, err
+		return meilisearchTaskRef{}, err
 	}
-	return task.TaskUID, nil
+	return newMeilisearchTaskRef(task.TaskUID), nil
 }
 
-func (c *meilisearchClient) DeleteDocuments(ctx context.Context, uid string, ids []string) (int64, error) {
+func (c *meilisearchClient) DeleteDocuments(ctx context.Context, uid string, ids []string) (meilisearchTaskRef, error) {
 	ids = compactNonEmptyStrings(ids)
 	if len(ids) == 0 {
-		return 0, nil
+		return meilisearchTaskRef{}, nil
 	}
 	var task meilisearchTask
 	if err := c.do(ctx, http.MethodPost, "/indexes/"+url.PathEscape(uid)+"/documents/delete-batch", ids, &task); err != nil {
-		return 0, err
+		return meilisearchTaskRef{}, err
 	}
-	return task.TaskUID, nil
+	return newMeilisearchTaskRef(task.TaskUID), nil
 }
 
 func (c *meilisearchClient) Stats(ctx context.Context, uid string) (int, error) {
@@ -224,9 +233,9 @@ func (c *meilisearchClient) Stats(ctx context.Context, uid string) (int, error) 
 	return out.NumberOfDocuments, err
 }
 
-func (c *meilisearchClient) WaitTask(ctx context.Context, taskUID int64) error {
-	if taskUID == 0 {
-		return fmt.Errorf("meilisearch task UID is required")
+func (c *meilisearchClient) WaitTask(ctx context.Context, ref meilisearchTaskRef) error {
+	if !ref.hasTask {
+		return nil
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -237,7 +246,7 @@ func (c *meilisearchClient) WaitTask(ctx context.Context, taskUID int64) error {
 	defer ticker.Stop()
 	for {
 		var task meilisearchTask
-		if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/tasks/%d", taskUID), nil, &task); err != nil {
+		if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/tasks/%d", ref.uid), nil, &task); err != nil {
 			return err
 		}
 		switch task.Status {
@@ -245,9 +254,9 @@ func (c *meilisearchClient) WaitTask(ctx context.Context, taskUID int64) error {
 			return nil
 		case "failed", "canceled":
 			if task.Error != nil && task.Error.Message != "" {
-				return fmt.Errorf("meilisearch task %d %s: %s", taskUID, task.Status, task.Error.Message)
+				return fmt.Errorf("meilisearch task %d %s: %s", ref.uid, task.Status, task.Error.Message)
 			}
-			return fmt.Errorf("meilisearch task %d %s", taskUID, task.Status)
+			return fmt.Errorf("meilisearch task %d %s", ref.uid, task.Status)
 		}
 
 		select {
