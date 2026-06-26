@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -449,6 +450,49 @@ func TestPollOnceStructuredSubtreeChangeEnqueuesExactSubtree(t *testing.T) {
 	}
 	if _, ok := store.advanced["s1"]; !ok {
 		t.Fatalf("expected marker advanced for s1")
+	}
+}
+
+func TestPollOnceCollapsesLargeTargetBatchToLibraryScans(t *testing.T) {
+	store := &fakeStore{
+		settings: Settings{Enabled: true, DefaultPollIntervalSeconds: 600, DebounceSeconds: 60},
+		sources: []Source{{
+			ID: "s1", PluginID: "silo.autoscan.cephfs", CapabilityID: "cephfs", Enabled: true,
+		}},
+	}
+	changes := make([]Change, 0, maxAutoscanTargetsPerPoll+1)
+	for i := 0; i <= maxAutoscanTargetsPerPoll; i++ {
+		changes = append(changes, Change{
+			SourcePath: "/mnt/media/Show/S01/Episode" + strconv.Itoa(i) + ".mkv",
+			Scope:      ChangeScopeFile,
+		})
+	}
+	prov := &fakeProvider{changes: map[string][]Change{"cephfs": changes}, nextMarker: "m1"}
+	q := &recordingQueuer{}
+	svc := newService(store, prov, q, allowSuppressor{})
+
+	if err := svc.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(q.enqueued) != 1 {
+		t.Fatalf("expected one collapsed library scan, got %d: %+v", len(q.enqueued), q.enqueued)
+	}
+	target := q.enqueued[0]
+	if target.Folder == nil || target.Folder.ID != 7 || target.Mode != scantrigger.ModeLibrary || target.Path != "" {
+		t.Fatalf("unexpected collapsed target: %+v", target)
+	}
+	if got, ok := store.advanced["s1"]; !ok || got != "m1" {
+		t.Fatalf("marker must advance after collapsed enqueue, got %q ok=%v", got, ok)
+	}
+	if len(store.events) != 1 {
+		t.Fatalf("expected one finished event, got %d", len(store.events))
+	}
+	event := store.events[0]
+	if event.ChangesReturned != maxAutoscanTargetsPerPoll+1 || event.TargetsClaimed != maxAutoscanTargetsPerPoll+1 {
+		t.Fatalf("event should preserve original burst counts, got %+v", event)
+	}
+	if event.ScansCreated != 1 || event.ScansReused != 0 {
+		t.Fatalf("event should record collapsed scan counts, got %+v", event)
 	}
 }
 

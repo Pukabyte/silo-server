@@ -62,6 +62,10 @@ func (r *ScanRegistry) Get(id string) (ScanRun, bool) {
 }
 
 func (r *ScanRegistry) ListActive() []ScanRun {
+	return r.ListActiveLimit(0)
+}
+
+func (r *ScanRegistry) ListActiveLimit(limit int) []ScanRun {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -69,6 +73,9 @@ func (r *ScanRegistry) ListActive() []ScanRun {
 	for _, run := range r.entries {
 		if run.Status == "accepted" || run.Status == "running" {
 			runs = append(runs, run)
+			if limit > 0 && len(runs) >= limit {
+				break
+			}
 		}
 	}
 	return runs

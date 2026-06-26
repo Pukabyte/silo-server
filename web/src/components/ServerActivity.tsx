@@ -13,6 +13,8 @@ import {
 import type { TaskInfo, ScanRun } from "@/api/types";
 
 const CONNECTION_PROBLEM_INDICATOR_DELAY_MS = 4_000;
+const MAX_ACTIVITY_SCAN_ROWS = 25;
+const MAX_BADGE_COUNT = 99;
 
 interface ServerActivityProps {
   /** Hide the trigger button entirely when there is no activity */
@@ -106,6 +108,9 @@ export default function ServerActivity({ hideWhenEmpty = false }: ServerActivity
     scansLoaded,
   } = useServerActivityData();
   const showConnectionProblem = useDelayedConnectionProblem(connectionState);
+  const visibleActiveScans = activeScans.slice(0, MAX_ACTIVITY_SCAN_ROWS);
+  const hiddenActiveScanCount = activeScans.length - visibleActiveScans.length;
+  const totalActiveLabel = formatBadgeCount(totalActive);
 
   // Keep mounted while popover is open so Radix can animate closed
   if (hideWhenEmpty && totalActive === 0 && !open) return null;
@@ -127,7 +132,7 @@ export default function ServerActivity({ hideWhenEmpty = false }: ServerActivity
           />
           {totalActive > 0 && (
             <span className="absolute -top-0.5 -right-0.5 flex h-[18px] min-w-[18px] animate-[pulse-opacity_2s_ease-in-out_infinite] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white shadow-sm">
-              {totalActive}
+              {totalActiveLabel}
             </span>
           )}
           {showConnectionProblem && (
@@ -209,13 +214,16 @@ export default function ServerActivity({ hideWhenEmpty = false }: ServerActivity
                 >
                   {activeScans.length > 0 ? (
                     <div className="space-y-1.5">
-                      {activeScans.map((scan) => (
+                      {visibleActiveScans.map((scan) => (
                         <ScanRow
                           key={scan.id}
                           scan={scan}
                           libraryName={libraryName(scan.library_id)}
                         />
                       ))}
+                      {hiddenActiveScanCount > 0 && (
+                        <MoreRows count={hiddenActiveScanCount} label="more scans queued" />
+                      )}
                     </div>
                   ) : (
                     <EmptyRow>No active scans</EmptyRow>
@@ -262,7 +270,7 @@ function ActivitySection({
           </span>
           {count > 0 && (
             <span className="bg-primary/10 text-primary rounded-md px-1.5 py-0.5 text-[10px] leading-none font-bold">
-              {count}
+              {formatBadgeCount(count)}
             </span>
           )}
         </div>
@@ -285,6 +293,10 @@ const METHOD_META: Record<string, { label: string; color: string }> = {
   remux: { label: "Remux", color: "bg-info" },
   transcode: { label: "Transcode", color: "bg-warning" },
 };
+
+function formatBadgeCount(count: number) {
+  return count > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : count.toString();
+}
 
 function StreamCountRow({ method, count }: { method: string; count: number }) {
   const { label = method, color = "bg-muted-foreground" } = METHOD_META[method] ?? {};
@@ -381,4 +393,12 @@ function formatScanProgress(scan: ScanRun) {
 
 function EmptyRow({ children }: { children: React.ReactNode }) {
   return <div className="text-muted-foreground py-1 text-[11px]">{children}</div>;
+}
+
+function MoreRows({ count, label }: { count: number; label: string }) {
+  return (
+    <div className="text-muted-foreground border-t border-[color-mix(in_srgb,var(--border)_35%,transparent)] pt-1.5 text-[11px]">
+      {count.toLocaleString()} {label}
+    </div>
+  );
 }
