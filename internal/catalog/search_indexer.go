@@ -258,7 +258,7 @@ func (i *CatalogSearchIndexer) Rebuild(ctx context.Context, progress SearchIndex
 	if err := client.WaitTask(ctx, taskID); err != nil {
 		return stats, err
 	}
-	taskID, err = client.UpdateSettings(ctx, buildIndexUID, catalogSearchMeilisearchSettings(settings.Embedder))
+	taskID, err = client.UpdateSettings(ctx, buildIndexUID, catalogSearchMeilisearchSettings(settings.Embedder, settings.SemanticEnabled))
 	if err != nil {
 		return stats, err
 	}
@@ -438,12 +438,8 @@ func (i *CatalogSearchIndexer) CheckConnection(ctx context.Context, settings Cat
 	return client.Health(ctx)
 }
 
-func catalogSearchMeilisearchSettings(embedder string) map[string]any {
-	embedder, err := NormalizeCatalogSearchEmbedderName(embedder)
-	if err != nil {
-		embedder = DefaultMeilisearchEmbedder
-	}
-	return map[string]any{
+func catalogSearchMeilisearchSettings(embedder string, semanticEnabled bool) map[string]any {
+	settings := map[string]any{
 		"displayedAttributes":  []string{"content_id", "type"},
 		"filterableAttributes": []string{"type"},
 		"searchableAttributes": []string{
@@ -462,8 +458,15 @@ func catalogSearchMeilisearchSettings(embedder string) map[string]any {
 		"pagination": map[string]any{
 			"maxTotalHits": meilisearchDefaultCandidateScanCap,
 		},
-		"embedders": catalogSearchMeilisearchEmbedderSettings(embedder),
 	}
+	if semanticEnabled {
+		embedder, err := NormalizeCatalogSearchEmbedderName(embedder)
+		if err != nil {
+			embedder = DefaultMeilisearchEmbedder
+		}
+		settings["embedders"] = catalogSearchMeilisearchEmbedderSettings(embedder)
+	}
+	return settings
 }
 
 func coalesceSearchIndexEvents(events []SearchIndexEvent) (upsertIDs []string, deleteIDs []string) {

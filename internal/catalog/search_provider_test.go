@@ -127,6 +127,29 @@ func TestCatalogSearchDocumentVectorsUseEmbedderAndOptOutMissing(t *testing.T) {
 	}
 }
 
+func TestCatalogSearchMeilisearchSettingsOmitEmbeddersWhenSemanticDisabled(t *testing.T) {
+	settings := catalogSearchMeilisearchSettings("silo_recommendations", false)
+
+	if _, ok := settings["embedders"]; ok {
+		t.Fatalf("semantic-disabled settings should not include embedders: %#v", settings["embedders"])
+	}
+	if _, ok := settings["searchableAttributes"]; !ok {
+		t.Fatal("semantic-disabled settings should still configure keyword searchable attributes")
+	}
+}
+
+func TestCatalogSearchMeilisearchSettingsIncludeEmbeddersWhenSemanticEnabled(t *testing.T) {
+	settings := catalogSearchMeilisearchSettings("custom_embedder", true)
+
+	embedders, ok := settings["embedders"].(map[string]any)
+	if !ok {
+		t.Fatalf("embedders = %#v, want map[string]any", settings["embedders"])
+	}
+	if _, ok := embedders["custom_embedder"]; !ok {
+		t.Fatalf("embedders = %#v, want custom_embedder", embedders)
+	}
+}
+
 func TestCatalogSearchDocumentPayloadBatchesSplitVectorDocs(t *testing.T) {
 	vector := make([]float32, 128)
 	docs := []catalogSearchDocument{
