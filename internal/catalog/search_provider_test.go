@@ -161,6 +161,9 @@ func TestMeilisearchSearchRequestBuildsKeywordOnlyByDefault(t *testing.T) {
 	if req.Vector != nil || req.Hybrid != nil {
 		t.Fatalf("keyword request should not include vector or hybrid: %#v", req)
 	}
+	if req.MatchingStrategy != DefaultMeilisearchMatchingStrategy {
+		t.Fatalf("matching strategy = %q, want %q", req.MatchingStrategy, DefaultMeilisearchMatchingStrategy)
+	}
 	if req.Filter != `type = "movie"` {
 		t.Fatalf("filter = %q, want movie filter", req.Filter)
 	}
@@ -191,6 +194,12 @@ func TestMeilisearchSearchRequestBuildsHybridWhenSemanticEnabled(t *testing.T) {
 	}
 	if req.Hybrid.SemanticRatio != 0.4 {
 		t.Fatalf("semantic ratio = %v, want 0.4", req.Hybrid.SemanticRatio)
+	}
+	if req.MatchingStrategy != DefaultMeilisearchMatchingStrategy {
+		t.Fatalf("long semantic query matching strategy = %q, want %q", req.MatchingStrategy, DefaultMeilisearchMatchingStrategy)
+	}
+	if req.AttributesToSearchOn != nil {
+		t.Fatalf("long semantic query should search all attributes, got %#v", req.AttributesToSearchOn)
 	}
 	if len(req.Vector) != 3072 {
 		t.Fatalf("vector len = %d, want 3072", len(req.Vector))
@@ -302,7 +311,71 @@ func TestMeilisearchSearchRequestBuildsHybridForApproximateInteractiveSearch(t *
 	}
 }
 
-func TestMeilisearchSearchRequestSkipsHybridForShortTitleSearch(t *testing.T) {
+func TestMeilisearchSearchRequestBuildsHybridAndStrictMatchingForTwoTermSearch(t *testing.T) {
+	vectorizer := &fakeCatalogSearchVectorizer{vector: []float32{0.5, 0.25}}
+	provider := &MeilisearchSearchProvider{
+		config: MeilisearchProviderConfig{
+			MatchingStrategy: DefaultMeilisearchMatchingStrategy,
+			SemanticEnabled:  true,
+			SemanticRatio:    0.3,
+			Embedder:         "silo_recommendations",
+			Vectorizer:       vectorizer,
+		},
+	}
+	req, fallback := provider.buildMeilisearchSearchRequest(context.Background(), CatalogSearchRequest{
+		Query: "spnge bob",
+	})
+	if fallback != "" {
+		t.Fatalf("fallback = %q, want empty", fallback)
+	}
+	if req.Vector == nil || req.Hybrid == nil {
+		t.Fatalf("two-term title search should include hybrid search: %#v", req)
+	}
+	if req.MatchingStrategy != "all" {
+		t.Fatalf("two-term title search matching strategy = %q, want all", req.MatchingStrategy)
+	}
+	if !reflect.DeepEqual(req.AttributesToSearchOn, meilisearchTitleSearchAttributes) {
+		t.Fatalf("two-term title search attributes = %#v, want %#v", req.AttributesToSearchOn, meilisearchTitleSearchAttributes)
+	}
+	if vectorizer.calls != 1 || vectorizer.lastQuery != "spnge bob" {
+		t.Fatalf("vectorizer calls/query = %d/%q", vectorizer.calls, vectorizer.lastQuery)
+	}
+}
+
+func TestMeilisearchSearchRequestUsesStrictMatchingWhenTwoTermHybridNotReady(t *testing.T) {
+	vectorizer := &fakeCatalogSearchVectorizer{vector: []float32{0.5, 0.25}}
+	provider := &MeilisearchSearchProvider{
+		config: MeilisearchProviderConfig{
+			MatchingStrategy: DefaultMeilisearchMatchingStrategy,
+			SemanticEnabled:  true,
+			SemanticRatio:    0.3,
+			Embedder:         "silo_recommendations",
+			Vectorizer:       vectorizer,
+			Coverage:         fakeCoverageGate{ready: false, reason: `type "movie" coverage 40% below threshold`},
+		},
+	}
+	req, fallback := provider.buildMeilisearchSearchRequest(context.Background(), CatalogSearchRequest{
+		Query:     "spnge bob",
+		ItemTypes: []string{"movie"},
+	})
+	if req.Vector != nil || req.Hybrid != nil {
+		t.Fatalf("not-ready coverage should stay keyword-only: %#v", req)
+	}
+	if req.MatchingStrategy != "all" {
+		t.Fatalf("not-ready two-term search matching strategy = %q, want all", req.MatchingStrategy)
+	}
+	if !reflect.DeepEqual(req.AttributesToSearchOn, meilisearchTitleSearchAttributes) {
+		t.Fatalf("not-ready two-term search attributes = %#v, want %#v", req.AttributesToSearchOn, meilisearchTitleSearchAttributes)
+	}
+	if fallback != `semantic_not_ready: type "movie" coverage 40% below threshold` {
+		t.Fatalf("fallback = %q, want semantic_not_ready diagnostic", fallback)
+	}
+	if vectorizer.calls != 0 {
+		t.Fatalf("not-ready coverage should not call vectorizer, calls = %d", vectorizer.calls)
+	}
+}
+
+func TestMeilisearchSearchRequestSkipsHybridForSingleTermTitleSearch(t *testing.T) {
 	vectorizer := &fakeCatalogSearchVectorizer{vector: []float32{0.5, 0.25}}
 	provider := &MeilisearchSearchProvider{
 		config: MeilisearchProviderConfig{
@@ -313,7 +386,7 @@ func TestMeilisearchSearchRequestSkipsHybridForShortTitleSearch(t *testing.T) {
 			Vectorizer:       vectorizer,
 		},
 	}
-	for _, query := range []string{"sponge", "spongebob square"} {
+	for _, query := range []string{"sponge", "spongebob"} {
 		req, fallback := provider.buildMeilisearchSearchRequest(context.Background(), CatalogSearchRequest{
 			Query: query,
 		})
@@ -322,6 +395,12 @@ func TestMeilisearchSearchRequestSkipsHybridForShortTitleSearch(t *testing.T) {
 		}
 		if req.Vector != nil || req.Hybrid != nil {
 			t.Fatalf("short title search %q should stay keyword-only: %#v", query, req)
+		}
+		if req.MatchingStrategy != DefaultMeilisearchMatchingStrategy {
+			t.Fatalf("single-term search %q matching strategy = %q, want %q", query, req.MatchingStrategy, DefaultMeilisearchMatchingStrategy)
+		}
+		if req.AttributesToSearchOn != nil {
+			t.Fatalf("single-term search %q should search all attributes, got %#v", query, req.AttributesToSearchOn)
 		}
 	}
 	if vectorizer.calls != 0 {

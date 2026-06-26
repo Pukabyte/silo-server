@@ -82,6 +82,7 @@ type meilisearchSearchRequest struct {
 	Limit                int                       `json:"limit"`
 	Filter               string                    `json:"filter,omitempty"`
 	AttributesToRetrieve []string                  `json:"attributesToRetrieve"`
+	AttributesToSearchOn []string                  `json:"attributesToSearchOn,omitempty"`
 	MatchingStrategy     string                    `json:"matchingStrategy,omitempty"`
 	Vector               []float32                 `json:"vector,omitempty"`
 	Hybrid               *meilisearchHybridRequest `json:"hybrid,omitempty"`
