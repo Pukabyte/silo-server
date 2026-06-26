@@ -339,7 +339,7 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 	// Single batched library membership query covering EVERY candidate across
 	// all entries (preserves the libraryID filter from the legacy
 	// resolveMDBListEntry).
-	libraryMembers, err := s.libraryItems.GetItemsInFolder(ctx, candidateIDs, collection.LibraryID)
+	libraryMembers, err := s.libraryItems.GetItemsInFolders(ctx, candidateIDs, collection.LibraryIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +355,7 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 		scannedEntries = index + 1
 		r, ok := resolvedByIndex[index]
 		if !ok {
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			warnings = append(warnings, fmt.Sprintf("No match in libraries %v for %s", collection.LibraryIDs, entry.Title))
 			continue
 		}
 		var chosen string
@@ -366,7 +366,7 @@ func (s *LibraryCollectionService) syncMDBListCollection(ctx context.Context, co
 			}
 		}
 		if chosen == "" {
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			warnings = append(warnings, fmt.Sprintf("No match in libraries %v for %s", collection.LibraryIDs, entry.Title))
 			continue
 		}
 		matchedItems = append(matchedItems, LibraryCollectionItemInput{
@@ -474,7 +474,7 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 
 	for i, entry := range results {
 		scannedEntries = i + 1
-		item, err := s.resolveTMDBEntry(ctx, collection.LibraryID, entry)
+		item, err := s.resolveTMDBEntry(ctx, collection.LibraryIDs, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -488,7 +488,7 @@ func (s *LibraryCollectionService) syncTMDBPresetCollection(ctx context.Context,
 				"tvdb_id", entry.TVDBID,
 			)
 			unmatchedCount++
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			warnings = append(warnings, fmt.Sprintf("No match in libraries %v for %s", collection.LibraryIDs, entry.Title))
 			continue
 		}
 		if firstRank, exists := seenContentIDs[item.ContentID]; exists {
@@ -638,7 +638,7 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 
 	for i, entry := range results {
 		scannedEntries = i + 1
-		item, err := s.resolveTMDBEntry(ctx, collection.LibraryID, entry)
+		item, err := s.resolveTMDBEntry(ctx, collection.LibraryIDs, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -650,7 +650,7 @@ func (s *LibraryCollectionService) syncTMDBFranchiseCollection(ctx context.Conte
 				"imdb_id", entry.IMDbID,
 			)
 			unmatchedCount++
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			warnings = append(warnings, fmt.Sprintf("No match in libraries %v for %s", collection.LibraryIDs, entry.Title))
 			continue
 		}
 		if firstRank, exists := seenContentIDs[item.ContentID]; exists {
@@ -813,7 +813,7 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 
 	for i, entry := range results {
 		scannedEntries = i + 1
-		item, err := s.resolveTMDBEntry(ctx, collection.LibraryID, entry)
+		item, err := s.resolveTMDBEntry(ctx, collection.LibraryIDs, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -827,7 +827,7 @@ func (s *LibraryCollectionService) syncTMDBDiscoverCollection(ctx context.Contex
 				"tvdb_id", entry.TVDBID,
 			)
 			unmatchedCount++
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			warnings = append(warnings, fmt.Sprintf("No match in libraries %v for %s", collection.LibraryIDs, entry.Title))
 			continue
 		}
 		if firstRank, exists := seenContentIDs[item.ContentID]; exists {
@@ -975,13 +975,13 @@ func (s *LibraryCollectionService) syncTraktPresetCollection(ctx context.Context
 
 	for i, entry := range results {
 		scannedEntries = i + 1
-		item, err := s.resolveTraktEntry(ctx, collection.LibraryID, entry)
+		item, err := s.resolveTraktEntry(ctx, collection.LibraryIDs, entry)
 		if err != nil {
 			return nil, err
 		}
 		if item == nil {
 			unmatchedCount++
-			warnings = append(warnings, fmt.Sprintf("No match in library %d for %s", collection.LibraryID, entry.Title))
+			warnings = append(warnings, fmt.Sprintf("No match in libraries %v for %s", collection.LibraryIDs, entry.Title))
 			continue
 		}
 		if firstRank, exists := seenContentIDs[item.ContentID]; exists {
@@ -1071,7 +1071,7 @@ func (s *LibraryCollectionService) recordFailedCollectionSync(ctx context.Contex
 
 // resolveTMDBEntry finds a media item in the library matching a TMDB preset entry.
 // It tries TMDB ID, IMDb ID, and TVDB ID (for TV shows) to maximize match rate.
-func (s *LibraryCollectionService) resolveTMDBEntry(ctx context.Context, libraryID int, entry TMDBCollectionEntry) (*models.MediaItem, error) {
+func (s *LibraryCollectionService) resolveTMDBEntry(ctx context.Context, libraryIDs []int, entry TMDBCollectionEntry) (*models.MediaItem, error) {
 	itemType := "movie"
 	if entry.MediaType == "tv" {
 		itemType = "series"
@@ -1094,7 +1094,7 @@ func (s *LibraryCollectionService) resolveTMDBEntry(ctx context.Context, library
 		return nil, nil
 	}
 
-	membership, err := s.libraryItems.GetItemsInFolder(ctx, []string{item.ContentID}, libraryID)
+	membership, err := s.libraryItems.GetItemsInFolders(ctx, []string{item.ContentID}, libraryIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1106,7 +1106,7 @@ func (s *LibraryCollectionService) resolveTMDBEntry(ctx context.Context, library
 }
 
 // resolveTraktEntry finds a local item matching a Trakt discovery entry.
-func (s *LibraryCollectionService) resolveTraktEntry(ctx context.Context, libraryID int, entry TraktCollectionEntry) (*models.MediaItem, error) {
+func (s *LibraryCollectionService) resolveTraktEntry(ctx context.Context, libraryIDs []int, entry TraktCollectionEntry) (*models.MediaItem, error) {
 	itemType := "movie"
 	if entry.MediaType == "tv" {
 		itemType = "series"
@@ -1130,7 +1130,7 @@ func (s *LibraryCollectionService) resolveTraktEntry(ctx context.Context, librar
 		return nil, nil
 	}
 
-	membership, err := s.libraryItems.GetItemsInFolder(ctx, candidates, libraryID)
+	membership, err := s.libraryItems.GetItemsInFolders(ctx, candidates, libraryIDs)
 	if err != nil {
 		return nil, err
 	}
