@@ -54,6 +54,19 @@ func NewEngine(
 	}
 }
 
+// ActiveEmbeddingModel returns the embedding model currently locked for this
+// installation, or "" when no lock is established.
+func (e *Engine) ActiveEmbeddingModel(ctx context.Context) (string, error) {
+	lock, err := e.repo.GetEmbeddingLock(ctx)
+	if err != nil {
+		return "", err
+	}
+	if lock == nil {
+		return "", nil
+	}
+	return lock.Model, nil
+}
+
 func (e *Engine) watchedItemIDSet(ctx context.Context, userID int, profileID string) (map[string]struct{}, error) {
 	return e.signalReader().WatchedItemIDSet(ctx, userID, profileID)
 }

@@ -78,6 +78,13 @@ type CatalogSearchQueryVectorizer interface {
 	EmbedSearchQuery(ctx context.Context, query string) ([]float32, error)
 }
 
+// CatalogSemanticModelProvider reports the embedding model currently locked for
+// this installation. Task 4 injects the recommendations engine as this provider
+// so catalog vector-coverage checks can be scoped to the active model.
+type CatalogSemanticModelProvider interface {
+	ActiveEmbeddingModel(ctx context.Context) (string, error)
+}
+
 type CatalogSearchCandidateRetriever interface {
 	CandidateIDs(ctx context.Context, vector []float32, itemTypes []string, limit int) ([]string, error)
 }
