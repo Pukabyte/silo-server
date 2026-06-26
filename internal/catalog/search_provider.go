@@ -348,6 +348,43 @@ type CatalogSearchRuntimeStatus struct {
 	Meilisearch        CatalogSearchMeiliStatus      `json:"meilisearch"`
 	Index              CatalogSearchIndexStateStatus `json:"index"`
 	Tasks              []CatalogSearchTaskLink       `json:"tasks"`
+	Semantic           CatalogSearchSemanticStatus   `json:"semantic"`
+}
+
+// CatalogSearchSemanticStatus reports the in-memory semantic-coverage view plus
+// the Meilisearch embedder capability for the admin dashboard. The coverage
+// fields are read from the published coverage snapshot (no fresh DB query); the
+// Capability is a rate-limited probe of the active index that NEVER affects the
+// keyword-search circuit breaker or Healthy state.
+type CatalogSearchSemanticStatus struct {
+	Ready             bool                            `json:"ready"`
+	DisabledReason    string                          `json:"disabled_reason,omitempty"`
+	CoverageRatio     float64                         `json:"vector_coverage_ratio"`
+	CoverageUpdatedAt *time.Time                      `json:"coverage_updated_at,omitempty"`
+	PerType           []CatalogSearchTypeCoverage     `json:"per_type,omitempty"`
+	Capability        CatalogSearchSemanticCapability `json:"capability"`
+}
+
+// CatalogSearchTypeCoverage is the per-media-type slice of the semantic coverage
+// snapshot surfaced to admins: how many embed-eligible items exist, how many are
+// vectorized, the resulting ratio, and the hysteresis-latched readiness.
+type CatalogSearchTypeCoverage struct {
+	Type          string  `json:"type"`
+	Eligible      int     `json:"eligible"`
+	Vectorized    int     `json:"vectorized"`
+	CoverageRatio float64 `json:"vector_coverage_ratio"`
+	Ready         bool    `json:"ready"`
+}
+
+// CatalogSearchSemanticCapability reports whether the active Meilisearch index is
+// configured to accept Silo's user-provided embedding vectors. A failure here
+// means hybrid search would be rejected, but it must not trip the circuit or
+// flip Healthy — keyword search stays up regardless.
+type CatalogSearchSemanticCapability struct {
+	OK         bool   `json:"ok"`
+	Reason     string `json:"reason,omitempty"`
+	Embedder   string `json:"embedder,omitempty"`
+	Dimensions int    `json:"dimensions,omitempty"`
 }
 
 type CatalogSearchMeiliStatus struct {

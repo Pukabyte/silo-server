@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"log/slog"
+	"sort"
 )
 
 type CatalogSearchService struct {
@@ -180,6 +181,52 @@ func (s *CatalogSearchService) Status(ctx context.Context) CatalogSearchRuntimeS
 				status.Index.VectorDocumentCount = vectorCount
 			}
 		}
+		// Semantic block reads ONLY the in-memory coverage snapshot — no fresh DB
+		// query is added here. Capability is a rate-limited probe that never
+		// affects Healthy or the circuit breaker.
+		if s.coverage != nil {
+			snap := s.coverage.Snapshot()
+			ready, reason := s.coverage.CoverageReady(nil)
+			status.Semantic = buildSemanticStatus(snap, ready, reason)
+		} else {
+			status.Semantic = CatalogSearchSemanticStatus{Ready: false, DisabledReason: "semantic search disabled"}
+		}
+		if s.meili != nil {
+			status.Semantic.Capability = s.meili.SemanticCapability(ctx)
+		}
 	}
 	return status
+}
+
+// buildSemanticStatus projects the in-memory coverage snapshot and the gate's
+// readiness decision into the admin-facing semantic status. A nil snapshot
+// (semantic disabled or coverage not yet computed) yields not-ready with the
+// supplied reason and no per-type rows. The per-type list is sorted by type for
+// deterministic output. ready/reason come from the gate, not recomputed here.
+func buildSemanticStatus(snap *semanticCoverageSnapshot, ready bool, reason string) CatalogSearchSemanticStatus {
+	if snap == nil {
+		return CatalogSearchSemanticStatus{Ready: false, DisabledReason: reason}
+	}
+	per := make([]CatalogSearchTypeCoverage, 0, len(snap.PerType))
+	for _, c := range snap.PerType {
+		per = append(per, CatalogSearchTypeCoverage{
+			Type:          c.Type,
+			Eligible:      c.Eligible,
+			Vectorized:    c.Vectorized,
+			CoverageRatio: c.Ratio,
+			Ready:         c.Ready,
+		})
+	}
+	sort.Slice(per, func(i, j int) bool { return per[i].Type < per[j].Type })
+	updated := snap.UpdatedAt
+	st := CatalogSearchSemanticStatus{
+		Ready:             ready,
+		CoverageRatio:     snap.Overall,
+		CoverageUpdatedAt: &updated,
+		PerType:           per,
+	}
+	if !ready {
+		st.DisabledReason = reason
+	}
+	return st
 }

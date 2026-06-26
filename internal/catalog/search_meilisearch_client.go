@@ -36,6 +36,24 @@ func (e *meilisearchHTTPError) Error() string {
 	return fmt.Sprintf("meilisearch HTTP %d", e.StatusCode)
 }
 
+type meilisearchDecodeError struct {
+	Err error
+}
+
+func (e *meilisearchDecodeError) Error() string {
+	if e == nil || e.Err == nil {
+		return "decode meilisearch response"
+	}
+	return "decode meilisearch response: " + e.Err.Error()
+}
+
+func (e *meilisearchDecodeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type meilisearchTask struct {
 	TaskUID  int64  `json:"taskUid"`
 	IndexUID string `json:"indexUid"`
@@ -80,6 +98,21 @@ type meilisearchSearchResponse struct {
 
 type meilisearchStatsResponse struct {
 	NumberOfDocuments int `json:"numberOfDocuments"`
+}
+
+// meilisearchIndexSettings is the subset of an index's settings document that
+// the semantic capability check inspects. Only the embedders block is decoded;
+// all other settings fields are ignored.
+type meilisearchIndexSettings struct {
+	Embedders map[string]meilisearchEmbedderSettings `json:"embedders"`
+}
+
+// meilisearchEmbedderSettings describes a single configured embedder. The
+// capability check requires Source=="userProvided" and Dimensions to match the
+// canonical embedding dimension so Silo-supplied vectors line up with the index.
+type meilisearchEmbedderSettings struct {
+	Source     string `json:"source"`
+	Dimensions int    `json:"dimensions"`
 }
 
 const (
@@ -148,6 +181,14 @@ func (c *meilisearchClient) UpdateSettings(ctx context.Context, uid string, sett
 	return task.TaskUID, nil
 }
 
+func (c *meilisearchClient) GetSettings(ctx context.Context, uid string) (meilisearchIndexSettings, error) {
+	var out meilisearchIndexSettings
+	if err := c.do(ctx, http.MethodGet, "/indexes/"+url.PathEscape(uid)+"/settings", nil, &out); err != nil {
+		return meilisearchIndexSettings{}, err
+	}
+	return out, nil
+}
+
 func (c *meilisearchClient) Search(ctx context.Context, uid string, req meilisearchSearchRequest) (meilisearchSearchResponse, error) {
 	var out meilisearchSearchResponse
 	err := c.do(ctx, http.MethodPost, "/indexes/"+url.PathEscape(uid)+"/search", req, &out)
@@ -185,7 +226,7 @@ func (c *meilisearchClient) Stats(ctx context.Context, uid string) (int, error) 
 
 func (c *meilisearchClient) WaitTask(ctx context.Context, taskUID int64) error {
 	if taskUID == 0 {
-		return nil
+		return fmt.Errorf("meilisearch task UID is required")
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -272,7 +313,7 @@ func (c *meilisearchClient) do(ctx context.Context, method, endpoint string, bod
 		return nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return err
+		return &meilisearchDecodeError{Err: err}
 	}
 	return nil
 }

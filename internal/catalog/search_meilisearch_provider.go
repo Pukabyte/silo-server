@@ -22,6 +22,10 @@ const (
 	meilisearchCircuitCooldown         = 30 * time.Second
 	meilisearchQueryVectorCacheTTL     = 15 * time.Minute
 	meilisearchQueryVectorCacheMax     = 1024
+	// semanticCapabilityProbeTTL rate-limits the embedder capability check
+	// (settings fetch + hybrid probe) so a healthy index is validated at most
+	// once per window. The probe is advisory only and never trips the circuit.
+	semanticCapabilityProbeTTL = 5 * time.Minute
 )
 
 type MeilisearchProviderConfig struct {
@@ -55,6 +59,13 @@ type MeilisearchSearchProvider struct {
 	lastFallback    string
 	vectorCache     map[string]cachedCatalogSearchQueryVector
 	vectorCacheSeq  int64
+
+	// capMu guards the rate-limited semantic capability cache. It is separate
+	// from mu so a capability probe can never contend with or mutate the
+	// circuit-breaker state that mu protects.
+	capMu       sync.Mutex
+	capCache    CatalogSearchSemanticCapability
+	capCachedAt time.Time
 }
 
 type cachedCatalogSearchQueryVector struct {
@@ -513,6 +524,121 @@ func (p *MeilisearchSearchProvider) Status() CatalogSearchMeiliStatus {
 		status.CircuitUntil = &until
 	}
 	return status
+}
+
+// evaluateEmbedderSettings checks the active index's embedder configuration
+// against Silo's requirements: the named embedder must exist, declare
+// source=="userProvided", and match the canonical embedding dimension. Each
+// failure yields a distinct, human-readable reason. This is pure so it can be
+// unit-tested without faking the concrete *meilisearchClient.
+func evaluateEmbedderSettings(settings meilisearchIndexSettings, embedder string, wantDims int) CatalogSearchSemanticCapability {
+	emb, ok := settings.Embedders[embedder]
+	if !ok {
+		return CatalogSearchSemanticCapability{
+			OK:       false,
+			Reason:   fmt.Sprintf("embedder %q not configured in index settings", embedder),
+			Embedder: embedder,
+		}
+	}
+	if emb.Source != "userProvided" {
+		return CatalogSearchSemanticCapability{
+			OK:       false,
+			Reason:   fmt.Sprintf("embedder %q source is %q, expected userProvided", embedder, emb.Source),
+			Embedder: embedder,
+		}
+	}
+	if emb.Dimensions != wantDims {
+		return CatalogSearchSemanticCapability{
+			OK:         false,
+			Reason:     fmt.Sprintf("embedder %q dimensions %d, expected %d", embedder, emb.Dimensions, wantDims),
+			Embedder:   embedder,
+			Dimensions: emb.Dimensions,
+		}
+	}
+	return CatalogSearchSemanticCapability{OK: true, Embedder: embedder, Dimensions: emb.Dimensions}
+}
+
+// SemanticCapability reports whether the active Meilisearch index is configured
+// to accept Silo's user-provided embedding vectors. The underlying check
+// (settings fetch + evaluation + a unit-vector hybrid probe) is rate-limited to
+// semanticCapabilityProbeTTL and its result cached. This method NEVER trips the
+// circuit, marks a fallback, or modifies unhealthyUntil — a capability failure
+// must not take keyword search down.
+func (p *MeilisearchSearchProvider) SemanticCapability(ctx context.Context) CatalogSearchSemanticCapability {
+	if p == nil || p.client == nil {
+		return CatalogSearchSemanticCapability{OK: false, Reason: "meilisearch client unavailable"}
+	}
+	p.capMu.Lock()
+	if !p.capCachedAt.IsZero() && time.Since(p.capCachedAt) < semanticCapabilityProbeTTL {
+		cached := p.capCache
+		p.capMu.Unlock()
+		return cached
+	}
+	p.capMu.Unlock()
+
+	capability := p.computeSemanticCapability(ctx)
+
+	p.capMu.Lock()
+	p.capCache = capability
+	p.capCachedAt = time.Now()
+	p.capMu.Unlock()
+	return capability
+}
+
+// computeSemanticCapability performs the uncached capability check: resolve the
+// active index, fetch its settings, evaluate the embedder config, and — only
+// when the config is valid — run a unit-vector hybrid probe to confirm the index
+// accepts the request shape. It deliberately reads index state directly and
+// never calls tripCircuit/markFallback or touches unhealthyUntil, so capability
+// failures stay isolated from the keyword-search circuit.
+func (p *MeilisearchSearchProvider) computeSemanticCapability(ctx context.Context) CatalogSearchSemanticCapability {
+	if p.stateRepo == nil {
+		return CatalogSearchSemanticCapability{OK: false, Reason: "meilisearch index state is not configured"}
+	}
+	state, err := p.stateRepo.GetState(ctx, SearchProviderMeilisearch)
+	if err != nil {
+		return CatalogSearchSemanticCapability{OK: false, Reason: "index state unavailable: " + err.Error()}
+	}
+	uid := strings.TrimSpace(state.ActiveIndexUID)
+	if uid == "" {
+		return CatalogSearchSemanticCapability{OK: false, Reason: "no active index"}
+	}
+	settings, err := p.client.GetSettings(ctx, uid)
+	if err != nil {
+		return CatalogSearchSemanticCapability{OK: false, Reason: "settings fetch failed: " + err.Error()}
+	}
+	capability := evaluateEmbedderSettings(settings, p.config.Embedder, embeddingvectors.CanonicalDimensions)
+	if !capability.OK {
+		return capability
+	}
+	if err := p.probeHybridSearch(ctx, uid); err != nil {
+		return CatalogSearchSemanticCapability{
+			OK:         false,
+			Reason:     "hybrid probe failed: " + err.Error(),
+			Embedder:   capability.Embedder,
+			Dimensions: capability.Dimensions,
+		}
+	}
+	return capability
+}
+
+// probeHybridSearch issues a minimal unit-vector hybrid search against the index
+// to confirm it accepts the embedder/vector request shape. It retrieves a single
+// content_id and discards the result; only the error (if any) matters.
+func (p *MeilisearchSearchProvider) probeHybridSearch(ctx context.Context, uid string) error {
+	vec := make([]float32, embeddingvectors.CanonicalDimensions)
+	vec[0] = 1
+	_, err := p.client.Search(ctx, uid, meilisearchSearchRequest{
+		Query:                "",
+		Limit:                1,
+		AttributesToRetrieve: []string{"content_id"},
+		Vector:               vec,
+		Hybrid: &meilisearchHybridRequest{
+			Embedder:      p.config.Embedder,
+			SemanticRatio: p.config.SemanticRatio,
+		},
+	})
+	return err
 }
 
 func meilisearchTypeFilter(itemTypes []string) string {
