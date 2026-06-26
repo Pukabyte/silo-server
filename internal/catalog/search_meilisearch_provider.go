@@ -19,6 +19,9 @@ const (
 	meilisearchDefaultBatchSize        = 100
 	meilisearchDefaultCandidateScanCap = 1000
 	meilisearchDefaultDeepOffsetLimit  = 500
+	meilisearchShortHybridMinTerms     = 2
+	meilisearchStrictMatchingTermCount = 2
+	meilisearchTitleOnlyTermCount      = 2
 	meilisearchCircuitCooldown         = 30 * time.Second
 	meilisearchQueryVectorCacheTTL     = 15 * time.Minute
 	meilisearchQueryVectorCacheMax     = 1024
@@ -27,6 +30,18 @@ const (
 	// once per window. The probe is advisory only and never trips the circuit.
 	semanticCapabilityProbeTTL = 5 * time.Minute
 )
+
+var meilisearchTitleSearchAttributes = []string{
+	"title",
+	"original_title",
+	"sort_title",
+	"title_variants",
+}
+
+type meilisearchIndexStateStore interface {
+	GetState(ctx context.Context, provider string) (SearchIndexState, error)
+	PendingCount(ctx context.Context, provider string) (int, error)
+}
 
 type MeilisearchProviderConfig struct {
 	URL              string
@@ -48,7 +63,7 @@ type MeilisearchProviderConfig struct {
 
 type MeilisearchSearchProvider struct {
 	itemRepo  *ItemRepository
-	stateRepo *SearchIndexEventRepository
+	stateRepo meilisearchIndexStateStore
 	fallback  *PostgresSearchProvider
 	client    *meilisearchClient
 	config    MeilisearchProviderConfig
@@ -117,9 +132,13 @@ func NewMeilisearchSearchProvider(
 	if err != nil {
 		return nil, err
 	}
+	var stateStore meilisearchIndexStateStore
+	if stateRepo != nil {
+		stateStore = stateRepo
+	}
 	return &MeilisearchSearchProvider{
 		itemRepo:    itemRepo,
-		stateRepo:   stateRepo,
+		stateRepo:   stateStore,
 		fallback:    fallback,
 		client:      client,
 		config:      config,
@@ -154,13 +173,9 @@ func (p *MeilisearchSearchProvider) Search(ctx context.Context, req CatalogSearc
 	if state.SchemaVersion != catalogSearchMeilisearchSchemaVersion(p.config.Embedder, p.config.IndexTypes, p.config.SemanticEnabled) {
 		return p.fallbackSearch(ctx, req, "meilisearch index schema mismatch")
 	}
-	pending, err := p.stateRepo.PendingCount(ctx, SearchProviderMeilisearch)
-	if err != nil {
-		p.markFallback("index pending state unavailable")
-		return p.fallback.Search(ctx, req)
-	}
-	if pending > 0 {
-		return p.fallbackSearch(ctx, req, "meilisearch index has pending updates")
+	pending := 0
+	if count, err := p.stateRepo.PendingCount(ctx, SearchProviderMeilisearch); err == nil && count > 0 {
+		pending = count
 	}
 
 	result, err := p.searchMeilisearch(ctx, req, state.ActiveIndexUID)
@@ -175,6 +190,7 @@ func (p *MeilisearchSearchProvider) Search(ctx context.Context, req CatalogSearc
 	} else {
 		p.clearFallback()
 	}
+	result.IndexPendingEvents = pending
 	return result, nil
 }
 
@@ -324,7 +340,8 @@ func (p *MeilisearchSearchProvider) buildMeilisearchSearchRequest(ctx context.Co
 		Query:                strings.TrimSpace(req.Query),
 		Filter:               meilisearchTypeFilter(req.ItemTypes),
 		AttributesToRetrieve: []string{"content_id"},
-		MatchingStrategy:     p.config.MatchingStrategy,
+		AttributesToSearchOn: p.attributesToSearchOnForRequest(req),
+		MatchingStrategy:     p.matchingStrategyForRequest(req),
 	}
 	if !p.shouldUseSemanticSearch(req) {
 		return searchReq, ""
@@ -356,7 +373,36 @@ func (p *MeilisearchSearchProvider) shouldUseSemanticSearch(req CatalogSearchReq
 	if p == nil || !p.config.SemanticEnabled {
 		return false
 	}
-	return len(strings.Fields(normalizeCatalogSearchQueryForVector(req.Query))) >= 3
+	return len(catalogSearchQueryTerms(req.Query)) >= meilisearchShortHybridMinTerms
+}
+
+func (p *MeilisearchSearchProvider) matchingStrategyForRequest(req CatalogSearchRequest) string {
+	strategy := strings.TrimSpace(strings.ToLower(p.config.MatchingStrategy))
+	if strategy == "" {
+		strategy = DefaultMeilisearchMatchingStrategy
+	}
+	if strategy != "last" {
+		return strategy
+	}
+	// Two-term title searches are easy for Meili's "last" strategy to over-relax
+	// after typo correction (e.g. "spnge bob" degenerating into "spnge").
+	if len(catalogSearchQueryTerms(req.Query)) == meilisearchStrictMatchingTermCount {
+		return "all"
+	}
+	return strategy
+}
+
+func (p *MeilisearchSearchProvider) attributesToSearchOnForRequest(req CatalogSearchRequest) []string {
+	if len(catalogSearchQueryTerms(req.Query)) != meilisearchTitleOnlyTermCount {
+		return nil
+	}
+	return append([]string(nil), meilisearchTitleSearchAttributes...)
+}
+
+func catalogSearchQueryTerms(query string) []string {
+	parsed := parseSearchQuery(query)
+	normalized := normalizeTitleForComparison(firstNonEmptySearchValue(parsed.Text, query))
+	return strings.Fields(normalized)
 }
 
 func (p *MeilisearchSearchProvider) cachedQueryVector(ctx context.Context, query string) ([]float32, error) {

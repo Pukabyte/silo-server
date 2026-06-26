@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCatalogSearchSettingsFromMapParsesMeilisearchTuning(t *testing.T) {
@@ -161,6 +164,9 @@ func TestMeilisearchSearchRequestBuildsKeywordOnlyByDefault(t *testing.T) {
 	if req.Vector != nil || req.Hybrid != nil {
 		t.Fatalf("keyword request should not include vector or hybrid: %#v", req)
 	}
+	if req.MatchingStrategy != DefaultMeilisearchMatchingStrategy {
+		t.Fatalf("matching strategy = %q, want %q", req.MatchingStrategy, DefaultMeilisearchMatchingStrategy)
+	}
 	if req.Filter != `type = "movie"` {
 		t.Fatalf("filter = %q, want movie filter", req.Filter)
 	}
@@ -191,6 +197,12 @@ func TestMeilisearchSearchRequestBuildsHybridWhenSemanticEnabled(t *testing.T) {
 	}
 	if req.Hybrid.SemanticRatio != 0.4 {
 		t.Fatalf("semantic ratio = %v, want 0.4", req.Hybrid.SemanticRatio)
+	}
+	if req.MatchingStrategy != DefaultMeilisearchMatchingStrategy {
+		t.Fatalf("long semantic query matching strategy = %q, want %q", req.MatchingStrategy, DefaultMeilisearchMatchingStrategy)
+	}
+	if req.AttributesToSearchOn != nil {
+		t.Fatalf("long semantic query should search all attributes, got %#v", req.AttributesToSearchOn)
 	}
 	if len(req.Vector) != 3072 {
 		t.Fatalf("vector len = %d, want 3072", len(req.Vector))
@@ -302,7 +314,71 @@ func TestMeilisearchSearchRequestBuildsHybridForApproximateInteractiveSearch(t *
 	}
 }
 
-func TestMeilisearchSearchRequestSkipsHybridForShortTitleSearch(t *testing.T) {
+func TestMeilisearchSearchRequestBuildsHybridAndStrictMatchingForTwoTermSearch(t *testing.T) {
+	vectorizer := &fakeCatalogSearchVectorizer{vector: []float32{0.5, 0.25}}
+	provider := &MeilisearchSearchProvider{
+		config: MeilisearchProviderConfig{
+			MatchingStrategy: DefaultMeilisearchMatchingStrategy,
+			SemanticEnabled:  true,
+			SemanticRatio:    0.3,
+			Embedder:         "silo_recommendations",
+			Vectorizer:       vectorizer,
+		},
+	}
+	req, fallback := provider.buildMeilisearchSearchRequest(context.Background(), CatalogSearchRequest{
+		Query: "spnge bob",
+	})
+	if fallback != "" {
+		t.Fatalf("fallback = %q, want empty", fallback)
+	}
+	if req.Vector == nil || req.Hybrid == nil {
+		t.Fatalf("two-term title search should include hybrid search: %#v", req)
+	}
+	if req.MatchingStrategy != "all" {
+		t.Fatalf("two-term title search matching strategy = %q, want all", req.MatchingStrategy)
+	}
+	if !reflect.DeepEqual(req.AttributesToSearchOn, meilisearchTitleSearchAttributes) {
+		t.Fatalf("two-term title search attributes = %#v, want %#v", req.AttributesToSearchOn, meilisearchTitleSearchAttributes)
+	}
+	if vectorizer.calls != 1 || vectorizer.lastQuery != "spnge bob" {
+		t.Fatalf("vectorizer calls/query = %d/%q", vectorizer.calls, vectorizer.lastQuery)
+	}
+}
+
+func TestMeilisearchSearchRequestUsesStrictMatchingWhenTwoTermHybridNotReady(t *testing.T) {
+	vectorizer := &fakeCatalogSearchVectorizer{vector: []float32{0.5, 0.25}}
+	provider := &MeilisearchSearchProvider{
+		config: MeilisearchProviderConfig{
+			MatchingStrategy: DefaultMeilisearchMatchingStrategy,
+			SemanticEnabled:  true,
+			SemanticRatio:    0.3,
+			Embedder:         "silo_recommendations",
+			Vectorizer:       vectorizer,
+			Coverage:         fakeCoverageGate{ready: false, reason: `type "movie" coverage 40% below threshold`},
+		},
+	}
+	req, fallback := provider.buildMeilisearchSearchRequest(context.Background(), CatalogSearchRequest{
+		Query:     "spnge bob",
+		ItemTypes: []string{"movie"},
+	})
+	if req.Vector != nil || req.Hybrid != nil {
+		t.Fatalf("not-ready coverage should stay keyword-only: %#v", req)
+	}
+	if req.MatchingStrategy != "all" {
+		t.Fatalf("not-ready two-term search matching strategy = %q, want all", req.MatchingStrategy)
+	}
+	if !reflect.DeepEqual(req.AttributesToSearchOn, meilisearchTitleSearchAttributes) {
+		t.Fatalf("not-ready two-term search attributes = %#v, want %#v", req.AttributesToSearchOn, meilisearchTitleSearchAttributes)
+	}
+	if fallback != `semantic_not_ready: type "movie" coverage 40% below threshold` {
+		t.Fatalf("fallback = %q, want semantic_not_ready diagnostic", fallback)
+	}
+	if vectorizer.calls != 0 {
+		t.Fatalf("not-ready coverage should not call vectorizer, calls = %d", vectorizer.calls)
+	}
+}
+
+func TestMeilisearchSearchRequestSkipsHybridForSingleTermTitleSearch(t *testing.T) {
 	vectorizer := &fakeCatalogSearchVectorizer{vector: []float32{0.5, 0.25}}
 	provider := &MeilisearchSearchProvider{
 		config: MeilisearchProviderConfig{
@@ -313,7 +389,7 @@ func TestMeilisearchSearchRequestSkipsHybridForShortTitleSearch(t *testing.T) {
 			Vectorizer:       vectorizer,
 		},
 	}
-	for _, query := range []string{"sponge", "spongebob square"} {
+	for _, query := range []string{"sponge", "spongebob"} {
 		req, fallback := provider.buildMeilisearchSearchRequest(context.Background(), CatalogSearchRequest{
 			Query: query,
 		})
@@ -322,6 +398,12 @@ func TestMeilisearchSearchRequestSkipsHybridForShortTitleSearch(t *testing.T) {
 		}
 		if req.Vector != nil || req.Hybrid != nil {
 			t.Fatalf("short title search %q should stay keyword-only: %#v", query, req)
+		}
+		if req.MatchingStrategy != DefaultMeilisearchMatchingStrategy {
+			t.Fatalf("single-term search %q matching strategy = %q, want %q", query, req.MatchingStrategy, DefaultMeilisearchMatchingStrategy)
+		}
+		if req.AttributesToSearchOn != nil {
+			t.Fatalf("single-term search %q should search all attributes, got %#v", query, req.AttributesToSearchOn)
 		}
 	}
 	if vectorizer.calls != 0 {
@@ -360,6 +442,79 @@ func TestMeilisearchCircuitTripsOnServerAndDecodeErrors(t *testing.T) {
 	}
 	if provider.shouldTripCircuit(context.Canceled) {
 		t.Fatal("context.Canceled should not trip circuit")
+	}
+}
+
+type fakeMeilisearchIndexStateStore struct {
+	state   SearchIndexState
+	pending int
+}
+
+func (f fakeMeilisearchIndexStateStore) GetState(context.Context, string) (SearchIndexState, error) {
+	return f.state, nil
+}
+
+func (f fakeMeilisearchIndexStateStore) PendingCount(context.Context, string) (int, error) {
+	return f.pending, nil
+}
+
+func TestMeilisearchProviderUsesActiveIndexWhenPendingUpdatesExist(t *testing.T) {
+	requests := 0
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hits":[],"estimatedTotalHits":0}`))
+	}))
+	defer server.Close()
+
+	client, err := newMeilisearchClient(server.URL, "", time.Second)
+	if err != nil {
+		t.Fatalf("newMeilisearchClient: %v", err)
+	}
+
+	provider := &MeilisearchSearchProvider{
+		stateRepo: fakeMeilisearchIndexStateStore{
+			state: SearchIndexState{
+				ActiveIndexUID: "search-index",
+				SchemaVersion:  catalogSearchMeilisearchSchemaVersion(DefaultMeilisearchEmbedder, nil, false),
+			},
+			pending: 7,
+		},
+		fallback: &PostgresSearchProvider{},
+		client:   client,
+		config: MeilisearchProviderConfig{
+			BatchSize:        meilisearchDefaultBatchSize,
+			CandidateScanCap: meilisearchDefaultCandidateScanCap,
+			DeepOffsetLimit:  meilisearchDefaultDeepOffsetLimit,
+			MatchingStrategy: DefaultMeilisearchMatchingStrategy,
+			Embedder:         DefaultMeilisearchEmbedder,
+		},
+	}
+
+	result, err := provider.Search(context.Background(), CatalogSearchRequest{
+		Query: "sponge in the sea",
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("Meilisearch requests = %d, want 1", requests)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/indexes/search-index/search" {
+		t.Fatalf("unexpected Meilisearch request %s %s", gotMethod, gotPath)
+	}
+	if result.Provider != SearchProviderMeilisearch {
+		t.Fatalf("provider = %q, want %q", result.Provider, SearchProviderMeilisearch)
+	}
+	if result.FallbackReason != "" {
+		t.Fatalf("fallback reason = %q, want empty", result.FallbackReason)
+	}
+	if result.IndexPendingEvents != 7 {
+		t.Fatalf("IndexPendingEvents = %d, want 7", result.IndexPendingEvents)
 	}
 }
 

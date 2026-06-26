@@ -178,9 +178,9 @@ export default function SearchSettings() {
           <SettingField
             label="Semantic Ratio"
             type="number"
-            value={form.getValue("catalog.search.meilisearch.semantic_ratio") || "0.30"}
+            value={form.getValue("catalog.search.meilisearch.semantic_ratio") || "0.50"}
             onChange={(value) => form.setValue("catalog.search.meilisearch.semantic_ratio", value)}
-            hint="0.30"
+            hint="0.50"
             disabled={!meiliEnabled}
           />
           <SettingField
