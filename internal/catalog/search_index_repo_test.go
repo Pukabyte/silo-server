@@ -91,3 +91,14 @@ func TestEnqueueSearchIndexUpsertRunsWhenProviderIsMeilisearch(t *testing.T) {
 		t.Fatalf("expected one Exec call when provider is meilisearch, got %d", execer.calls)
 	}
 }
+
+func TestItemRepositoryActiveProviderDisablesSearchIndexEvents(t *testing.T) {
+	repo := (&ItemRepository{}).WithActiveSearchProvider(SearchProviderPostgres)
+
+	if repo.searchIndexEvents == nil {
+		t.Fatal("searchIndexEvents is nil")
+	}
+	if !repo.searchIndexEvents.disabledByActiveProvider() {
+		t.Fatal("postgres active provider should disable search index event work")
+	}
+}

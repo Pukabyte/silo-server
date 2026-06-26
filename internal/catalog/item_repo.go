@@ -47,6 +47,17 @@ func (r *ItemRepository) WithSearchIndexEvents(events *SearchIndexEventRepositor
 	return r
 }
 
+func (r *ItemRepository) WithActiveSearchProvider(provider string) *ItemRepository {
+	if r == nil {
+		return nil
+	}
+	if r.searchIndexEvents == nil {
+		r.searchIndexEvents = NewSearchIndexEventRepository(r.pool)
+	}
+	r.searchIndexEvents.WithActiveProvider(provider)
+	return r
+}
+
 // GetPoster returns the current poster path and thumbhash for a media item.
 // Missing or NULL values are returned as empty strings.
 func (r *ItemRepository) GetPoster(ctx context.Context, contentID string) (posterPath string, posterThumbhash string, err error) {
@@ -397,6 +408,9 @@ func scanItemsWithTotal(rows pgx.Rows) ([]*models.MediaItem, int, error) {
 // Upsert inserts a new media item or updates all mutable fields if the
 // content_id already exists. The created_at timestamp is preserved on update.
 func (r *ItemRepository) Upsert(ctx context.Context, item *models.MediaItem) error {
+	if r.searchIndexEvents.disabledByActiveProvider() {
+		return r.upsert(ctx, r.pool, item)
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin media item upsert tx: %w", err)
