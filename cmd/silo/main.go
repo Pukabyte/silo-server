@@ -95,6 +95,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/userstore/pgstore"
+	"github.com/Silo-Server/silo-server/internal/watchlist"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 	watchmdblist "github.com/Silo-Server/silo-server/internal/watchsync/providers/mdblist"
@@ -520,6 +521,12 @@ func main() {
 	// still encrypts/decrypts — no raw settings repo may escape into later wiring.
 	settingsRepo = catalog.NewEncryptedSettingsRepo(catalog.NewServerSettingsRepo(pool), dataCipher)
 	nodeID := resolveNodeIdentity()
+	catalogSearchStartupSettings, err := catalog.CatalogSearchSettingsFromMap(settings)
+	if err != nil {
+		slog.Warn("catalog search: failed to load settings for startup wiring; using postgres", "err", err)
+		catalogSearchStartupSettings = catalog.DefaultCatalogSearchSettings()
+	}
+	activeCatalogSearchProvider := catalog.ActiveCatalogSearchProvider(catalogSearchStartupSettings)
 
 	// Step 9: Validate
 	if err := cfg.Validate(); err != nil {
@@ -818,6 +825,7 @@ func main() {
 
 		ffprobePath := scanner.FFprobePathFromFFmpeg(cfg.Playback.FFmpegPath)
 		s := scanner.NewScanner(fileRepo, ffprobePath, deps.S3Public, cfg.Scanner.Workers, cfg.Scanner.EmptyTrashAfterScan)
+		s.SetSearchIndexProvider(activeCatalogSearchProvider)
 		configWatcher.OnChange(func(_, updated *config.Config) {
 			s.SetWorkers(updated.Scanner.Workers)
 		})
@@ -1064,7 +1072,7 @@ func main() {
 	if needsWorkers && deps.DB != nil && deps.FileRepo != nil {
 		chainRepo := metadata.NewChainRepository(deps.DB)
 		skippedRootRepo = metadata.NewSkippedRootRepository(deps.DB)
-		itemRepo = catalog.NewItemRepository(deps.DB)
+		itemRepo = catalog.NewItemRepository(deps.DB).WithActiveSearchProvider(activeCatalogSearchProvider)
 		episodeRepo = catalog.NewEpisodeRepository(deps.DB)
 		seasonRepo = catalog.NewSeasonRepository(deps.DB)
 		personRepo := catalog.NewPersonRepository(deps.DB)
@@ -1442,6 +1450,15 @@ func main() {
 			}
 		})
 	}
+	// Auto-remove fully-watched items from the watchlist (standalone behavior,
+	// default-on per profile), propagating removals to connected providers.
+	if itemRepo != nil && episodeRepo != nil && userStoreProvider != nil {
+		maintainer := watchlist.NewMaintainer(userStoreProvider, itemRepo, episodeRepo)
+		if watchProviderService != nil {
+			maintainer.WithListEventDispatcher(watchProviderService)
+		}
+		deps.WatchCompletionObserver = maintainer
+	}
 	deps.SessionMgr = sessionMgr
 	deps.PlaybackRealtimeHub = playback.NewRealtimeHub()
 	if chapterThumbService != nil && deps.S3Public != nil {
@@ -1505,6 +1522,7 @@ func main() {
 			cfg.Recommendations,
 		)
 		deps.Recommender = recEngine
+		deps.CatalogSearchVectorizer = recEngine
 
 		var err error
 		recWorker, err = recommendations.NewWorker(
@@ -1700,6 +1718,9 @@ func main() {
 			taskMgr.Register(tasks.NewScanLibrariesTask(deps.FolderRepo, deps.LibraryScanQueue, deps.EventBus))
 		}
 		taskMgr.Register(tasks.NewCleanupOrphanedMediaItemsTask(catalog.NewOrphanedProvisionalCleaner(deps.DB)))
+		catalogSearchIndexer := catalog.NewCatalogSearchIndexer(deps.DB, settingsRepo)
+		taskMgr.Register(tasks.NewSyncCatalogSearchIndexTask(catalogSearchIndexer))
+		taskMgr.Register(tasks.NewRebuildCatalogSearchIndexTask(catalogSearchIndexer))
 		if deps.IntroAnalyzer != nil {
 			taskMgr.Register(tasks.NewDetectIntroMarkersTask(deps.IntroAnalyzer, settingsRepo))
 		}
@@ -1870,6 +1891,8 @@ func main() {
 			AccessResolver: audiobooks.NewABSAccessResolver(absUserRepo, userStoreProvider),
 			Recs:           recommendations.NewRepo(deps.DB),
 			Detail:         absDetailSvc,
+			SessionMgr:     sessionMgr,
+			SessionSyncer:  deps.SessionSyncer,
 		}
 		absH := audiobooksService.BuildABSHandler(absHDeps)
 		deps.ABSHandler = absH
@@ -2159,6 +2182,7 @@ func main() {
 			compatDeps.FolderRepo = folderRepo
 			compatDeps.SessionMgr = sessionMgr
 			compatDeps.UserStoreProvider = userStoreProvider
+			compatDeps.WatchCompletionObserver = deps.WatchCompletionObserver
 			compatDeps.SettingsRepo = settingsRepo
 			compatDeps.PersonRepo = personRepo
 
