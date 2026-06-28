@@ -2047,6 +2047,8 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Get("/metadata/ai/status", metadataAIHandler.HandleStatus)
 					if itemRepo != nil {
 						metadataAIHandler.ItemAccess = itemRepo
+						metadataAIHandler.SeasonLookup = seasonRepo
+						metadataAIHandler.EpisodeLookup = episodeRepo
 						r.Post("/items/{id}/translate-description", metadataAIHandler.HandleTranslateOnView)
 					}
 				} else {
