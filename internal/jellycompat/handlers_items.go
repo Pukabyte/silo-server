@@ -1285,6 +1285,17 @@ func (h *ItemsHandler) writeSeriesEpisodesResponse(w http.ResponseWriter, r *htt
 		writeCompatUpstreamError(w, err)
 		return
 	}
+	sort.SliceStable(episodeModels, func(i, j int) bool {
+		if episodeModels[i] == nil || episodeModels[j] == nil {
+			return episodeModels[i] != nil
+		}
+		if episodeModels[i].SeasonNumber == episodeModels[j].SeasonNumber {
+			return episodeModels[i].EpisodeNumber < episodeModels[j].EpisodeNumber
+		}
+		return episodeModels[i].SeasonNumber < episodeModels[j].SeasonNumber
+	})
+	episodeModels = compactEpisodeModels(episodeModels)
+	episodeModels = trimEpisodesFromStartItem(episodeModels, query.startItemID, h.codec)
 
 	contentIDs := contentIDsFromEpisodes(episodeModels)
 	favorites, progress, err := resolveUserStateForContentIDs(r.Context(), session, h.userData, contentIDs)
@@ -2383,6 +2394,38 @@ func (h *ItemsHandler) listSeriesEpisodes(ctx context.Context, session *Session,
 		}
 	}
 	return episodes, nil
+}
+
+func compactEpisodeModels(episodes []*models.Episode) []*models.Episode {
+	write := 0
+	for _, episode := range episodes {
+		if episode == nil {
+			continue
+		}
+		episodes[write] = episode
+		write++
+	}
+	return episodes[:write]
+}
+
+func trimEpisodesFromStartItem(episodes []*models.Episode, rawStartItemID string, codec *ResourceIDCodec) []*models.Episode {
+	rawStartItemID = strings.TrimSpace(rawStartItemID)
+	if rawStartItemID == "" {
+		return episodes
+	}
+	if codec == nil {
+		return []*models.Episode{}
+	}
+	startContentID, err := decodeItemID(codec, rawStartItemID)
+	if err != nil || startContentID == "" {
+		return []*models.Episode{}
+	}
+	for i, episode := range episodes {
+		if episode != nil && episode.ContentID == startContentID {
+			return episodes[i:]
+		}
+	}
+	return []*models.Episode{}
 }
 
 func intPtr(value int) *int {
