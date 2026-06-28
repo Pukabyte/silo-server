@@ -272,6 +272,17 @@ func itemTypesContain(itemTypes []string, target string) bool {
 	return false
 }
 
+func searchItemTypesForQuery(query itemsQuery) []string {
+	itemTypes := append([]string(nil), query.itemTypes...)
+	if query.mediaTypesExplicit && !query.mediaTypesSet["video"] {
+		return []string{compatNoMatchType}
+	}
+	if query.hasItemTypeFilter && len(itemTypes) == 0 {
+		return []string{compatNoMatchType}
+	}
+	return itemTypes
+}
+
 // HandleItem serves GET /Items/{id}.
 func (h *ItemsHandler) HandleItem(w http.ResponseWriter, r *http.Request) {
 	session := SessionFromContext(r.Context())
@@ -1605,7 +1616,10 @@ func (h *ItemsHandler) HandleSearchHints(w http.ResponseWriter, r *http.Request)
 	}
 
 	limit := parsePositiveInt(q.Get("Limit"), 20)
-	result, err := h.content.SearchItems(r.Context(), session, query, nil, limit, 0, nil)
+	result, err := h.content.SearchItems(r.Context(), session, SearchItemsOptions{
+		Query: query,
+		Limit: limit,
+	})
 	if err != nil {
 		writeCompatUpstreamError(w, err)
 		return
@@ -1864,7 +1878,14 @@ func (h *ItemsHandler) handleFavoriteItems(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *ItemsHandler) handleSearchItems(w http.ResponseWriter, r *http.Request, session *Session, query itemsQuery) {
-	result, err := h.content.SearchItems(r.Context(), session, query.searchTerm, query.itemTypes, query.limit, query.startIndex, libraryIDPtr(query.parentLibraryID))
+	result, err := h.content.SearchItems(r.Context(), session, SearchItemsOptions{
+		Query:     query.searchTerm,
+		ItemTypes: searchItemTypesForQuery(query),
+		Limit:     query.limit,
+		Offset:    query.startIndex,
+		LibraryID: libraryIDPtr(query.parentLibraryID),
+		SkipTotal: !query.enableTotalRecordCount,
+	})
 	if err != nil {
 		writeCompatUpstreamError(w, err)
 		return
