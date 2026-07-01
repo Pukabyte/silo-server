@@ -223,10 +223,16 @@ type Dependencies struct {
 	TokenStore     TokenStore
 	CredValidator  ProfileCredentialValidator
 	AccessResolver AccessResolver
-	Config         ConfigProvider
-	Publisher      EventPublisher // may be nil
-	Recommender    Recommender    // may be nil
-	LoginLimiter   *LoginLimiter  // may be nil — one is created if absent
+	// UsernameResolver returns the display username for an ABS principal
+	// (userID, profileID) without re-authenticating. Optional; GET /me falls
+	// back to the userID when this is nil or returns "". Login gets the
+	// display name from the credential validator, but /me only has the token
+	// claims, so it needs this to show the real username instead of the id.
+	UsernameResolver func(ctx context.Context, userID, profileID string) string
+	Config           ConfigProvider
+	Publisher        EventPublisher // may be nil
+	Recommender      Recommender    // may be nil
+	LoginLimiter     *LoginLimiter  // may be nil — one is created if absent
 	// InstallID returns the current plugin install ID for building
 	// host-proxy-routable URLs. Defaults to "silo.audiobooks" when nil.
 	InstallID func() string

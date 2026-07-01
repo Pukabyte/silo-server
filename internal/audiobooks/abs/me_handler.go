@@ -33,7 +33,16 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		defaultLibID = audiobookLibraryID(libs[0])
 	}
 
-	writeJSON(w, http.StatusOK, absUserObject(a.UserID, a.UserID, a.Token, defaultLibID, time.Now()))
+	// Resolve the real display username; the token only carries the userID, so
+	// without this /me would report the numeric id as the username.
+	name := a.UserID
+	if h.deps.UsernameResolver != nil {
+		if resolved := h.deps.UsernameResolver(r.Context(), a.UserID, a.ProfileID); resolved != "" {
+			name = resolved
+		}
+	}
+
+	writeJSON(w, http.StatusOK, absUserObject(a.UserID, name, a.Token, defaultLibID, time.Now()))
 }
 
 // audiobookLibraryID returns the ABS-wire library ID string for an
