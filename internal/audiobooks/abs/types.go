@@ -119,13 +119,20 @@ type Metadata struct {
 // media.tracks.length to decide whether to render the play button, while
 // card/list views read media.numTracks.
 type LibraryItemMedia struct {
-	Metadata   Metadata     `json:"metadata"`
-	Duration   float64      `json:"duration"`
-	CoverPath  string       `json:"coverPath"`
-	AudioFiles []AudioTrack `json:"audioFiles"`
-	Tracks     []AudioTrack `json:"tracks"`
-	Chapters   []ChapterABS `json:"chapters"`
-	NumTracks  int          `json:"numTracks"`
+	// ID and LibraryItemID are BOTH the ContentID. Real ABS Book.toOldJSON
+	// sets media.id (= book id) and media.libraryItemId; yaabsa's BookMedia.id
+	// is required non-null, so omitting id throws
+	// "type 'Null' is not a subtype of type 'String'" and the whole item fails
+	// to parse. Every non-minified media object (list-full + detail) carries both.
+	ID            string       `json:"id"`
+	LibraryItemID string       `json:"libraryItemId"`
+	Metadata      Metadata     `json:"metadata"`
+	Duration      float64      `json:"duration"`
+	CoverPath     string       `json:"coverPath"`
+	AudioFiles    []AudioTrack `json:"audioFiles"`
+	Tracks        []AudioTrack `json:"tracks"`
+	Chapters      []ChapterABS `json:"chapters"`
+	NumTracks     int          `json:"numTracks"`
 	// Tags is a book-level tag list. NEVER null on the wire — the ABS
 	// Android client's Kotlin `Book.tags: List<String>` is non-nullable,
 	// so Jackson throws MissingKotlinParameterException when the field
@@ -187,16 +194,20 @@ type CollapsedSeriesV1 struct {
 // echoed across the three time fields). Costs almost nothing on the wire
 // and never causes a parser failure that silently breaks downloads.
 type LibraryItem struct {
-	ID        string        `json:"id"`
-	Ino       string        `json:"ino"`
-	LibraryID string        `json:"libraryId"`
-	FolderID  string        `json:"folderId"`
-	Path      string        `json:"path"`
-	RelPath   string        `json:"relPath"`
-	MtimeMs   int64         `json:"mtimeMs"`
-	CtimeMs   int64         `json:"ctimeMs"`
-	BirthtimeMs int64       `json:"birthtimeMs"`
-	MediaType string        `json:"mediaType"`
+	ID        string `json:"id"`
+	Ino       string `json:"ino"`
+	LibraryID string `json:"libraryId"`
+	FolderID  string `json:"folderId"`
+	Path      string `json:"path"`
+	RelPath   string `json:"relPath"`
+	// IsFile mirrors real ABS LibraryItem.isFile (single-file vs folder item).
+	// silo serves file-backed items, so this is always true; the minified
+	// projection carries it through and some clients gate download UI on it.
+	IsFile      bool   `json:"isFile"`
+	MtimeMs     int64  `json:"mtimeMs"`
+	CtimeMs     int64  `json:"ctimeMs"`
+	BirthtimeMs int64  `json:"birthtimeMs"`
+	MediaType   string `json:"mediaType"`
 	// IsMissing / IsInvalid are gating fields the ABS mobile client checks
 	// before rendering the play affordance. We always emit them (no omitempty)
 	// so the client never sees them as undefined; the catalog we serve is by
