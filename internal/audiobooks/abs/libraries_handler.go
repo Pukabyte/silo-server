@@ -44,21 +44,25 @@ func (h *Handler) handleLibraryDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	resp := map[string]any{
-		"library": audiobookLibraryMap(lib),
+	library := audiobookLibraryMap(lib)
+	// Real ABS LibraryController.findOne returns the library object DIRECTLY
+	// when there is no ?include=filterdata; only the filterdata request wraps
+	// it in { filterdata, issues, numUserPlaylists, customMetadataProviders,
+	// library }. Returning the wrapped shape unconditionally breaks clients
+	// that read library fields off the top level.
+	if !includeHas(r.URL.Query().Get("include"), "filterdata") {
+		writeJSON(w, http.StatusOK, library)
+		return
 	}
-	if includeHas(r.URL.Query().Get("include"), "filterdata") {
-		resp["filterdata"] = h.buildFilterData(r, lib)
-		resp["issues"] = 0
-		// numUserPlaylists drives the bottom-nav "Playlists" tab
-		// visibility on the ABS mobile client (BookshelfNavBar.vue:25
-		// gates the tab on `numUserPlaylists` being truthy). Comment
-		// in plugins/server.js:129 confirms "precise number is not
-		// necessary" — we just need a non-zero count when the caller
-		// has any playlists, so the ListUserPlaylists len suffices.
-		resp["numUserPlaylists"] = h.countUserPlaylists(r)
-	}
-	writeJSON(w, http.StatusOK, resp)
+	// numUserPlaylists drives the bottom-nav "Playlists" tab visibility on the
+	// ABS mobile client (BookshelfNavBar.vue gates the tab on it being truthy).
+	writeJSON(w, http.StatusOK, map[string]any{
+		"filterdata":              h.buildFilterData(r, lib),
+		"issues":                  0,
+		"numUserPlaylists":        h.countUserPlaylists(r),
+		"customMetadataProviders": []any{},
+		"library":                 library,
+	})
 }
 
 // countUserPlaylists returns the playlist count for the authenticated

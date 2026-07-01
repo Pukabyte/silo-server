@@ -56,9 +56,44 @@ func audiobookLibraryMap(lib AudiobookLibrary) map[string]any {
 	if name == "" {
 		name = VirtualLibraryName
 	}
+	id := audiobookLibraryID(lib)
 	return map[string]any{
-		"id":        audiobookLibraryID(lib),
-		"name":      name,
-		"mediaType": LibraryMediaType,
+		"id":   id,
+		"name": name,
+		// folders mirror real ABS LibraryFolder.toOldJSON {id,fullPath,libraryId,addedAt}.
+		// silo serves a single virtual folder per library.
+		"folders": []map[string]any{
+			{"id": VirtualFolderID, "fullPath": "/" + name, "libraryId": id, "addedAt": 0},
+		},
+		"displayOrder":    1,
+		"icon":            "audiobookshelf",
+		"mediaType":       LibraryMediaType,
+		"provider":        "audible",
+		"settings":        audiobookLibrarySettings(),
+		"lastScan":        nil,
+		"lastScanVersion": ServerVersion,
+		"createdAt":       0,
+		"lastUpdate":      0,
+	}
+}
+
+// audiobookLibrarySettings emits the real ABS library `settings` object.
+// It's a loose object clients read defensively; silo has no per-library
+// settings storage, so these are sensible audiobook defaults. coverAspectRatio
+// 1 = square (audiobook covers).
+func audiobookLibrarySettings() map[string]any {
+	return map[string]any{
+		"coverAspectRatio":                   1,
+		"disableWatcher":                     true,
+		"skipMatchingMediaWithAsin":          false,
+		"skipMatchingMediaWithIsbn":          false,
+		"autoScanCronExpression":             nil,
+		"audiobooksOnly":                     false,
+		"hideSingleBookSeries":               false,
+		"onlyShowLaterBooksInContinueSeries": false,
+		"metadataPrecedence":                 []string{},
+		"epubsAllowScriptedContent":          false,
+		"markAsFinishedPercentComplete":      nil,
+		"markAsFinishedTimeRemaining":        10,
 	}
 }
