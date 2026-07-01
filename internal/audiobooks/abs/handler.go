@@ -329,13 +329,17 @@ func (h *Handler) mountRoutes(r chi.Router) {
 		r.Get(prefix+"/status", h.handleABSStatus)
 	}
 
-	// Stage 2: login (body credentials).
-	r.Post("/login", h.handleLogin)
-	r.Post("/abs/api/login", h.handleLogin)
-	// Token rotation — mobile clients call this every ~22h to avoid the
-	// 24h access-token interactive re-login trap.
-	r.Post("/auth/refresh", h.handleRefresh)
-	r.Post("/abs/api/auth/refresh", h.handleRefresh)
+	// Stage 2: login (body credentials). Real ABS serves /login at root, but
+	// clients differ on the prefix — some POST /api/login or /abs/api/login.
+	// The rest of the authenticated surface is mounted under both /api and
+	// /abs/api, so mount login+refresh under the same set; a client posting
+	// /api/login otherwise 404s and surfaces a generic "unknown error".
+	for _, prefix := range []string{"", "/api", "/abs/api"} {
+		r.Post(prefix+"/login", h.handleLogin)
+		// Token rotation — mobile clients call this every ~22h to avoid the
+		// 24h access-token interactive re-login trap.
+		r.Post(prefix+"/auth/refresh", h.handleRefresh)
+	}
 	// Logout is mounted OUTSIDE bearerAuth so an expired-access client can
 	// still sign out (the primary "sign out" UX moment). The handler parses
 	// the bearer locally, revokes the JTI if parseable, and always returns
