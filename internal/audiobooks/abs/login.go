@@ -179,7 +179,12 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request, userID, 
 // use this to validate the URL before showing the login form, and any
 // other shape causes the official mobile app to reject the server.
 func (h *Handler) handleABSPing(w http.ResponseWriter, _ *http.Request) {
+	// Real ABS /ping returns {"success": true} (server/Server.js). The ABS
+	// apps validate a server address by reading response.success — without it
+	// they report "unable to reach". The pong/server/version keys are kept as
+	// harmless extras for plugin-shape clients.
 	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
 		"server":  "audiobookshelf",
 		"version": ServerVersion,
 		"pong":    true,
@@ -192,14 +197,19 @@ func (h *Handler) handleABSInit(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleABSStatus — GET /status. Mobile clients call this on every
-// connection to confirm the server is an ABS install and pull a few
-// global flags. Matches the plugin shape exactly (key order intentional).
+// connection to confirm the server is an ABS install and to learn which
+// auth methods to render on the login form. Mirrors real ABS Server.js
+// /status: {app, serverVersion, isInit, language, authMethods, authFormData}.
+// authMethods drives the login UI — omitting it can leave the app unable to
+// present a usable login flow.
 func (h *Handler) handleABSStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"isInit":        true,
-		"language":      "en-us",
 		"app":           "audiobookshelf",
 		"serverVersion": ServerVersion,
+		"isInit":        true,
+		"language":      "en-us",
+		"authMethods":   []string{"local"},
+		"authFormData":  map[string]any{},
 	})
 }
 
