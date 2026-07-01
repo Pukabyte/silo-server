@@ -414,7 +414,12 @@ func (h *Handler) mountRoutes(r chi.Router) {
 			// PATCH /me/progress/{id}/{episodeId} — podcast episode
 			// progress; audiobook-only catalog, so this is a stub.
 			r.Patch(prefix+"/me/progress/{libraryItemId}/{episodeId}", h.handleSetEpisodeProgress)
-			// PATCH /session/{sid}           — heartbeat: position + time_listening
+			// POST  /session/{sid}/sync      — real ABS heartbeat path
+			// (SessionController.sync). The official ABS mobile/web clients
+			// POST here; missing it means playback progress never syncs.
+			r.Post(prefix+"/session/{sid}/sync", h.handleSessionSync)
+			// PATCH /session/{sid}           — silo-native heartbeat alias
+			// (kept additive for silo's own clients).
 			r.Patch(prefix+"/session/{sid}", h.handleSessionSync)
 			// POST  /session/{sid}/close     — finalise the play session
 			r.Post(prefix+"/session/{sid}/close", h.handleSessionClose)
