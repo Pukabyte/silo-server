@@ -70,6 +70,7 @@ type ItemsHandler struct {
 	profileStaler            ProfileStaler
 	profileRefreshRequester  ProfileRefreshRequester
 	metadataRefreshRequester MetadataRefreshRequester
+	rtBackfill               *rtBackfiller
 	localWatchDispatcher     LocalWatchEventDispatcher
 	ebookProgressStore       EbookReaderProgressLister
 	ebookReadStateStore      EbookReadStateStore
@@ -146,7 +147,34 @@ func (h *ItemsHandler) SetEbookReaderProgressStore(store EbookReaderProgressRead
 	h.ebookReadStateStore = store
 }
 
+// SetRottenTomatoesBackfill wires the on-view Rotten Tomatoes backfill using
+// the MDBList ratings client and the handler's item repository. Optional;
+// without it, RT scores are only populated during full metadata refreshes.
+func (h *ItemsHandler) SetRottenTomatoesBackfill(fetcher rtRatingsFetcher) {
+	if h == nil || h.itemRepo == nil {
+		return
+	}
+	h.rtBackfill = newRTBackfiller(fetcher, h.itemRepo)
+}
+
+// maybeBackfillRottenTomatoes lazily fills a movie or series' RT score from
+// MDBList when it is missing and an IMDb id is known. Async and best-effort;
+// the value appears on the next detail load.
+func (h *ItemsHandler) maybeBackfillRottenTomatoes(detail *catalog.ItemDetail) {
+	if h == nil || h.rtBackfill == nil || detail == nil {
+		return
+	}
+	if detail.Type != "movie" && detail.Type != "series" {
+		return
+	}
+	if detail.RatingRTCritic != nil || detail.ImdbID == "" {
+		return
+	}
+	h.rtBackfill.Enqueue(detail.ContentID, detail.ImdbID)
+}
+
 func (h *ItemsHandler) maybeRequestStaleDetailMetadataRefresh(ctx context.Context, detail *catalog.ItemDetail) {
+	h.maybeBackfillRottenTomatoes(detail)
 	if h == nil || detail == nil || h.metadataRefreshRequester == nil {
 		return
 	}

@@ -523,6 +523,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		if deps.WatchCompletionObserver != nil {
 			itemsHandler.SetCompletionObserver(deps.WatchCompletionObserver)
 		}
+		if deps.MDBListClient != nil {
+			itemsHandler.SetRottenTomatoesBackfill(deps.MDBListClient)
+		}
 		if ebookProgressStore != nil {
 			itemsHandler.SetEbookReaderProgressStore(ebookProgressStore)
 		}
