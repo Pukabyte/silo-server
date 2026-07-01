@@ -449,14 +449,10 @@ func NewRouter(deps Dependencies) chi.Router {
 		ebookAnnotationStore = handlers.NewPGEbookReaderAnnotationStore(deps.DB)
 		browseRepo := catalog.NewBrowseRepository(deps.DB)
 		itemRepo = catalog.NewItemRepository(deps.DB)
-		catalogSearchSettings, err := catalog.LoadCatalogSearchSettings(context.Background(), settingsRepo)
-		if err != nil {
-			slog.Warn("catalog search: failed to load settings; using postgres", "err", err)
-			catalogSearchSettings = catalog.DefaultCatalogSearchSettings()
-		}
 		searchIndexEvents := catalog.NewSearchIndexEventRepository(deps.DB)
-		catalogSearchService = catalog.NewCatalogSearchServiceFromSettings(
-			catalogSearchSettings,
+		catalogSearchService = catalog.NewCatalogSearchService(
+			context.Background(),
+			settingsRepo,
 			itemRepo,
 			searchIndexEvents,
 			deps.CatalogSearchVectorizer,
@@ -2051,6 +2047,8 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Get("/metadata/ai/status", metadataAIHandler.HandleStatus)
 					if itemRepo != nil {
 						metadataAIHandler.ItemAccess = itemRepo
+						metadataAIHandler.SeasonLookup = seasonRepo
+						metadataAIHandler.EpisodeLookup = episodeRepo
 						r.Post("/items/{id}/translate-description", metadataAIHandler.HandleTranslateOnView)
 					}
 				} else {
