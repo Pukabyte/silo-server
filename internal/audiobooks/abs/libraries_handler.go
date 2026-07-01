@@ -533,13 +533,20 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	if series, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, shelfLimit, access); err == nil && len(series) > 0 {
 		recent := make([]map[string]any, 0, len(series))
 		for _, s := range series {
-			recent = append(recent, map[string]any{
-				"id":        s.ID,
-				"name":      s.Name,
-				"numBooks":  s.NumBooks,
-				"libraryId": libID,
-				"books":     []any{},
-			})
+			// Full real-ABS series object + minified books (same shape as
+			// /libraries/{id}/series) so the recent-series shelf card decodes
+			// identically and its cover stack has real items.
+			obj := seriesObjectABS(s.ID, s.Name, libID, s.NumBooks)
+			books := make([]MinifiedLibraryItem, 0, len(s.Books))
+			for _, bp := range s.Books {
+				updatedMs := int64(0)
+				if !bp.UpdatedAt.IsZero() {
+					updatedMs = bp.UpdatedAt.UnixMilli()
+				}
+				books = append(books, seriesBookMinified(bp.ContentID, bp.Title, libID, baseURL, updatedMs))
+			}
+			obj["books"] = books
+			recent = append(recent, obj)
 		}
 		shelves[3]["entities"] = recent
 		shelves[3]["total"] = len(recent)
