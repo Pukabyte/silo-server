@@ -4,16 +4,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // handleMe — GET /abs/api/me (and /api/me)
 //
-// Minimal {id, username, defaultLibraryId} envelope — matches the
-// continuum-plugin-audiobooks shape exactly. ABS clients already
-// have the full user object from /login and /authorize; /me is just
-// a session-resume probe in real-ABS, so returning the rich user
-// envelope here is unnecessary and can confuse clients that pattern-
-// match on the minimal shape.
+// Real ABS returns req.user.toOldJSONForBrowser() — the FULL user object, the
+// same shape carried on the login/authorize envelope's `user`. A strict client
+// decodes /me with its User model, so a thin {id,username,...} map crashes it
+// on the first missing required key. Emit the shared absUserObject (minus the
+// login-only accessToken/refreshToken; /me still carries the `token` slot set
+// to the caller's presented bearer).
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok || a.UserID == "" {
@@ -32,11 +33,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		defaultLibID = audiobookLibraryID(libs[0])
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":               a.UserID,
-		"username":         a.UserID,
-		"defaultLibraryId": defaultLibID,
-	})
+	writeJSON(w, http.StatusOK, absUserObject(a.UserID, a.UserID, a.Token, defaultLibID, time.Now()))
 }
 
 // audiobookLibraryID returns the ABS-wire library ID string for an
