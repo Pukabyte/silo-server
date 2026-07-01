@@ -351,14 +351,18 @@ func (h *Handler) handleLibraryAuthors(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]map[string]any, 0, len(pageAuthors))
 	for _, a := range pageAuthors {
-		results = append(results, map[string]any{
-			"id":        a.ID,
-			"name":      a.Name,
-			"numBooks":  a.NumBooks,
-			"libraryId": libID,
-		})
+		results = append(results, authorObjectABS(a.ID, a.Name, libID, a.NumBooks))
 	}
-	writeJSON(w, http.StatusOK, pagedEnvelope(results, total, limit, page, "name", false, "", false, ""))
+	// Real ABS LibraryController.getAuthors branches on isPaginated =
+	// (limit present & numeric) && (page present & numeric): paged envelope
+	// when true, else a bare { authors: [...] }. Emitting the paged shape for
+	// the non-paginated request crashes clients that key on `authors`.
+	q := r.URL.Query()
+	if q.Get("limit") != "" && q.Get("page") != "" {
+		writeJSON(w, http.StatusOK, pagedEnvelope(results, total, limit, page, "name", false, "", false, ""))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authors": results})
 }
 
 // handleLibrarySeries — GET /abs/api/libraries/{id}/series
@@ -403,37 +407,20 @@ func (h *Handler) handleLibrarySeries(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]map[string]any, 0, len(pageSeries))
 	for _, s := range pageSeries {
-		// books[] is what LazySeriesCard reads to populate the
-		// GroupCover stack. Each entry is a minified LibraryItem with
-		// the cover URL on media.coverPath; the mobile client's
-		// globals/getLibraryItemCoverSrc getter requires this field
-		// to render any cover image, otherwise the card falls back
-		// to a name-only placeholder.
-		books := make([]map[string]any, 0, len(s.Books))
+		// books[] is what LazySeriesCard reads to populate the GroupCover
+		// stack. Real ABS emits FULL minified library items here; a thin stub
+		// crashes strict clients (Plappa) on the first missing required key.
+		books := make([]MinifiedLibraryItem, 0, len(s.Books))
 		for _, bp := range s.Books {
 			updatedMs := int64(0)
 			if !bp.UpdatedAt.IsZero() {
 				updatedMs = bp.UpdatedAt.UnixMilli()
 			}
-			books = append(books, map[string]any{
-				"id":        bp.ContentID,
-				"libraryId": libID,
-				"mediaType": LibraryMediaType,
-				"updatedAt": updatedMs,
-				"media": map[string]any{
-					"coverPath": baseURL + "/api/items/" + bp.ContentID + "/cover",
-					"metadata":  map[string]any{"title": bp.Title},
-				},
-			})
+			books = append(books, seriesBookMinified(bp.ContentID, bp.Title, libID, baseURL, updatedMs))
 		}
-		results = append(results, map[string]any{
-			"id":        s.ID,
-			"name":      s.Name,
-			"numBooks":  s.NumBooks,
-			"libraryId": libID,
-			"addedAt":   0,
-			"books":     books,
-		})
+		obj := seriesObjectABS(s.ID, s.Name, libID, s.NumBooks)
+		obj["books"] = books
+		results = append(results, obj)
 	}
 	writeJSON(w, http.StatusOK, pagedEnvelope(results, total, limit, page, "name", false, "", false, ""))
 }
