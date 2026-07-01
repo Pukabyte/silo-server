@@ -673,8 +673,11 @@ func siloItemToLibraryItem(item *models.MediaItem, lib AudiobookLibrary, baseURL
 			NumTracks:     0, // populated by item-detail handler
 			Tags:          []string{},
 		},
-		AddedAt:   addedAtMs,
-		UpdatedAt: updatedAtMs,
+		LibraryFiles: []map[string]any{}, // populated by item-detail handler
+		LastScan:     addedAtMs,
+		ScanVersion:  ServerVersion,
+		AddedAt:      addedAtMs,
+		UpdatedAt:    updatedAtMs,
 	}
 }
 
@@ -688,6 +691,8 @@ func siloItemToLibraryItem(item *models.MediaItem, lib AudiobookLibrary, baseURL
 func siloItemToMetadata(item *models.MediaItem) Metadata {
 	authors := make([]AuthorObj, 0)
 	narrators := make([]string, 0)
+	authorNames := make([]string, 0)
+	lfNames := make([]string, 0)
 
 	for _, p := range item.People {
 		switch p.Kind {
@@ -696,12 +701,15 @@ func siloItemToMetadata(item *models.MediaItem) Metadata {
 				ID:   strconv.FormatInt(p.ID, 10),
 				Name: p.Name,
 			})
+			authorNames = append(authorNames, p.Name)
+			lfNames = append(lfNames, lastFirst(p.Name))
 		case models.PersonKindNarrator:
 			narrators = append(narrators, p.Name)
 		}
 	}
 
 	series := make([]SeriesObj, 0, len(item.AudiobookSeries))
+	seriesName := ""
 	for _, membership := range item.AudiobookSeries {
 		name := strings.TrimSpace(membership.Name)
 		if name == "" {
@@ -712,6 +720,12 @@ func siloItemToMetadata(item *models.MediaItem) Metadata {
 			obj.Sequence = strconv.FormatFloat(*membership.Index, 'f', -1, 64)
 		}
 		series = append(series, obj)
+		if seriesName == "" {
+			seriesName = name
+			if obj.Sequence != "" {
+				seriesName += " #" + obj.Sequence
+			}
+		}
 	}
 
 	publishedYear := ""
@@ -734,15 +748,22 @@ func siloItemToMetadata(item *models.MediaItem) Metadata {
 	}
 
 	return Metadata{
-		Title:         item.Title,
-		Authors:       authors,
-		Narrators:     narrators,
-		Series:        series,
-		Description:   item.Overview,
-		PublishedYear: publishedYear,
-		Publisher:     publisher,
-		Genres:        genres,
-		Tags:          tags,
+		Title:             item.Title,
+		TitleIgnorePrefix: titleIgnorePrefix(item.Title),
+		Authors:           authors,
+		AuthorName:        strings.Join(authorNames, ", "),
+		AuthorNameLF:      strings.Join(lfNames, ", "),
+		Narrators:         narrators,
+		NarratorName:      strings.Join(narrators, ", "),
+		Series:            series,
+		SeriesName:        seriesName,
+		Description:       item.Overview,
+		DescriptionPlain:  stripHTML(item.Overview),
+		PublishedYear:     publishedYear,
+		Publisher:         publisher,
+		Genres:            genres,
+		Language:          "en",
+		Tags:              tags,
 	}
 }
 
@@ -778,12 +799,34 @@ func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFi
 		}
 	}
 
+	// libraryFiles + summed size mirror real ABS toOldJSONExpanded. Each entry
+	// is the real-ABS library file shape (ino + file metadata + fileType).
+	nowMs := time.Now().UnixMilli()
+	libraryFiles := make([]map[string]any, 0, len(tracks))
+	var totalSize int64
+	for _, t := range tracks {
+		if t.Metadata != nil {
+			totalSize += t.Metadata.Size
+		}
+		libraryFiles = append(libraryFiles, map[string]any{
+			"ino":             t.Ino,
+			"metadata":        t.Metadata,
+			"isSupplementary": false,
+			"addedAt":         nowMs,
+			"updatedAt":       nowMs,
+			"fileType":        "audio",
+		})
+	}
+
 	base.Media.AudioFiles = tracks
 	base.Media.Tracks = tracks
 	base.Media.Chapters = chapters
 	base.Media.NumTracks = len(tracks)
 	base.Media.Duration = totalDuration
+	base.Media.Size = totalSize
 	base.NumTracks = len(tracks)
+	base.LibraryFiles = libraryFiles
+	base.Size = totalSize
 	return base
 }
 

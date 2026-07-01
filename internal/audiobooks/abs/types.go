@@ -94,21 +94,35 @@ type AudioTrack struct {
 // clients (Plappa, AudioBookShelfFully) branch on these keys being present
 // (even if empty), and dropping the key sends them into degraded mode.
 type Metadata struct {
-	Title         string      `json:"title"`
-	Authors       []AuthorObj `json:"authors"`
-	Narrators     []string    `json:"narrators"`
-	Series        []SeriesObj `json:"series"`
-	Description   string      `json:"description,omitempty"`
-	PublishedYear string      `json:"publishedYear,omitempty"`
-	ISBN          string      `json:"isbn,omitempty"`
-	Publisher     string      `json:"publisher,omitempty"`
-	Genres        []string    `json:"genres"`
-	Tags          []string    `json:"tags"`
+	Title             string      `json:"title"`
+	TitleIgnorePrefix string      `json:"titleIgnorePrefix"`
+	Subtitle          string      `json:"subtitle"`
+	Authors           []AuthorObj `json:"authors"`
+	AuthorName        string      `json:"authorName"`
+	AuthorNameLF      string      `json:"authorNameLF"`
+	Narrators         []string    `json:"narrators"`
+	NarratorName      string      `json:"narratorName"`
+	Series            []SeriesObj `json:"series"`
+	SeriesName        string      `json:"seriesName"`
+	Genres            []string    `json:"genres"`
+	// Nullable-in-ABS string fields are emitted as "" (never dropped) —
+	// real ABS oldMetadataToJSON always includes the key; a MISSING key is
+	// what crashes strict clients, an empty string is safe.
+	PublishedYear    string `json:"publishedYear"`
+	PublishedDate    string `json:"publishedDate"`
+	Publisher        string `json:"publisher"`
+	Description      string `json:"description"`
+	DescriptionPlain string `json:"descriptionPlain"`
+	ISBN             string `json:"isbn"`
+	ASIN             string `json:"asin"`
+	Language         string `json:"language"`
 	// Explicit is a content-warning flag the Kotlin BookMetadata declares
 	// as non-nullable Boolean. Always emit (default false). silo does not
 	// track per-item explicit metadata today; surface it when scanner-side
 	// support lands.
-	Explicit bool `json:"explicit"`
+	Explicit bool     `json:"explicit"`
+	Abridged bool     `json:"abridged"`
+	Tags     []string `json:"tags"`
 }
 
 // LibraryItemMedia carries the bulk of the audiobook metadata.
@@ -133,6 +147,10 @@ type LibraryItemMedia struct {
 	Tracks        []AudioTrack `json:"tracks"`
 	Chapters      []ChapterABS `json:"chapters"`
 	NumTracks     int          `json:"numTracks"`
+	// Size is the summed byte size of the media (real ABS
+	// Book.toOldJSONExpanded media.size). 0 when the catalog has no per-file
+	// byte sizes; populated by the detail builder.
+	Size int64 `json:"size"`
 	// Tags is a book-level tag list. NEVER null on the wire — the ABS
 	// Android client's Kotlin `Book.tags: List<String>` is non-nullable,
 	// so Jackson throws MissingKotlinParameterException when the field
@@ -213,11 +231,20 @@ type LibraryItem struct {
 	// so the client never sees them as undefined; the catalog we serve is by
 	// definition present and valid.
 	// Ref: /opt/audiobookshelf-app/pages/item/_id/index.vue:445
-	IsMissing       bool               `json:"isMissing"`
-	IsInvalid       bool               `json:"isInvalid"`
-	Media           LibraryItemMedia   `json:"media"`
-	NumTracks       int                `json:"numTracks,omitempty"`
-	AddedAt         int64              `json:"addedAt"`
-	UpdatedAt       int64              `json:"updatedAt"`
-	CollapsedSeries *CollapsedSeriesV1 `json:"collapsedSeries,omitempty"`
+	IsMissing bool `json:"isMissing"`
+	IsInvalid bool `json:"isInvalid"`
+	// OldLibraryItemID / LastScan / ScanVersion / Size / LibraryFiles mirror
+	// real ABS LibraryItem.toOldJSONExpanded. The detail builder populates
+	// LibraryFiles + Size; on the (rare) non-minified list path they default
+	// to empty/zero. OldLibraryItemID is always null (silo has no legacy IDs).
+	OldLibraryItemID *string            `json:"oldLibraryItemId"`
+	LastScan         int64              `json:"lastScan"`
+	ScanVersion      string             `json:"scanVersion"`
+	Media            LibraryItemMedia   `json:"media"`
+	LibraryFiles     []map[string]any   `json:"libraryFiles"`
+	Size             int64              `json:"size"`
+	NumTracks        int                `json:"numTracks,omitempty"`
+	AddedAt          int64              `json:"addedAt"`
+	UpdatedAt        int64              `json:"updatedAt"`
+	CollapsedSeries  *CollapsedSeriesV1 `json:"collapsedSeries,omitempty"`
 }
