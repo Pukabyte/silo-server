@@ -152,7 +152,11 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 	sortBy := q.Get("sort")
 	sortDesc := q.Get("desc") == "1"
 	filterBy := q.Get("filter")
-	minified := q.Get("minified") == "1"
+	// Real ABS getByFilterAndSort ALWAYS serializes list items minified
+	// (LibraryItem.toOldJSONMinified); the non-minified hybrid is a shape no
+	// real client requests. Default to minified; only an explicit minified=0
+	// opts into the full shape.
+	minified := q.Get("minified") != "0"
 	collapseSeries := q.Get("collapseseries") == "1"
 	include := q.Get("include")
 
@@ -652,19 +656,22 @@ func siloItemToLibraryItem(item *models.MediaItem, lib AudiobookLibrary, baseURL
 		FolderID:    VirtualFolderID,
 		Path:        "",
 		RelPath:     "",
+		IsFile:      true,
 		MtimeMs:     addedAtMs,
 		CtimeMs:     addedAtMs,
 		BirthtimeMs: addedAtMs,
 		MediaType:   LibraryMediaType,
 		Media: LibraryItemMedia{
-			Metadata:   meta,
-			Duration:   duration,
-			CoverPath:  coverPath,
-			AudioFiles: []AudioTrack{},
-			Tracks:     []AudioTrack{},
-			Chapters:   []ChapterABS{},
-			NumTracks:  0, // populated by item-detail handler
-			Tags:       []string{},
+			ID:            item.ContentID,
+			LibraryItemID: item.ContentID,
+			Metadata:      meta,
+			Duration:      duration,
+			CoverPath:     coverPath,
+			AudioFiles:    []AudioTrack{},
+			Tracks:        []AudioTrack{},
+			Chapters:      []ChapterABS{},
+			NumTracks:     0, // populated by item-detail handler
+			Tags:          []string{},
 		},
 		AddedAt:   addedAtMs,
 		UpdatedAt: updatedAtMs,
