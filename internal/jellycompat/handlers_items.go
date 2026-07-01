@@ -1621,12 +1621,17 @@ func (h *ItemsHandler) HandleSearchHints(w http.ResponseWriter, r *http.Request)
 
 	q := newCaseInsensitiveQuery(r.URL.Query())
 	query := strings.TrimSpace(q.Get("SearchTerm"))
+	// Search hints are served by the catalog search provider (the same
+	// Meilisearch-backed path as /Items media search), which does its own
+	// short-term handling and result bounding, so the aux short-term gate is
+	// intentionally NOT applied here — short titles ("Up", "It") stay
+	// discoverable through type-ahead. The result cap is still clamped below.
 	if query == "" {
 		writeJSON(w, http.StatusOK, searchHintResultDTO{})
 		return
 	}
 
-	limit := parsePositiveInt(q.Get("Limit"), 20)
+	limit := clampAuxSearchLimit(parsePositiveInt(q.Get("Limit"), auxSearchMaxResults))
 	result, err := h.content.SearchItems(r.Context(), session, SearchItemsOptions{
 		Query: query,
 		Limit: limit,
