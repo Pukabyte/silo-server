@@ -61,9 +61,9 @@ type AudioTrackMetadata struct {
 type AudioTrack struct {
 	Index                int                 `json:"index"`
 	Ino                  string              `json:"ino"`
-	Metadata             *AudioTrackMetadata `json:"metadata,omitempty"`
-	AddedAt              int64               `json:"addedAt,omitempty"`
-	UpdatedAt            int64               `json:"updatedAt,omitempty"`
+	Metadata             *AudioTrackMetadata `json:"metadata"`
+	AddedAt              int64               `json:"addedAt"`
+	UpdatedAt            int64               `json:"updatedAt"`
 	TrackNumFromMeta     *int                `json:"trackNumFromMeta"`
 	DiscNumFromMeta      *int                `json:"discNumFromMeta"`
 	TrackNumFromFilename *int                `json:"trackNumFromFilename"`
@@ -71,21 +71,26 @@ type AudioTrack struct {
 	ManuallyVerified     bool                `json:"manuallyVerified"`
 	Exclude              bool                `json:"exclude"`
 	Error                *string             `json:"error"`
-	Format               string              `json:"format,omitempty"`
-	Duration             float64             `json:"duration"`
-	BitRate              int                 `json:"bitRate,omitempty"`
-	Language             *string             `json:"language"`
-	Codec                string              `json:"codec,omitempty"`
-	TimeBase             string              `json:"timeBase,omitempty"`
-	Channels             int                 `json:"channels,omitempty"`
-	ChannelLayout        string              `json:"channelLayout,omitempty"`
-	Chapters             []ChapterABS        `json:"chapters,omitempty"`
-	EmbeddedCoverArt     any                 `json:"embeddedCoverArt"`
-	MetaTags             map[string]string   `json:"metaTags,omitempty"`
-	MimeType             string              `json:"mimeType"`
-	Title                string              `json:"title,omitempty"`
-	StartOffset          float64             `json:"startOffset"`
-	ContentURL           string              `json:"contentUrl"`
+	// Real ABS AudioFile/AudioTrack ALWAYS emit every key below. Strict
+	// clients (Prologue, yaabsa) decode these into a model with required
+	// fields, so a key omitted by omitempty on an empty value throws
+	// keyNotFound and the player reports "Unable to load book contents".
+	// chapters/metaTags must be [] / {} (non-nil), never dropped, never null.
+	Format           string            `json:"format"`
+	Duration         float64           `json:"duration"`
+	BitRate          int               `json:"bitRate"`
+	Language         *string           `json:"language"`
+	Codec            string            `json:"codec"`
+	TimeBase         string            `json:"timeBase"`
+	Channels         int               `json:"channels"`
+	ChannelLayout    string            `json:"channelLayout"`
+	Chapters         []ChapterABS      `json:"chapters"`
+	EmbeddedCoverArt any               `json:"embeddedCoverArt"`
+	MetaTags         map[string]string `json:"metaTags"`
+	MimeType         string            `json:"mimeType"`
+	Title            string            `json:"title"`
+	StartOffset      float64           `json:"startOffset"`
+	ContentURL       string            `json:"contentUrl"`
 }
 
 // Metadata is the book-level metadata block. Authors / Narrators / Series
