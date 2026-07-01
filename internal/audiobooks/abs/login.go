@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -54,13 +55,27 @@ func (h *Handler) handleStandaloneLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Real ABS (express body-parser + passport local) accepts BOTH JSON and
+	// application/x-www-form-urlencoded credential bodies; different clients
+	// send different encodings. Buffer the body once, try JSON, then fall back
+	// to form-encoded — a JSON-only parse 400s a form-encoded client, which
+	// the app surfaces as a generic "unknown error" on sign-in.
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
+	if jsonErr := json.Unmarshal(raw, &body); jsonErr != nil || strings.TrimSpace(body.Username) == "" {
+		if vals, formErr := url.ParseQuery(string(raw)); formErr == nil {
+			if u := vals.Get("username"); u != "" {
+				body.Username = u
+				body.Password = vals.Get("password")
+			}
+		}
 	}
 	if strings.TrimSpace(body.Username) == "" || body.Password == "" {
 		http.Error(w, "username and password are required", http.StatusUnauthorized)
