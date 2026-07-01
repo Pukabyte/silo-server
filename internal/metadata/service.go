@@ -19,6 +19,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/contentid"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/lang"
+	"github.com/Silo-Server/silo-server/internal/mdblist"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/naming"
 	"github.com/Silo-Server/silo-server/internal/scanner"
@@ -299,6 +300,7 @@ type MetadataService struct {
 	seasonLocalizationRepo  *catalog.SeasonLocalizationRepository
 	episodeLocalizationRepo *catalog.EpisodeLocalizationRepository
 	autoTranslator          AutoTranslator // optional; set via SetAutoTranslator
+	ratingsFetcher          RatingsFetcher // optional; set via SetRatingsFetcher
 	personRepo              *catalog.PersonRepository
 	videoRepo               metadataVideoRepo
 	fileRepo                FileContentUpdater
@@ -444,6 +446,52 @@ func NewMetadataService(
 // without it, refreshes simply skip the auto-translate hook.
 func (s *MetadataService) SetAutoTranslator(t AutoTranslator) {
 	s.autoTranslator = t
+}
+
+// RatingsFetcher fetches external ratings (e.g. Rotten Tomatoes via MDBList)
+// keyed by IMDb id. Defined here so the metadata package depends on an
+// interface rather than the concrete mdblist client; nil-safe when unset.
+type RatingsFetcher interface {
+	RatingsByIMDB(ctx context.Context, imdbID string) (*mdblist.TitleRatings, error)
+}
+
+// SetRatingsFetcher wires the external ratings source (MDBList) used to enrich
+// Rotten Tomatoes scores during refresh. Optional; without it, RT enrichment
+// is skipped.
+func (s *MetadataService) SetRatingsFetcher(f RatingsFetcher) {
+	s.ratingsFetcher = f
+}
+
+// enrichRottenTomatoes fills Rotten Tomatoes critic/audience scores on the
+// merged result from MDBList when they are absent. It is best-effort: any
+// failure is logged and swallowed so RT enrichment never fails a refresh.
+func (s *MetadataService) enrichRottenTomatoes(ctx context.Context, r *MetadataResult) {
+	if s.ratingsFetcher == nil || r == nil {
+		return
+	}
+	// Don't clobber a plugin-provided RT critic score.
+	if r.Ratings.RTCritic != 0 {
+		return
+	}
+	imdbID := r.ProviderIDs["imdb"]
+	if imdbID == "" {
+		return
+	}
+	ratings, err := s.ratingsFetcher.RatingsByIMDB(ctx, imdbID)
+	if err != nil {
+		slog.Warn("metadata: mdblist rotten tomatoes lookup failed",
+			"imdb", imdbID, "error", err)
+		return
+	}
+	if ratings == nil {
+		return
+	}
+	if ratings.RTCritic != nil {
+		r.Ratings.RTCritic = *ratings.RTCritic
+	}
+	if ratings.RTAudience != nil {
+		r.Ratings.RTAudience = *ratings.RTAudience
+	}
 }
 
 func (s *MetadataService) SetImageCacher(c ImageCacher) {
@@ -1694,6 +1742,10 @@ func (s *MetadataService) mergeAndPersist(
 	}
 
 	ApplyDefaultSortTitle(accumulator, isFieldLocked(locked, FieldName))
+
+	// Enrich Rotten Tomatoes scores from MDBList when a plugin did not already
+	// provide them. Best-effort: failures must never fail the refresh.
+	s.enrichRottenTomatoes(ctx, accumulator)
 
 	// Build the item for persistence.
 	now := time.Now()
