@@ -176,7 +176,7 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		dto.ProductionLocations = append([]string{}, item.Countries...)
 	}
 	if allFields || fields["criticrating"] {
-		dto.CriticRating = item.RatingTMDB
+		dto.CriticRating = intPtrToFloatPtr(item.RatingRTCritic)
 	}
 	if allFields || fields["mediasourcecount"] {
 		// The list path has no version data, so assume matched playable items
@@ -311,6 +311,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		Genres:            item.Genres,
 		ContentRating:     item.ContentRating,
 		RatingIMDB:        item.RatingIMDB,
+		RatingRTCritic:    item.RatingRTCritic,
 		Overview:          item.Overview,
 		PosterURL:         item.PosterURL,
 		BackdropURL:       item.BackdropURL,
@@ -373,7 +374,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 	dto.OriginalTitle = firstNonEmpty(item.OriginalTitle, item.Title)
 	dto.SortName = firstNonEmpty(item.SortTitle, item.OriginalTitle, item.Title)
 	dto.ForcedSortName = dto.SortName
-	dto.CriticRating = item.RatingTMDB
+	dto.CriticRating = intPtrToFloatPtr(item.RatingRTCritic)
 	dto.Studios = m.namePairs(item.Studios, EncodedIDStudio)
 	dto.ProductionLocations = append([]string{}, item.Countries...)
 	if item.Tagline != "" {
@@ -853,6 +854,16 @@ func derefString(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// intPtrToFloatPtr converts a *int (e.g. RatingRTCritic, 0-100) to a *float64
+// for DTO fields typed as float64. nil in, nil out — no fake data.
+func intPtrToFloatPtr(v *int) *float64 {
+	if v == nil {
+		return nil
+	}
+	f := float64(*v)
+	return &f
 }
 
 func detailMediaSourceDTO(sourceID string, version catalog.FileVersion, streams []mediaStreamDTO) mediaSourceDTO {

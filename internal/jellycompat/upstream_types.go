@@ -54,6 +54,7 @@ type upstreamListItem struct {
 	Countries         []string                `json:"countries,omitempty"`
 	Tagline           string                  `json:"tagline,omitempty"`
 	RatingTMDB        *float64                `json:"rating_tmdb,omitempty"`
+	RatingRTCritic    *int                    `json:"rating_rt_critic,omitempty"`
 	UserData          *catalog.SeasonUserData `json:"user_data,omitempty"`
 	// HasMediaFiles reports whether at least one live media file backs this
 	// item. nil means unknown (the producing query did not check); the mapper
@@ -81,6 +82,7 @@ type upstreamItemDetail struct {
 	Genres            []string                `json:"genres"`
 	RatingIMDB        *float64                `json:"rating_imdb"`
 	RatingTMDB        *float64                `json:"rating_tmdb"`
+	RatingRTCritic    *int                    `json:"rating_rt_critic,omitempty"`
 	PosterURL         string                  `json:"poster_url"`
 	BackdropURL       string                  `json:"backdrop_url"`
 	LogoURL           string                  `json:"logo_url"`
