@@ -1702,6 +1702,10 @@ func main() {
 			configWatcher.OnChange(func(_, updated *config.Config) {
 				mdblistForReload.SetAPIKey(updated.MDBListAPIKey)
 			})
+			// Feed Rotten Tomatoes scores from MDBList into metadata refreshes.
+			if metadataService != nil {
+				metadataService.SetRatingsFetcher(deps.MDBListClient)
+			}
 		}
 	}
 
