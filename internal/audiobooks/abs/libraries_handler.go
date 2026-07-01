@@ -430,11 +430,17 @@ func (h *Handler) handleLibrarySeries(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLibrarySearch — GET /abs/api/libraries/{id}/search?q=…&limit=…
-// Returns matching books grouped under "book", with empty arrays for the
-// other ABS-standard buckets (podcast, series, authors, tags). Bucket
-// names match continuum-plugin-audiobooks exactly: note "authors" plural,
-// not "author" — ABS mobile clients key off the plural form and a
-// singular bucket is silently dropped.
+//
+// Matches server/utils/queries/libraryItemsBookFilters.js `search()` (real
+// ABS branches to the book-filter search for a non-podcast library, which
+// is all Silo ever serves). That function returns exactly these keys:
+// book, narrators, tags, genres, series, authors — there is NO "podcast"
+// key for a book-library search (that only appears from the separate
+// podcast-filter branch). Each book entry is `{ libraryItem }` — real ABS
+// does not include matchKey/matchText on book entries (those only exist
+// on the interactive-search HTML autocomplete, not this JSON endpoint).
+// We keep an extra empty "podcast" bucket anyway since an extra key never
+// crashes a strict client, only a missing one does.
 func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 	lib, ok := h.resolveLibrary(w, r)
 	if !ok {
@@ -446,11 +452,13 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	empty := map[string]any{
-		"book":    []any{},
-		"podcast": []any{},
-		"series":  []any{},
-		"authors": []any{},
-		"tags":    []any{},
+		"book":      []any{},
+		"podcast":   []any{},
+		"narrators": []any{},
+		"tags":      []any{},
+		"genres":    []any{},
+		"series":    []any{},
+		"authors":   []any{},
 	}
 	if q == "" {
 		writeJSON(w, http.StatusOK, empty)
@@ -467,16 +475,89 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	baseURL := h.absBaseURL(r)
+	libID := audiobookLibraryID(lib)
 	books := make([]map[string]any, 0, len(items))
 	for _, it := range items {
 		books = append(books, map[string]any{
 			"libraryItem": siloItemToLibraryItem(it, lib, baseURL),
-			"matchKey":    "title",
-			"matchText":   it.Title,
 		})
 	}
+
+	// Best-effort author/series buckets: silo has no dedicated search-scoped
+	// store query for these yet, so we reuse the existing aggregate listers
+	// (capped, same pattern as buildFilterData/handleLibraryAuthors/
+	// handleLibrarySeries) and filter client-side on a case-insensitive
+	// substring match. narrators/tags/genres have no backing aggregation
+	// query at all in silo's catalog today and stay empty-but-present.
+	qLower := strings.ToLower(q)
+	const fetchCap = 5000
+
+	authorsOut := []any{}
+	if rows, err := h.deps.MediaStore.ListLibraryAuthors(r.Context(), lib.ID, fetchCap, access); err == nil {
+		for _, a := range rows {
+			if !strings.Contains(strings.ToLower(a.Name), qLower) {
+				continue
+			}
+			authorsOut = append(authorsOut, map[string]any{
+				"id":        a.ID,
+				"name":      a.Name,
+				"numBooks":  a.NumBooks,
+				"libraryId": libID,
+			})
+			if len(authorsOut) >= limit {
+				break
+			}
+		}
+	}
+
+	seriesOut := []any{}
+	if rows, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, fetchCap, access); err == nil {
+		for _, s := range rows {
+			if !strings.Contains(strings.ToLower(s.Name), qLower) {
+				continue
+			}
+			// Real ABS wraps series search hits as { series, books } — the
+			// series sub-object is the plain Series.toOldJSON() shape (no
+			// numBooks field there; we add it anyway since an extra key is
+			// harmless), matched here with the same per-book thin map
+			// handleLibrarySeries above uses for its books[] entries.
+			seriesBooks := make([]map[string]any, 0, len(s.Books))
+			for _, bp := range s.Books {
+				updatedMs := int64(0)
+				if !bp.UpdatedAt.IsZero() {
+					updatedMs = bp.UpdatedAt.UnixMilli()
+				}
+				seriesBooks = append(seriesBooks, map[string]any{
+					"id":        bp.ContentID,
+					"libraryId": libID,
+					"mediaType": LibraryMediaType,
+					"updatedAt": updatedMs,
+					"media": map[string]any{
+						"coverPath": baseURL + "/api/items/" + bp.ContentID + "/cover",
+						"metadata":  map[string]any{"title": bp.Title},
+					},
+				})
+			}
+			seriesOut = append(seriesOut, map[string]any{
+				"series": map[string]any{
+					"id":        s.ID,
+					"name":      s.Name,
+					"numBooks":  s.NumBooks,
+					"libraryId": libID,
+					"addedAt":   0,
+				},
+				"books": seriesBooks,
+			})
+			if len(seriesOut) >= limit {
+				break
+			}
+		}
+	}
+
 	out := empty
 	out["book"] = books
+	out["authors"] = authorsOut
+	out["series"] = seriesOut
 	writeJSON(w, http.StatusOK, out)
 }
 
