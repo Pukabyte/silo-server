@@ -354,7 +354,31 @@ func (h *Handler) loginEnvelope(
 		"podcastEpisodeSchedule":            "0 * * * *",
 		"sortingIgnorePrefixesValue":        "",
 		"allowIframe":                       false,
-		"authActiveAuthMethods":             []string{"local"},
+		// Auth / rate-limit / OpenID fields from real ABS
+		// ServerSettings.toJSONForBrowser. OIDC-aware clients (Prologue)
+		// decode serverSettings into a strict model that includes these keys;
+		// omitting them throws keyNotFound and the whole login response fails
+		// to decode ("unknown error" on the login screen). Emit real ABS's
+		// defaults for an OIDC-disabled server — authActiveAuthMethods still
+		// advertises only "local", so no client tries the OpenID flow.
+		"rateLimitLoginRequests":             10,
+		"rateLimitLoginWindow":               600000,
+		"backupPath":                         "/metadata/backups",
+		"allowedOrigins":                     []string{},
+		"authActiveAuthMethods":              []string{"local"},
+		"authLoginCustomMessage":             nil,
+		"authOpenIDIssuerURL":                nil,
+		"authOpenIDAuthorizationURL":         nil,
+		"authOpenIDTokenURL":                 nil,
+		"authOpenIDUserInfoURL":              nil,
+		"authOpenIDJwksURL":                  nil,
+		"authOpenIDLogoutURL":                nil,
+		"authOpenIDTokenSigningAlgorithm":    "RS256",
+		"authOpenIDButtonText":               "Login with OpenID",
+		"authOpenIDAutoLaunch":               false,
+		"authOpenIDAutoRegister":             false,
+		"authOpenIDMatchExistingBy":          nil,
+		"authOpenIDSubfolderForRedirectURLs": "",
 	}
 
 	return map[string]any{
