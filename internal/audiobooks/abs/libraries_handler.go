@@ -854,12 +854,16 @@ func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFi
 
 	tracks := siloFilesToAudioTracks(item.ContentID, files, baseURL, "")
 
-	// Recompute duration from files if the item's Runtime is zero.
-	totalDuration := base.Media.Duration
+	// media.duration is the summed track duration (real ABS: sum of audio file
+	// durations), NOT the item's Runtime — Runtime is often stale/mis-scanned
+	// (e.g. 222s for a 3.7h book), which desyncs the player's scrubber. Fall
+	// back to Runtime only when there are no tracks to sum.
+	totalDuration := float64(0)
+	for _, t := range tracks {
+		totalDuration += t.Duration
+	}
 	if totalDuration == 0 {
-		for _, t := range tracks {
-			totalDuration += t.Duration
-		}
+		totalDuration = base.Media.Duration
 	}
 
 	// Chapters from the first file that has them.
@@ -972,6 +976,7 @@ func siloFilesToAudioTracks(contentID string, files []*models.MediaFile, baseURL
 			TimeBase:         "1/14112000",
 			Channels:         channels,
 			ChannelLayout:    channelLayout,
+			Chapters:         []ChapterABS{},
 			EmbeddedCoverArt: nil,
 			MetaTags:         map[string]string{},
 			MimeType:         mimeType,
