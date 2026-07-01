@@ -145,11 +145,20 @@ func (s *Service) BuildABSHandler(deps ABSHandlerDeps) *abs.Handler {
 		socketServer = abssocket.New(secretFn, tokenValidator, nil, nil)
 	}
 
+	// GET /me only has the token's userID; source a resolver from the concrete
+	// SiloCredValidator (which holds the pgx pool) so /me can show the real
+	// display username instead of the numeric id.
+	var usernameResolver func(ctx context.Context, userID, profileID string) string
+	if scv, ok := deps.Auth.(*SiloCredValidator); ok {
+		usernameResolver = scv.ResolveUsername
+	}
+
 	h := abs.New(abs.Dependencies{
 		MediaStore:           mediaStore,
 		TokenStore:           tokenStore,
 		CredValidator:        deps.Auth,
 		AccessResolver:       deps.AccessResolver,
+		UsernameResolver:     usernameResolver,
 		Config:               configProvider,
 		Publisher:            nil, // EventPublisher: no-op stub; Socket.io handles realtime
 		Recommender:          buildABSRecommender(deps),
