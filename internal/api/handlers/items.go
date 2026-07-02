@@ -21,6 +21,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/overlays"
+	"github.com/Silo-Server/silo-server/internal/rtbackfill"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
@@ -70,7 +71,7 @@ type ItemsHandler struct {
 	profileStaler            ProfileStaler
 	profileRefreshRequester  ProfileRefreshRequester
 	metadataRefreshRequester MetadataRefreshRequester
-	rtBackfill               *rtBackfiller
+	rtBackfill               *rtbackfill.Backfiller
 	localWatchDispatcher     LocalWatchEventDispatcher
 	ebookProgressStore       EbookReaderProgressLister
 	ebookReadStateStore      EbookReadStateStore
@@ -150,11 +151,8 @@ func (h *ItemsHandler) SetEbookReaderProgressStore(store EbookReaderProgressRead
 // SetRottenTomatoesBackfill wires the on-view Rotten Tomatoes backfill using
 // the MDBList ratings client and the handler's item repository. Optional;
 // without it, RT scores are only populated during full metadata refreshes.
-func (h *ItemsHandler) SetRottenTomatoesBackfill(fetcher rtRatingsFetcher) {
-	if h == nil || h.itemRepo == nil {
-		return
-	}
-	h.rtBackfill = newRTBackfiller(fetcher, h.itemRepo)
+func (h *ItemsHandler) SetRottenTomatoesBackfill(b *rtbackfill.Backfiller) {
+	h.rtBackfill = b
 }
 
 // maybeBackfillRottenTomatoes lazily fills a movie or series' RT score from

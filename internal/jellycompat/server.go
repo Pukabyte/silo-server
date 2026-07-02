@@ -15,6 +15,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
+	"github.com/Silo-Server/silo-server/internal/rtbackfill"
 	"github.com/Silo-Server/silo-server/internal/scantrigger"
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
@@ -73,6 +74,10 @@ type Dependencies struct {
 
 	// Person repository
 	PersonRepo *catalog.PersonRepository
+
+	// RTBackfiller is optional; when set, viewing a movie/series over the
+	// Jellyfin surface triggers the shared lazy Rotten Tomatoes backfill.
+	RTBackfiller *rtbackfill.Backfiller
 
 	// Library poster presigning
 	PosterPresigner LibraryPosterPresigner
