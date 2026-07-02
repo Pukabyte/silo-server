@@ -484,42 +484,67 @@ func (s *ABSMediaStore) listAudiobookIDs(ctx context.Context, sql string, args [
 	return ordered, nil
 }
 
-// SearchAudiobooks matches the query against title (case-insensitive
-// substring) plus author/narrator name. Capped by limit; ordered by
-// title-prefix match first then alphabetical.
+// SearchAudiobooks matches the query against title plus author/narrator name.
+// Capped by limit; ordered by title-prefix match first, then title substring,
+// then author/narrator matches, then alphabetical.
+//
+// Both arms are shaped to hit the existing pg_trgm GIN indexes rather than
+// seq-scanning the whole library: the title arm matches media_items.
+// title_normalized (idx_media_items_title_normalized_trgm) using the same
+// normalize_search_text() the rest of catalog search uses, and the people arm
+// matches people.name (idx_people_name_trgm). Running them as a UNION lets the
+// planner drive each arm from its own index; GROUP BY content_id keeps the best
+// rank when an item matches both. normalize_search_text($2) <> ” guards a
+// punctuation-only query from degenerating into ILIKE '%%' over everything.
 func (s *ABSMediaStore) SearchAudiobooks(ctx context.Context, libraryID int64, query string, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 12
 	}
-	conditions := []string{`mi.type = 'audiobook'`, `(
-		mi.title ILIKE $1
-		OR EXISTS (
-			SELECT 1 FROM item_people ip
-			JOIN people p ON p.id = ip.person_id
-			WHERE ip.content_id = mi.content_id
-			  AND ip.kind IN (7, 8)
-			  AND p.name ILIKE $1
-		)
-	)`}
+	// $1 = raw-query substring pattern for people.name; $2 = raw query, normalized
+	// in-SQL for the title arm.
 	args := []any{"%" + query + "%", query}
 	argIdx := 3
+
+	// Library + access predicates are identical in both UNION arms and reuse the
+	// same positional placeholders, so append their args only once.
+	scopeConds := []string{}
 	if libraryID != 0 {
-		conditions = append(conditions, fmt.Sprintf(`EXISTS (
+		scopeConds = append(scopeConds, fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM media_item_libraries mil
 			WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d
 		)`, argIdx))
 		args = append(args, int(libraryID))
 		argIdx++
 	}
-	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	appendAudiobookAccessConditions("mi", access, &scopeConds, &args, &argIdx)
+	scope := ""
+	if len(scopeConds) > 0 {
+		scope = " AND " + strings.Join(scopeConds, " AND ")
+	}
 	args = append(args, limit)
+
 	sql := `
-		SELECT mi.content_id FROM media_items mi
-		WHERE ` + strings.Join(conditions, " AND ") + `
-		ORDER BY
-		  CASE WHEN LOWER(mi.title) LIKE LOWER($2) || '%' THEN 0 ELSE 1 END,
-		  LOWER(mi.sort_title),
-		  LOWER(mi.title)
+		SELECT content_id FROM (
+			SELECT mi.content_id AS content_id, mi.sort_title AS sort_title, mi.title AS title,
+			       CASE WHEN mi.title_normalized LIKE normalize_search_text($2) || '%' THEN 0 ELSE 1 END AS rank
+			FROM media_items mi
+			WHERE mi.type = 'audiobook'
+			  AND normalize_search_text($2) <> ''
+			  AND mi.title_normalized ILIKE '%' || normalize_search_text($2) || '%'` + scope + `
+			UNION ALL
+			SELECT mi.content_id AS content_id, mi.sort_title AS sort_title, mi.title AS title, 2 AS rank
+			FROM media_items mi
+			WHERE mi.type = 'audiobook'
+			  AND EXISTS (
+			      SELECT 1 FROM item_people ip
+			      JOIN people p ON p.id = ip.person_id
+			      WHERE ip.content_id = mi.content_id
+			        AND ip.kind IN (7, 8)
+			        AND p.name ILIKE $1
+			  )` + scope + `
+		) m
+		GROUP BY content_id, sort_title, title
+		ORDER BY MIN(rank), LOWER(sort_title), LOWER(title)
 		LIMIT $` + strconv.Itoa(argIdx) + `
 	`
 	return s.listAudiobookIDs(ctx, sql, args)
