@@ -748,6 +748,13 @@ func NewRouter(deps Dependencies) chi.Router {
 			playbackHandler.SessionSyncer = deps.SessionSyncer
 		}
 		if streamHandler != nil {
+			// Share the playback handler's transcode/reconstruct manager so a
+			// direct/remux stream can rebuild its session from the token recipe
+			// after a restart (same manager, same SessionManager).
+			streamHandler.TM = playbackHandler.TranscodeManager()
+			if deps.Config != nil {
+				streamHandler.JWTSecret = deps.Config.Auth.JWTSecret
+			}
 			streamHandler.AdminStore = playbackAdminStore
 			streamHandler.EventsHub = deps.EventsHub
 			streamHandler.SessionSyncer = deps.SessionSyncer

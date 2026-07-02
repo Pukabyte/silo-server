@@ -69,6 +69,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
 	"github.com/Silo-Server/silo-server/internal/notifications"
 	"github.com/Silo-Server/silo-server/internal/opslog"
@@ -616,6 +617,10 @@ func main() {
 		} else {
 			srv := transcodenode.NewServer(watcher, tracker)
 			srv.SetFFmpegLogSink(playback.NewSlogFFmpegLogSink(slog.Default(), nodeID))
+			// Read jellycompat reconstruction recipes central wrote at transcode
+			// start, so this node can rebuild a Jellyfin transcode after its own
+			// restart (the node hop token is recipe-less). Shares the offload Redis.
+			srv.SetRecipeStore(noderecipe.NewStore(redisClient, 0))
 			handler = srv.Handler()
 		}
 
@@ -1399,6 +1404,7 @@ func main() {
 		)
 		userStoreProvider = notifications.WrapUserStoreProvider(userStoreProvider, notificationSystem)
 		deps.Notifications = notificationSystem
+
 		if libraryIngestExecutor != nil {
 			libraryIngestExecutor.SetAvailabilityDetector(notificationSystem.Detector)
 		}
@@ -2183,7 +2189,10 @@ func main() {
 			JWTSecret:        cfg.Auth.JWTSecret,
 			RecWorker:        recWorker,
 			FrontendFS:       deps.FrontendFS,
-			SessionSyncer:    deps.SessionSyncer,
+			// Hand remote-transcode recipes to the shared recipe store so a dedicated
+			// transcode node that restarts can rebuild a jellycompat session.
+			RecipeNodeStore: noderecipe.NewStore(apiRedisClient, 0),
+			SessionSyncer:   deps.SessionSyncer,
 		}
 
 		// Wire direct dependencies when DB is available.
