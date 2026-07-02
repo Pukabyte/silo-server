@@ -61,7 +61,7 @@ func newReportLivenessHandler(upstreamID string, registerUpstream bool) (*Playba
 		codec:         codec,
 		playbackStore: playbackStore,
 		sessionMgr:    sessionMgr,
-		transcodes:    make(map[string]*playback.TranscodeSession),
+		tm:            playback.NewTranscodeManager(),
 	}
 	return handler, sessionMgr, encodedItemID, source.ID
 }
@@ -371,7 +371,9 @@ func TestHandlePlaybackReport_StopViaRouteMatchDoesNotTearDown(t *testing.T) {
 // a second ffmpeg would start alongside the orphaned one.
 func TestEnsureUpstreamPlayback_ReviveClosesStaleTranscode(t *testing.T) {
 	handler, mgr, _, _ := newReportLivenessHandler("upstream-reaped", false)
-	handler.transcodes["upstream-reaped"] = nil // stale entry keyed by the reaped id
+	// Stale transcode still keyed by the reaped id (never-started session; Close is a no-op).
+	staleTranscode := &playback.TranscodeSession{}
+	handler.tm.RegisterTranscodeSession("upstream-reaped", staleTranscode)
 
 	playSession, _ := handler.playbackStore.Get("play-1")
 	source := playSession.MediaSources[0]
@@ -384,7 +386,7 @@ func TestEnsureUpstreamPlayback_ReviveClosesStaleTranscode(t *testing.T) {
 	if mgr.startCalls != 1 {
 		t.Fatalf("StartSession calls = %d, want 1", mgr.startCalls)
 	}
-	if _, stale := handler.transcodes["upstream-reaped"]; stale {
+	if handler.tm.GetTranscodeSession("upstream-reaped") != nil {
 		t.Fatal("expected the stale transcode entry to be closed before recreating the upstream session")
 	}
 }
@@ -507,7 +509,7 @@ func TestHandlePlaybackReport_AliasContradictedByItemFallsBack(t *testing.T) {
 // play session is re-pointed at a different upstream id/method.
 type racingStartSessionManager struct {
 	testCompatSessionManager
-	store        *PlaybackSessionStore
+	store        CompatPlaybackStore
 	winnerMethod string
 }
 

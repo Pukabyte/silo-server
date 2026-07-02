@@ -239,7 +239,7 @@ func TestHandlePlaybackReport_UpdatesSelectedAudioStreamAndUpstreamTrack(t *test
 	handler := &PlaybackHandler{
 		playbackStore: playbackStore,
 		sessionMgr:    sessionMgr,
-		transcodes:    make(map[string]*playback.TranscodeSession),
+		tm:            playback.NewTranscodeManager(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Progress", strings.NewReader(`{"PlaySessionId":"play-1","MediaSourceId":"`+source.ID+`","AudioStreamIndex":2,"PositionTicks":30000000}`))
@@ -293,7 +293,7 @@ func TestEnsureTranscodeSession_UsesSelectedAudioTrack(t *testing.T) {
 		fileResolver:  testCompatFileResolver{file: &models.MediaFile{ID: version.FileID, FilePath: filePath}},
 		TranscodeDir:  t.TempDir(),
 		FFmpegPath:    writeCompatTestFFmpeg(t),
-		transcodes:    make(map[string]*playback.TranscodeSession),
+		tm:            playback.NewTranscodeManager(),
 	}
 
 	transcodeSession, err := handler.ensureTranscodeSession(context.Background(), "play-1", "upstream-1", source)
@@ -327,9 +327,16 @@ func TestStartRemoteTranscode_IncludesSelectedAudioTrack(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := &PlaybackHandler{JWTSecret: "secret"}
+	playbackStore := NewPlaybackSessionStore(time.Hour, nil)
+	playbackStore.Put(PlaybackSession{ID: "play-1", UpstreamSessionID: "upstream-1"})
+	handler := &PlaybackHandler{
+		JWTSecret:     "secret",
+		playbackStore: playbackStore,
+		tm:            playback.NewTranscodeManager(),
+	}
 	if err := handler.startRemoteTranscode(
 		context.Background(),
+		"play-1",
 		"upstream-1",
 		source,
 		&models.MediaFile{ID: version.FileID, FilePath: filePath},
