@@ -1303,6 +1303,7 @@ func itemDetailToUpstream(d *catalog.ItemDetail) upstreamItemDetail {
 		Runtime:        d.Runtime,
 		ContentRating:  d.ContentRating,
 		Genres:         d.Genres,
+		ImdbID:         d.ImdbID,
 		RatingIMDB:     d.RatingIMDB,
 		RatingTMDB:     d.RatingTMDB,
 		RatingRTCritic: d.RatingRTCritic,

@@ -80,6 +80,7 @@ type upstreamItemDetail struct {
 	Runtime           int                     `json:"runtime"`
 	ContentRating     string                  `json:"content_rating"`
 	Genres            []string                `json:"genres"`
+	ImdbID            string                  `json:"imdb_id,omitempty"`
 	RatingIMDB        *float64                `json:"rating_imdb"`
 	RatingTMDB        *float64                `json:"rating_tmdb"`
 	RatingRTCritic    *int                    `json:"rating_rt_critic,omitempty"`

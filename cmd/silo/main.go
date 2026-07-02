@@ -83,6 +83,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/ratelimit"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
+	"github.com/Silo-Server/silo-server/internal/rtbackfill"
 	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 	"github.com/Silo-Server/silo-server/internal/scanqueue"
@@ -1876,6 +1877,10 @@ func main() {
 			if metadataService != nil {
 				metadataService.SetRatingsFetcher(deps.MDBListClient)
 			}
+			// One shared on-view RT backfiller for both the native item detail
+			// handler and the Jellyfin compat surface (single in-flight/negative
+			// cache).
+			deps.RTBackfiller = rtbackfill.New(deps.MDBListClient, catalog.NewItemRepository(deps.DB))
 		}
 	}
 
@@ -2395,6 +2400,7 @@ func main() {
 			// transcode node that restarts can rebuild a jellycompat session.
 			RecipeNodeStore: noderecipe.NewStore(apiRedisClient, 0),
 			SessionSyncer:   deps.SessionSyncer,
+			RTBackfiller:    deps.RTBackfiller,
 		}
 
 		// Wire direct dependencies when DB is available.

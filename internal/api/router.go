@@ -55,6 +55,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/ratelimit"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
+	"github.com/Silo-Server/silo-server/internal/rtbackfill"
 	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 	"github.com/Silo-Server/silo-server/internal/scanqueue"
@@ -180,6 +181,11 @@ type Dependencies struct {
 	// (search/top). May be nil; the handlers report "not configured" in
 	// that case rather than failing.
 	MDBListClient *mdblist.Client
+
+	// RTBackfiller is the shared on-view Rotten Tomatoes backfiller, used by
+	// both the native item-detail handler and the Jellyfin compat surface so
+	// they dedupe against one in-flight/negative cache. May be nil.
+	RTBackfiller *rtbackfill.Backfiller
 
 	// ABSHandler is the Audiobookshelf-compatible HTTP handler. When non-nil
 	// it is mounted at the root router level (not under /api/v1/) so that ABS
@@ -594,8 +600,8 @@ func NewRouter(deps Dependencies) chi.Router {
 		if deps.WatchCompletionObserver != nil {
 			itemsHandler.SetCompletionObserver(deps.WatchCompletionObserver)
 		}
-		if deps.MDBListClient != nil {
-			itemsHandler.SetRottenTomatoesBackfill(deps.MDBListClient)
+		if deps.RTBackfiller != nil {
+			itemsHandler.SetRottenTomatoesBackfill(deps.RTBackfiller)
 		}
 		if ebookProgressStore != nil {
 			itemsHandler.SetEbookReaderProgressStore(ebookProgressStore)

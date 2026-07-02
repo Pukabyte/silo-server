@@ -24,6 +24,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
+	"github.com/Silo-Server/silo-server/internal/rtbackfill"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
@@ -61,6 +62,11 @@ type ItemsHandler struct {
 	// unbounded progress scan. It is the section subsystem's read-time fetcher and
 	// is independent of any virtual-library/hub-section exposure.
 	sectionsFetcher *sections.Fetcher
+	// rtBackfill is optional; when set, viewing a movie/series with no Rotten
+	// Tomatoes score triggers the same lazy MDBList backfill as the native
+	// catalog surface. Shared instance so both surfaces dedupe against one
+	// in-flight/negative cache.
+	rtBackfill *rtbackfill.Backfiller
 }
 
 // NewItemsHandler creates a new items handler.
@@ -291,6 +297,29 @@ func searchItemTypesForQuery(query itemsQuery) []string {
 	return itemTypes
 }
 
+// SetRottenTomatoesBackfill wires the on-view RT backfill shared with the
+// native catalog surface. Optional; when unset, RT scores are only populated
+// during metadata refresh and native item views.
+func (h *ItemsHandler) SetRottenTomatoesBackfill(b *rtbackfill.Backfiller) {
+	h.rtBackfill = b
+}
+
+// maybeBackfillRottenTomatoes lazily fills a movie or series' RT score from
+// MDBList when it is missing and an IMDb id is known. Async and best-effort;
+// the value appears on the next detail load.
+func (h *ItemsHandler) maybeBackfillRottenTomatoes(detail *upstreamItemDetail) {
+	if h == nil || h.rtBackfill == nil || detail == nil {
+		return
+	}
+	if detail.Type != "movie" && detail.Type != "series" {
+		return
+	}
+	if detail.RatingRTCritic != nil || detail.ImdbID == "" {
+		return
+	}
+	h.rtBackfill.Enqueue(detail.ContentID, detail.ImdbID)
+}
+
 // HandleItem serves GET /Items/{id}.
 func (h *ItemsHandler) HandleItem(w http.ResponseWriter, r *http.Request) {
 	session := SessionFromContext(r.Context())
@@ -350,6 +379,7 @@ func (h *ItemsHandler) HandleItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.rememberDetailImages(*detail)
+	h.maybeBackfillRottenTomatoes(detail)
 
 	favorites, progress, err := resolveUserStateForContentIDs(r.Context(), session, h.userData, []string{detail.ContentID})
 	if err != nil {
