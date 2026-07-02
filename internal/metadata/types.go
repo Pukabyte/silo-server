@@ -244,6 +244,9 @@ type CacheImageResult struct {
 	BasePath  string // S3 key prefix
 	Thumbhash string // base64-encoded
 	Ext       string // file extension including dot (e.g. ".jpg", ".png")
+
+	UploadedVariants int
+	ExistingVariants int
 }
 
 // ImageCacher caches a remote image to object storage.

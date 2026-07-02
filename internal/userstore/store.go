@@ -41,6 +41,10 @@ type UserStore interface {
 	// access/parental exclusions over the returned rows.
 	ListProgressFiltered(ctx context.Context, profileID, status string, types []string, libraryID *int, limit, offset int) ([]WatchProgress, error)
 	ListProgressByMediaItems(ctx context.Context, profileID string, mediaItemIDs []string) (map[string]WatchProgress, error)
+	// ListProgressSince returns rows whose server cursor exceeds the opaque
+	// cursor token (empty = full delta), in cursor order, with the next cursor.
+	// Cross-device delta delivery depends only on the server-assigned synced_seq.
+	ListProgressSince(ctx context.Context, profileID, cursor string) ([]WatchProgress, string, error)
 	AddHistory(ctx context.Context, entry WatchHistoryEntry) error
 	AddHistoryIfMissing(ctx context.Context, entry WatchHistoryEntry) (bool, error)
 	ListHistory(ctx context.Context, profileID string, limit, offset int) ([]WatchHistoryEntry, error)
