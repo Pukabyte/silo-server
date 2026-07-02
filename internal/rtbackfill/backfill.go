@@ -97,11 +97,15 @@ func (b *Backfiller) claim(contentID string) bool {
 	return true
 }
 
-func (b *Backfiller) release(contentID string, foundRT bool) {
+// release clears the in-flight reservation and, only when negativeCache is
+// true, records a negative-cache entry. Transient failures (fetch/persist
+// errors) must pass false so the next view can retry immediately; only a
+// successful lookup that genuinely has no RT score should be cached.
+func (b *Backfiller) release(contentID string, negativeCache bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.inflight, contentID)
-	if !foundRT {
+	if negativeCache {
 		b.negative[contentID] = b.now().Add(negativeTTL)
 	}
 }
@@ -110,8 +114,11 @@ func (b *Backfiller) run(contentID, imdbID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), backfillTimeout)
 	defer cancel()
 
-	foundRT := false
-	defer func() { b.release(contentID, foundRT) }()
+	// Only a successful lookup that returned no RT score should negative-cache.
+	// Errors leave this false so the item is retried on the next view instead
+	// of being silently skipped for the whole TTL.
+	negativeCache := false
+	defer func() { b.release(contentID, negativeCache) }()
 
 	ratings, err := b.fetcher.RatingsByIMDB(ctx, imdbID)
 	if err != nil {
@@ -120,7 +127,8 @@ func (b *Backfiller) run(contentID, imdbID string) {
 		return
 	}
 	if ratings == nil || ratings.RTCritic == nil {
-		// Nothing to store; negative-cache so we don't retry on every open.
+		// Genuine "no RT score upstream": cache so we don't re-fetch on every open.
+		negativeCache = true
 		return
 	}
 
@@ -136,5 +144,4 @@ func (b *Backfiller) run(contentID, imdbID string) {
 			"content_id", contentID, "imdb", imdbID, "error", err)
 		return
 	}
-	foundRT = true
 }
