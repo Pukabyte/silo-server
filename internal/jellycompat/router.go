@@ -349,6 +349,7 @@ func withDefaults(deps Dependencies) Dependencies {
 			staler,
 			deps.RecWorker,
 			deps.WatchCompletionObserver,
+			deps.LocalWatchDispatcher,
 		)
 	}
 

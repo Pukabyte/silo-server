@@ -2219,6 +2219,9 @@ func main() {
 			compatDeps.SessionMgr = sessionMgr
 			compatDeps.UserStoreProvider = userStoreProvider
 			compatDeps.WatchCompletionObserver = deps.WatchCompletionObserver
+			if watchProviderService != nil {
+				compatDeps.LocalWatchDispatcher = watchProviderService
+			}
 			compatDeps.SettingsRepo = settingsRepo
 			compatDeps.PersonRepo = personRepo
 			compatSearchService := catalog.NewCatalogSearchService(

@@ -47,9 +47,10 @@ type MetadataRefreshRequester interface {
 	RequestStaleMetadataRefresh(ctx context.Context, targetType, contentID string) error
 }
 
-type LocalWatchEventDispatcher interface {
-	HandleLocalWatchEvent(ctx context.Context, event watchsync.LocalWatchEvent) error
-}
+// LocalWatchEventDispatcher aliases the shared watchsync dispatcher interface so
+// the native items handler and jellycompat both wire the same concrete
+// *watchsync.Service through one type.
+type LocalWatchEventDispatcher = watchsync.LocalWatchEventDispatcher
 
 type EbookReaderProgressLister interface {
 	ListByContentIDs(ctx context.Context, userID int, profileID string, contentIDs []string) (map[string]EbookReaderProgress, error)
@@ -444,21 +445,10 @@ func (h *ItemsHandler) dispatchLocalWatchEvent(
 	profileID string,
 	result watchstate.ManualMarkResult,
 ) {
-	if h == nil || h.localWatchDispatcher == nil {
+	if h == nil {
 		return
 	}
-	plays := watchsync.LocalPlaysFromHistory(result.Entries)
-	if len(plays) == 0 {
-		return
-	}
-	if err := h.localWatchDispatcher.HandleLocalWatchEvent(ctx, watchsync.LocalWatchEvent{
-		Kind:      kind,
-		UserID:    userID,
-		ProfileID: profileID,
-		Plays:     plays,
-	}); err != nil {
-		slog.Warn("failed to queue local watch provider event", "kind", kind, "user_id", userID, "profile_id", profileID, "error", err)
-	}
+	watchsync.DispatchLocalWatchEvent(ctx, h.localWatchDispatcher, kind, userID, profileID, result.Entries)
 }
 
 func (h *ItemsHandler) handleSetWatchedState(w http.ResponseWriter, r *http.Request, played bool) {

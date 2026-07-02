@@ -85,7 +85,7 @@ func (s *Service) RecordManualMarkUnwatched(ctx context.Context, userID int, pro
 }
 
 func (s *Service) RecordManualMarkUnwatchedWithResult(ctx context.Context, userID int, profileID string, targetIDs []string) (ManualMarkResult, error) {
-	return s.recordMarkUnwatched(ctx, userID, profileID, targetIDs)
+	return s.recordMarkUnwatched(ctx, userID, profileID, targetIDs, userstore.WatchHistorySourceManual)
 }
 
 func (s *Service) RecordPlaybackStop(
@@ -273,13 +273,27 @@ func (s *Service) ToggleFavorite(ctx context.Context, userID int, profileID, tar
 }
 
 func (s *Service) RecordJellycompatMarkPlayed(ctx context.Context, userID int, profileID, targetID string, watchedAt time.Time) error {
-	_, err := s.recordMarkWatched(ctx, userID, profileID, []LeafWatchTarget{{MediaItemID: targetID}}, watchedAt, userstore.WatchHistorySourceJellycompat)
+	_, err := s.RecordJellycompatMarkPlayedWithResult(ctx, userID, profileID, targetID, watchedAt)
 	return err
 }
 
+// RecordJellycompatMarkPlayedWithResult marks a single item played from the
+// jellycompat surface and returns the recorded history so callers can dispatch
+// local watch provider events, mirroring the native RecordManualMark*WithResult
+// pattern.
+func (s *Service) RecordJellycompatMarkPlayedWithResult(ctx context.Context, userID int, profileID, targetID string, watchedAt time.Time) (ManualMarkResult, error) {
+	return s.recordMarkWatched(ctx, userID, profileID, []LeafWatchTarget{{MediaItemID: targetID}}, watchedAt, userstore.WatchHistorySourceJellycompat)
+}
+
 func (s *Service) RecordJellycompatMarkUnplayed(ctx context.Context, userID int, profileID, targetID string) error {
-	_, err := s.recordMarkUnwatched(ctx, userID, profileID, []string{targetID})
+	_, err := s.RecordJellycompatMarkUnplayedWithResult(ctx, userID, profileID, targetID)
 	return err
+}
+
+// RecordJellycompatMarkUnplayedWithResult clears a single item's watch state
+// from the jellycompat surface and returns the history that was cleared.
+func (s *Service) RecordJellycompatMarkUnplayedWithResult(ctx context.Context, userID int, profileID, targetID string) (ManualMarkResult, error) {
+	return s.recordMarkUnwatched(ctx, userID, profileID, []string{targetID}, userstore.WatchHistorySourceJellycompat)
 }
 
 // RecordJellycompatMarkPlayedBatch marks all the given media items as played in
@@ -287,13 +301,29 @@ func (s *Service) RecordJellycompatMarkUnplayed(ctx context.Context, userID int,
 // jellycompat's series-mark-played path to collapse a per-episode loop into
 // one progress upsert plus per-episode history inserts (audit 2026-05-01 §2.7).
 func (s *Service) RecordJellycompatMarkPlayedBatch(ctx context.Context, userID int, profileID string, targetIDs []string, watchedAt time.Time) error {
+	_, err := s.RecordJellycompatMarkPlayedBatchWithResult(ctx, userID, profileID, targetIDs, watchedAt)
+	return err
+}
+
+// RecordJellycompatMarkPlayedBatchWithResult behaves like
+// RecordJellycompatMarkPlayedBatch and additionally returns the recorded history
+// entries for local watch provider dispatch.
+func (s *Service) RecordJellycompatMarkPlayedBatchWithResult(ctx context.Context, userID int, profileID string, targetIDs []string, watchedAt time.Time) (ManualMarkResult, error) {
 	return s.recordMarkWatchedBatch(ctx, userID, profileID, targetIDs, watchedAt, userstore.WatchHistorySourceJellycompat)
 }
 
 // RecordJellycompatMarkUnplayedBatch hides prior visible history and clears
 // progress for all targets in a single store operation.
 func (s *Service) RecordJellycompatMarkUnplayedBatch(ctx context.Context, userID int, profileID string, targetIDs []string) error {
-	return s.recordMarkUnwatchedBatch(ctx, userID, profileID, targetIDs)
+	_, err := s.RecordJellycompatMarkUnplayedBatchWithResult(ctx, userID, profileID, targetIDs)
+	return err
+}
+
+// RecordJellycompatMarkUnplayedBatchWithResult behaves like
+// RecordJellycompatMarkUnplayedBatch and additionally returns the history that
+// was cleared for local watch provider dispatch.
+func (s *Service) RecordJellycompatMarkUnplayedBatchWithResult(ctx context.Context, userID int, profileID string, targetIDs []string) (ManualMarkResult, error) {
+	return s.recordMarkUnwatchedBatch(ctx, userID, profileID, targetIDs, userstore.WatchHistorySourceJellycompat)
 }
 
 func (s *Service) storeForUser(ctx context.Context, userID int) (userstore.UserStore, error) {
@@ -359,12 +389,13 @@ func (s *Service) recordMarkUnwatched(
 	userID int,
 	profileID string,
 	targetIDs []string,
+	source userstore.WatchHistorySource,
 ) (ManualMarkResult, error) {
 	store, err := s.storeForUser(ctx, userID)
 	if err != nil {
 		return ManualMarkResult{}, err
 	}
-	result, err := s.completedHistoryForTargets(ctx, store, profileID, targetIDs, []userstore.WatchHistorySource{userstore.WatchHistorySourceManual})
+	result, err := s.completedHistoryForTargets(ctx, store, profileID, targetIDs, []userstore.WatchHistorySource{source})
 	if err != nil {
 		return ManualMarkResult{}, err
 	}
@@ -434,23 +465,24 @@ func (s *Service) recordMarkWatchedBatch(
 	targetIDs []string,
 	watchedAt time.Time,
 	source userstore.WatchHistorySource,
-) error {
+) (ManualMarkResult, error) {
 	if len(targetIDs) == 0 {
-		return nil
+		return ManualMarkResult{}, nil
 	}
 	store, err := s.storeForUser(ctx, userID)
 	if err != nil {
-		return err
+		return ManualMarkResult{}, err
 	}
 	if watchedAt.IsZero() {
 		watchedAt = time.Now().UTC()
 	}
 	if err := store.MarkProgressBatch(ctx, profileID, targetIDs, watchedAt); err != nil {
-		return err
+		return ManualMarkResult{}, err
 	}
 	// Strategy A (audit 2026-05-01 §2.7): batch the progress upsert because it
 	// powers hot Continue-Watching queries. History inserts stay per-target so
 	// per-episode stable-identity resolution still applies.
+	result := ManualMarkResult{Entries: make([]userstore.WatchHistoryEntry, 0, len(targetIDs))}
 	for _, targetID := range targetIDs {
 		histEntry := userstore.WatchHistoryEntry{
 			ProfileID:   profileID,
@@ -460,12 +492,14 @@ func (s *Service) recordMarkWatchedBatch(
 			Source:      source,
 		}
 		s.applyStableIdentity(ctx, &histEntry)
-		if _, err := userstore.AddVisibleHistory(ctx, store, histEntry); err != nil {
-			return err
+		stored, err := userstore.AddVisibleHistory(ctx, store, histEntry)
+		if err != nil {
+			return result, err
 		}
+		result.Entries = append(result.Entries, stored)
 	}
 	s.notifyWatchedCompleted(ctx, userID, profileID, targetIDs)
-	return nil
+	return result, nil
 }
 
 func (s *Service) recordMarkUnwatchedBatch(
@@ -473,15 +507,20 @@ func (s *Service) recordMarkUnwatchedBatch(
 	userID int,
 	profileID string,
 	targetIDs []string,
-) error {
+	source userstore.WatchHistorySource,
+) (ManualMarkResult, error) {
 	if len(targetIDs) == 0 {
-		return nil
+		return ManualMarkResult{}, nil
 	}
 	store, err := s.storeForUser(ctx, userID)
 	if err != nil {
-		return err
+		return ManualMarkResult{}, err
 	}
-	return store.RemoveHistoryItems(ctx, profileID, targetIDs, time.Now().UTC())
+	result, err := s.completedHistoryForTargets(ctx, store, profileID, targetIDs, []userstore.WatchHistorySource{source})
+	if err != nil {
+		return ManualMarkResult{}, err
+	}
+	return result, store.RemoveHistoryItems(ctx, profileID, targetIDs, time.Now().UTC())
 }
 
 // buildMarkPlayedBatchSQL returns the upsert that marks every media_item_id in

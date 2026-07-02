@@ -9,6 +9,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
+	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 // directUserDataService implements UserDataService using the user store directly.
@@ -20,6 +21,7 @@ type directUserDataService struct {
 	resumeFilter            *catalog.ContinueWatchingProgressFilter
 	profileStaler           profileStaler
 	profileRefreshRequester profileRefreshRequester
+	localWatchDispatcher    watchsync.LocalWatchEventDispatcher
 }
 
 func newDirectUserDataService(
@@ -32,6 +34,7 @@ func newDirectUserDataService(
 	staler profileStaler,
 	requester profileRefreshRequester,
 	completionObserver watchstate.CompletionObserver,
+	localWatchDispatcher watchsync.LocalWatchEventDispatcher,
 ) *directUserDataService {
 	return &directUserDataService{
 		storeProvider: storeProvider,
@@ -43,6 +46,7 @@ func newDirectUserDataService(
 		resumeFilter:            resumeFilter,
 		profileStaler:           staler,
 		profileRefreshRequester: requester,
+		localWatchDispatcher:    localWatchDispatcher,
 	}
 }
 
@@ -277,9 +281,11 @@ func (s *directUserDataService) MarkPlayed(ctx context.Context, session *Session
 	if s.watchState == nil {
 		return fmt.Errorf("watch state service is not configured")
 	}
-	if err := s.watchState.RecordJellycompatMarkPlayed(ctx, session.StreamAppUserID, session.ProfileID, contentID, time.Now().UTC()); err != nil {
+	result, err := s.watchState.RecordJellycompatMarkPlayedWithResult(ctx, session.StreamAppUserID, session.ProfileID, contentID, time.Now().UTC())
+	if err != nil {
 		return err
 	}
+	watchsync.DispatchLocalWatchEvent(ctx, s.localWatchDispatcher, watchsync.LocalWatchEventMarkedWatched, session.StreamAppUserID, session.ProfileID, result.Entries)
 	triggerProfileRefresh(ctx, s.profileStaler, s.profileRefreshRequester, session.StreamAppUserID, session.ProfileID)
 	return nil
 }
@@ -291,9 +297,11 @@ func (s *directUserDataService) MarkPlayedBatch(ctx context.Context, session *Se
 	if len(contentIDs) == 0 {
 		return nil
 	}
-	if err := s.watchState.RecordJellycompatMarkPlayedBatch(ctx, session.StreamAppUserID, session.ProfileID, contentIDs, time.Now().UTC()); err != nil {
+	result, err := s.watchState.RecordJellycompatMarkPlayedBatchWithResult(ctx, session.StreamAppUserID, session.ProfileID, contentIDs, time.Now().UTC())
+	if err != nil {
 		return err
 	}
+	watchsync.DispatchLocalWatchEvent(ctx, s.localWatchDispatcher, watchsync.LocalWatchEventMarkedWatched, session.StreamAppUserID, session.ProfileID, result.Entries)
 	triggerProfileRefresh(ctx, s.profileStaler, s.profileRefreshRequester, session.StreamAppUserID, session.ProfileID)
 	return nil
 }
@@ -302,9 +310,11 @@ func (s *directUserDataService) MarkUnplayed(ctx context.Context, session *Sessi
 	if s.watchState == nil {
 		return fmt.Errorf("watch state service is not configured")
 	}
-	if err := s.watchState.RecordJellycompatMarkUnplayed(ctx, session.StreamAppUserID, session.ProfileID, contentID); err != nil {
+	result, err := s.watchState.RecordJellycompatMarkUnplayedWithResult(ctx, session.StreamAppUserID, session.ProfileID, contentID)
+	if err != nil {
 		return err
 	}
+	watchsync.DispatchLocalWatchEvent(ctx, s.localWatchDispatcher, watchsync.LocalWatchEventMarkedUnwatched, session.StreamAppUserID, session.ProfileID, result.Entries)
 	triggerProfileRefresh(ctx, s.profileStaler, s.profileRefreshRequester, session.StreamAppUserID, session.ProfileID)
 	return nil
 }
@@ -316,9 +326,11 @@ func (s *directUserDataService) MarkUnplayedBatch(ctx context.Context, session *
 	if len(contentIDs) == 0 {
 		return nil
 	}
-	if err := s.watchState.RecordJellycompatMarkUnplayedBatch(ctx, session.StreamAppUserID, session.ProfileID, contentIDs); err != nil {
+	result, err := s.watchState.RecordJellycompatMarkUnplayedBatchWithResult(ctx, session.StreamAppUserID, session.ProfileID, contentIDs)
+	if err != nil {
 		return err
 	}
+	watchsync.DispatchLocalWatchEvent(ctx, s.localWatchDispatcher, watchsync.LocalWatchEventMarkedUnwatched, session.StreamAppUserID, session.ProfileID, result.Entries)
 	triggerProfileRefresh(ctx, s.profileStaler, s.profileRefreshRequester, session.StreamAppUserID, session.ProfileID)
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
+	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 // Dependencies holds the pluggable pieces used by the compat server.
@@ -55,6 +56,12 @@ type Dependencies struct {
 	// WatchCompletionObserver is notified when a Jellyfin-compat mark-played
 	// completes a watch, so fully-watched items leave the watchlist. Optional.
 	WatchCompletionObserver watchstate.CompletionObserver
+
+	// LocalWatchDispatcher queues local mark-played/unplayed events from the
+	// jellycompat surface for export to watch providers (Trakt/Simkl/MDBList),
+	// mirroring the native /api mark-watched path. Optional; when nil, no
+	// provider events are emitted. Concrete type is *watchsync.Service.
+	LocalWatchDispatcher watchsync.LocalWatchEventDispatcher
 
 	// Autoscan / admin compatibility support.
 	APIKeyValidator  apiKeyValidator

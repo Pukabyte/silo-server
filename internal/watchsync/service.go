@@ -1457,6 +1457,43 @@ func localPlayFromHistory(row userstore.WatchHistoryEntry) (LocalPlay, bool) {
 	return play, play.ProviderItemKey != ""
 }
 
+// LocalWatchEventDispatcher queues a local watch event for asynchronous export
+// to the configured watch providers (Trakt/Simkl/MDBList). *Service implements
+// it via HandleLocalWatchEvent.
+type LocalWatchEventDispatcher interface {
+	HandleLocalWatchEvent(ctx context.Context, event LocalWatchEvent) error
+}
+
+// DispatchLocalWatchEvent builds a LocalWatchEvent from the given history
+// entries and queues it through the dispatcher. It is the single glue point
+// shared by every local mark-watched/unwatched surface (native API and
+// jellycompat), so provider export stays consistent across them. It is a no-op
+// when the dispatcher is nil or the entries yield no provider-identifiable plays.
+func DispatchLocalWatchEvent(
+	ctx context.Context,
+	dispatcher LocalWatchEventDispatcher,
+	kind LocalWatchEventKind,
+	userID int,
+	profileID string,
+	entries []userstore.WatchHistoryEntry,
+) {
+	if dispatcher == nil {
+		return
+	}
+	plays := LocalPlaysFromHistory(entries)
+	if len(plays) == 0 {
+		return
+	}
+	if err := dispatcher.HandleLocalWatchEvent(ctx, LocalWatchEvent{
+		Kind:      kind,
+		UserID:    userID,
+		ProfileID: profileID,
+		Plays:     plays,
+	}); err != nil {
+		slog.Warn("failed to queue local watch provider event", "kind", kind, "user_id", userID, "profile_id", profileID, "error", err)
+	}
+}
+
 func LocalPlaysFromHistory(entries []userstore.WatchHistoryEntry) []LocalPlay {
 	plays := make([]LocalPlay, 0, len(entries))
 	for _, entry := range entries {
