@@ -46,7 +46,9 @@ type MediaStore interface {
 	GetAudiobooksByIDs(ctx context.Context, contentIDs []string, access catalog.AccessFilter) (map[string]*models.MediaItem, error)
 	// ListAudiobooks returns a page of audiobooks. When libraryID is non-zero
 	// it filters to items in that media_folder; 0 means all audiobook items.
-	ListAudiobooks(ctx context.Context, libraryID int64, limit, offset int, access catalog.AccessFilter) ([]*models.MediaItem, int, error)
+	// filter optionally pushes an authors/series/narrators predicate into the
+	// query (Filter{} for none) so per-author syncs avoid a full-library scan.
+	ListAudiobooks(ctx context.Context, libraryID int64, limit, offset int, access catalog.AccessFilter, filter Filter) ([]*models.MediaItem, int, error)
 	GetMediaFiles(ctx context.Context, contentID string, access catalog.AccessFilter) ([]*models.MediaFile, error)
 	// GetMediaFileByID fetches a single media file by its integer PK.
 	// Used by the ABS file-streaming handler when a caller supplies a
@@ -67,12 +69,14 @@ type MediaStore interface {
 	// ListDiscover returns a randomized sampling of audiobooks for the
 	// Home tab's discover shelf (helps new users browse the library).
 	ListDiscover(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
-	// ListLibraryAuthors returns distinct authors of audiobooks in the
-	// library along with each author's book count.
-	ListLibraryAuthors(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]AuthorSummary, error)
-	// ListLibrarySeries returns distinct series (from audiobook_series)
-	// represented in the library, ordered by name.
-	ListLibrarySeries(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]SeriesSummary, error)
+	// ListLibraryAuthors returns one page of distinct audiobook authors (from a
+	// precomputed materialized view) plus the total author count. sortBy is one
+	// of "name" (default), "addedAt", or "numBooks"; limit<=0 returns all.
+	ListLibraryAuthors(ctx context.Context, libraryID int64, limit, offset int, sortBy string, sortDesc bool, access catalog.AccessFilter) ([]AuthorSummary, int, error)
+	// ListLibrarySeries returns one SQL-paginated page of distinct series (from
+	// audiobook_series) in the library plus the total series count. limit<=0
+	// returns all.
+	ListLibrarySeries(ctx context.Context, libraryID int64, limit, offset int, access catalog.AccessFilter) ([]SeriesSummary, int, error)
 	// GetAuthorByID returns the author with the given people.id plus
 	// their audiobook list, sorted by title. Returns ErrNotFound when
 	// no people row matches.

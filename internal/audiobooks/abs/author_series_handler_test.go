@@ -74,8 +74,8 @@ type libAuthorsStub struct {
 	authors []AuthorSummary
 }
 
-func (s *libAuthorsStub) ListLibraryAuthors(_ context.Context, _ int64, _ int, _ catalog.AccessFilter) ([]AuthorSummary, error) {
-	return s.authors, nil
+func (s *libAuthorsStub) ListLibraryAuthors(_ context.Context, _ int64, _, _ int, _ string, _ bool, _ catalog.AccessFilter) ([]AuthorSummary, int, error) {
+	return s.authors, len(s.authors), nil
 }
 
 // TestLibraryAuthors_EnvelopeBranchesOnPagination guards the real ABS
@@ -112,6 +112,24 @@ func TestLibraryAuthors_EnvelopeBranchesOnPagination(t *testing.T) {
 		if _, ok := a0["asin"]; !ok {
 			t.Errorf("author object missing 'asin' (thin shape regression)")
 		}
+	}
+
+	// limit present but NO page → still bare { authors: [...] }. Both limit and
+	// page are required to trigger the paged envelope; a limit-only request
+	// (e.g. Prologue's ?limit=100) must decode via `authors`, not `results`.
+	recLimitOnly := dispatchABSWithParams(http.MethodGet, "/api/libraries/"+VirtualLibraryID+"/authors?limit=100", params, nil, "1", "", h.handleLibraryAuthors)
+	if recLimitOnly.Code != http.StatusOK {
+		t.Fatalf("limit-only status = %d; body=%s", recLimitOnly.Code, recLimitOnly.Body.String())
+	}
+	var gotLimitOnly map[string]any
+	if err := json.Unmarshal(recLimitOnly.Body.Bytes(), &gotLimitOnly); err != nil {
+		t.Fatalf("decode limit-only: %v", err)
+	}
+	if _, ok := gotLimitOnly["authors"].([]any); !ok {
+		t.Errorf("limit-only (no page) response missing bare 'authors' key; got keys %v", keysOf(gotLimitOnly))
+	}
+	if _, isPaged := gotLimitOnly["results"]; isPaged {
+		t.Errorf("limit-only (no page) response must NOT carry paged 'results'")
 	}
 
 	// Paginated → paged envelope
