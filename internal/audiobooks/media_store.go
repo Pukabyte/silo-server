@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,59 @@ type ABSMediaStore struct {
 	Items *catalog.ItemRepository
 	Files *scanner.FileRepository
 	Pool  *pgxpool.Pool
+
+	// countCache memoizes the per-(library, filter, access) COUNT(*) that
+	// ListAudiobooks would otherwise recompute on every page. A full client
+	// library sync pages through thousands of requests reading the same total;
+	// the count only shifts when the library changes, so a short TTL is safe.
+	countMu    sync.Mutex
+	countCache map[string]absCountEntry
+}
+
+type absCountEntry struct {
+	n   int
+	exp time.Time
+}
+
+// absCountCacheTTL bounds how stale the paginated total may be. During an active
+// scan the count can lag by up to this window; clients re-sync, so that is fine.
+const absCountCacheTTL = 60 * time.Second
+
+// cachedAudiobookCount returns a memoized COUNT(*) for the given (countSQL, args)
+// pair, running the query on a miss/expiry. The key is derived from the fully
+// rendered SQL plus its bound args, so it automatically covers every input the
+// count WHERE depends on (library, pushed-down filter, and all access
+// predicates) — it can't drift as access logic evolves. The DB query runs
+// outside the lock so concurrent syncs don't serialize on it.
+func (s *ABSMediaStore) cachedAudiobookCount(ctx context.Context, countSQL string, args []any) (int, error) {
+	key := countSQL + "\x1f" + fmt.Sprintf("%v", args)
+	now := time.Now()
+	s.countMu.Lock()
+	if e, ok := s.countCache[key]; ok && now.Before(e.exp) {
+		s.countMu.Unlock()
+		return e.n, nil
+	}
+	s.countMu.Unlock()
+
+	var n int
+	if err := s.Pool.QueryRow(ctx, countSQL, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+
+	s.countMu.Lock()
+	if s.countCache == nil {
+		s.countCache = make(map[string]absCountEntry)
+	}
+	// Sweep expired entries on write so per-filter keys (e.g. one per author
+	// during a sync) don't accumulate for the process lifetime.
+	for k, e := range s.countCache {
+		if now.After(e.exp) {
+			delete(s.countCache, k)
+		}
+	}
+	s.countCache[key] = absCountEntry{n: n, exp: now.Add(absCountCacheTTL)}
+	s.countMu.Unlock()
+	return n, nil
 }
 
 var _ abs.MediaStore = (*ABSMediaStore)(nil)
@@ -125,8 +179,8 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 	appendAudiobookFilterConditions(filter, &conditions, &args, &argIdx)
 	where := strings.Join(conditions, " AND ")
 
-	countSQL := `SELECT COUNT(*) FROM media_items mi WHERE ` + where
-	if err := s.Pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+	total, err := s.cachedAudiobookCount(ctx, `SELECT COUNT(*) FROM media_items mi WHERE `+where, args)
+	if err != nil {
 		return nil, 0, fmt.Errorf("abs_media_store: count audiobooks: %w", err)
 	}
 	if total == 0 {
@@ -134,7 +188,12 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 	}
 
 	dataArgs := append([]any(nil), args...)
-	dataSQL := `SELECT mi.content_id FROM media_items mi WHERE ` + where + ` ORDER BY LOWER(mi.sort_title), LOWER(mi.title)`
+	// Order by the same expression idx_media_items_sort_key is built on so the
+	// page can be served by an ordered index scan instead of sorting the whole
+	// library on every request; content_id is a stable tiebreaker so sequential
+	// pages don't skip or repeat rows when sort keys collide.
+	dataSQL := `SELECT mi.content_id FROM media_items mi WHERE ` + where +
+		` ORDER BY lower(coalesce(nullif(btrim(mi.sort_title), ''), mi.title)), mi.content_id`
 	if limit > 0 {
 		argIdx = len(dataArgs) + 1
 		dataSQL += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
