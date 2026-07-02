@@ -883,6 +883,20 @@ func (s *MetadataService) suppressRecordedStaleProviderIDs(
 	if err != nil {
 		return fmt.Errorf("loading stale provider ids for %s: %w", contentID, err)
 	}
+	if len(staleIDs) == 0 {
+		return nil
+	}
+	// Index the incoming map by normalized provider key so suppression cannot
+	// be bypassed by casing or padding differences between the stored stale
+	// row and the caller-supplied map keys (e.g. "TMDB" vs "tmdb").
+	keysByProvider := make(map[string][]string, len(providerIDs))
+	for key := range providerIDs {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if normalized == "" {
+			continue
+		}
+		keysByProvider[normalized] = append(keysByProvider[normalized], key)
+	}
 	for _, staleID := range staleIDs {
 		if staleID == nil {
 			continue
@@ -891,10 +905,13 @@ func (s *MetadataService) suppressRecordedStaleProviderIDs(
 		if provider == "" {
 			continue
 		}
-		if providerIDs[provider] != strings.TrimSpace(staleID.ProviderID) {
-			continue
+		staleValue := strings.TrimSpace(staleID.ProviderID)
+		for _, key := range keysByProvider[provider] {
+			if strings.TrimSpace(providerIDs[key]) != staleValue {
+				continue
+			}
+			delete(providerIDs, key)
 		}
-		delete(providerIDs, provider)
 	}
 	return nil
 }
@@ -913,6 +930,19 @@ func (s *MetadataService) ProcessWithProviders(ctx context.Context, req ProcessR
 func (s *MetadataService) prepareProcessRequest(ctx context.Context, req ProcessRequest) (ProcessRequest, error) {
 	durableIDs, err := s.loadDurableProviderIDs(ctx, req.ContentID)
 	if err != nil {
+		return req, err
+	}
+	if len(durableIDs) == 0 {
+		return req, nil
+	}
+	// Strip durable IDs already recorded as stale before merging them into
+	// the request. Without this, a manual rematch (ModeIdentify) re-injects
+	// the known-dead ID, the Phase-2 fetch 404s again, and the item is
+	// re-recorded in stale_media_ids instead of leaving the stale list.
+	// Only the injected set is filtered: IDs the caller supplied explicitly
+	// in req.ProviderIDs stay untouched, so an admin deliberately
+	// re-selecting a previously-stale ID still retries it.
+	if err := s.suppressRecordedStaleProviderIDs(ctx, req.ContentID, durableIDs); err != nil {
 		return req, err
 	}
 	if len(durableIDs) == 0 {
