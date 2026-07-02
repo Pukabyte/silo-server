@@ -23,12 +23,13 @@ func (s *stubRTFetcher) RatingsByIMDB(_ context.Context, _ string) (*mdblist.Tit
 type stubRTUpdater struct {
 	last  *catalog.MetadataUpdate
 	calls int
+	err   error
 }
 
 func (s *stubRTUpdater) UpdateMetadata(_ context.Context, _ string, upd *catalog.MetadataUpdate) error {
 	s.calls++
 	s.last = upd
-	return nil
+	return s.err
 }
 
 func f64(v float64) *float64 { return &v }
@@ -93,5 +94,26 @@ func TestRTBackfillFetchErrorNoPersist(t *testing.T) {
 
 	if updater.calls != 0 {
 		t.Fatalf("no update expected on fetch error, got %d", updater.calls)
+	}
+}
+
+// A transient fetch error must NOT negative-cache the item, so the next view
+// can retry it immediately.
+func TestRTBackfillFetchErrorDoesNotNegativeCache(t *testing.T) {
+	b := New(&stubRTFetcher{err: errors.New("429")}, &stubRTUpdater{})
+	b.run("ct5", "tt5")
+	if !b.claim("ct5") {
+		t.Fatal("fetch error must not negative-cache; a repeat claim should succeed")
+	}
+}
+
+// A persist failure is also transient and must not negative-cache.
+func TestRTBackfillPersistErrorDoesNotNegativeCache(t *testing.T) {
+	fetcher := &stubRTFetcher{ratings: &mdblist.TitleRatings{RTCritic: f64(90)}}
+	updater := &stubRTUpdater{err: errors.New("db down")}
+	b := New(fetcher, updater)
+	b.run("ct6", "tt6")
+	if !b.claim("ct6") {
+		t.Fatal("persist error must not negative-cache; a repeat claim should succeed")
 	}
 }
