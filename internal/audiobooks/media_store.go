@@ -98,7 +98,7 @@ func (s *ABSMediaStore) GetAudiobooksByIDs(ctx context.Context, contentIDs []str
 // path that bails out when the query string is empty. We page content_ids
 // here via SQL, then load full rows via GetByIDs so the scan logic stays
 // in the catalog package.
-func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, limit, offset int, access catalog.AccessFilter) ([]*models.MediaItem, int, error) {
+func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, limit, offset int, access catalog.AccessFilter, filter abs.Filter) ([]*models.MediaItem, int, error) {
 	if s.Pool == nil {
 		return nil, 0, fmt.Errorf("abs_media_store: no pgx pool")
 	}
@@ -119,6 +119,10 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 		argIdx++
 	}
 	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	// Push author/series/narrator filters into SQL so per-author album syncs
+	// don't load and hydrate the entire library on every request. Uses the
+	// idx_item_people_content_kind_person and audiobook_series indexes.
+	appendAudiobookFilterConditions(filter, &conditions, &args, &argIdx)
 	where := strings.Join(conditions, " AND ")
 
 	countSQL := `SELECT COUNT(*) FROM media_items mi WHERE ` + where
@@ -185,6 +189,46 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 		_ = err
 	}
 	return ordered, total, nil
+}
+
+// appendAudiobookFilterConditions pushes an ABS authors/series/narrators
+// filter down into the SQL WHERE clause. Author values are the numeric
+// person_id (as returned by the /authors endpoint), with a name fallback for
+// non-numeric values; narrator and series values are names. This mirrors the
+// case-sensitive exact-match identity semantics of abs.Filter.Matches.
+// Progress/genre/tag/language filters are not pushable here (they need
+// per-user or detail data) and are handled by the caller in Go.
+func appendAudiobookFilterConditions(filter abs.Filter, conditions *[]string, args *[]any, argIdx *int) {
+	switch filter.Kind {
+	case abs.FilterAuthors:
+		if id, err := strconv.ParseInt(filter.Value, 10, 64); err == nil {
+			*conditions = append(*conditions, fmt.Sprintf(
+				`EXISTS (SELECT 1 FROM item_people ip WHERE ip.content_id = mi.content_id AND ip.kind = %d AND ip.person_id = $%d)`,
+				models.PersonKindAuthor, *argIdx))
+			*args = append(*args, id)
+		} else {
+			*conditions = append(*conditions, fmt.Sprintf(
+				`EXISTS (SELECT 1 FROM item_people ip JOIN people p ON p.id = ip.person_id WHERE ip.content_id = mi.content_id AND ip.kind = %d AND p.name = $%d)`,
+				models.PersonKindAuthor, *argIdx))
+			*args = append(*args, filter.Value)
+		}
+		*argIdx = *argIdx + 1
+	case abs.FilterNarrators:
+		*conditions = append(*conditions, fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM item_people ip JOIN people p ON p.id = ip.person_id WHERE ip.content_id = mi.content_id AND ip.kind = %d AND p.name = $%d)`,
+			models.PersonKindNarrator, *argIdx))
+		*args = append(*args, filter.Value)
+		*argIdx = *argIdx + 1
+	case abs.FilterSeries:
+		if filter.Value == abs.SentinelNoSeries {
+			*conditions = append(*conditions, `NOT EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id)`)
+		} else {
+			*conditions = append(*conditions, fmt.Sprintf(
+				`EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id AND abs.series_name = $%d)`, *argIdx))
+			*args = append(*args, filter.Value)
+			*argIdx = *argIdx + 1
+		}
+	}
 }
 
 func appendAudiobookAccessConditions(alias string, filter catalog.AccessFilter, conditions *[]string, args *[]any, argIdx *int) {
@@ -579,18 +623,99 @@ func (s *ABSMediaStore) ListDiscover(ctx context.Context, libraryID int64, limit
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListLibraryAuthors aggregates audiobook authors (item_people kind=7)
-// for the library, returning distinct (person_id, name, book_count).
-func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]abs.AuthorSummary, error) {
+// RefreshAuthorCounts rebuilds the abs_audiobook_author_counts materialized
+// view that ListLibraryAuthors reads. CONCURRENTLY keeps it readable during the
+// refresh (requires the unique index). Driven by a periodic ticker in the
+// audiobooks service.
+func (s *ABSMediaStore) RefreshAuthorCounts(ctx context.Context) error {
 	if s.Pool == nil {
-		return nil, nil
+		return nil
 	}
-	if limit <= 0 {
-		limit = 100
+	_, err := s.Pool.Exec(ctx, `REFRESH MATERIALIZED VIEW CONCURRENTLY abs_audiobook_author_counts`)
+	if err != nil {
+		return fmt.Errorf("abs_media_store: refresh author counts: %w", err)
 	}
-	args := []any{limit}
+	return nil
+}
+
+// ListLibraryAuthors returns one page of distinct audiobook authors plus the
+// total author count for the library. It reads the precomputed
+// abs_audiobook_author_counts materialized view keyed by media_folder_id.
+//
+// ponytail: the MV carries no per-item access predicate. That's acceptable
+// because audiobook access is library-level all-or-nothing — resolveLibrary
+// has already access-checked the single library this endpoint is scoped to.
+// Per-item audiobook access would require revisiting this (and the MV itself).
+//
+// When the MV read returns zero rows (stale, empty, or not-yet-refreshed view)
+// we fall back to the live GROUP BY so /authors never blanks out.
+func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64, limit, offset int, sortBy string, sortDesc bool, access catalog.AccessFilter) ([]abs.AuthorSummary, int, error) {
+	if s.Pool == nil {
+		return nil, 0, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM abs_audiobook_author_counts WHERE library_id = $1`, int(libraryID),
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("abs_media_store: count authors: %w", err)
+	}
+	if total == 0 {
+		// Stale/empty/unrefreshed MV: fall back to the live query so a fresh
+		// deploy (before the first REFRESH) still serves authors.
+		return s.listLibraryAuthorsLive(ctx, libraryID, limit, offset, sortBy, sortDesc, access)
+	}
+
+	dir := "ASC"
+	if sortDesc {
+		dir = "DESC"
+	}
+	var orderBy string
+	switch sortBy {
+	case "addedAt":
+		orderBy = "added_at " + dir + ", person_id"
+	case "numBooks":
+		orderBy = "num_books " + dir + ", LOWER(name)"
+	default: // name
+		orderBy = "LOWER(name) " + dir
+	}
+
+	dataSQL := `SELECT person_id, name, num_books, added_at FROM abs_audiobook_author_counts
+		WHERE library_id = $1 ORDER BY ` + orderBy
+	args := []any{int(libraryID)}
+	if limit > 0 {
+		dataSQL += ` LIMIT $2 OFFSET $3`
+		args = append(args, limit, offset)
+	}
+	rows, err := s.Pool.Query(ctx, dataSQL, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("abs_media_store: list authors: %w", err)
+	}
+	defer rows.Close()
+	out := make([]abs.AuthorSummary, 0, 64)
+	for rows.Next() {
+		var (
+			id      int64
+			name    string
+			books   int
+			addedAt time.Time
+		)
+		if err := rows.Scan(&id, &name, &books, &addedAt); err != nil {
+			return nil, 0, fmt.Errorf("abs_media_store: scan author: %w", err)
+		}
+		out = append(out, abs.AuthorSummary{ID: fmt.Sprintf("%d", id), Name: name, NumBooks: books})
+	}
+	return out, total, rows.Err()
+}
+
+// listLibraryAuthorsLive is the pre-materialized-view live aggregation, kept as
+// a fallback for ListLibraryAuthors when the MV has no rows for the library.
+func (s *ABSMediaStore) listLibraryAuthorsLive(ctx context.Context, libraryID int64, limit, offset int, sortBy string, sortDesc bool, access catalog.AccessFilter) ([]abs.AuthorSummary, int, error) {
 	conditions := []string{`mi.type = 'audiobook'`}
-	argIdx := 2
+	args := []any{}
+	argIdx := 1
 	if libraryID != 0 {
 		conditions = append(conditions, fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM media_item_libraries mil
@@ -600,22 +725,56 @@ func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64,
 		argIdx++
 	}
 	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
-	sql := `
+	where := strings.Join(conditions, " AND ")
+
+	var total int
+	countSQL := `SELECT COUNT(*) FROM (
+		SELECT p.id
+		FROM media_items mi
+		JOIN item_people ip ON ip.content_id = mi.content_id AND ip.kind = 7
+		JOIN people p ON p.id = ip.person_id
+		WHERE ` + where + `
+		GROUP BY p.id, p.name
+	) t`
+	if err := s.Pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("abs_media_store: count authors (live): %w", err)
+	}
+	if total == 0 {
+		return []abs.AuthorSummary{}, 0, nil
+	}
+
+	dir := "ASC"
+	if sortDesc {
+		dir = "DESC"
+	}
+	var orderBy string
+	switch sortBy {
+	case "addedAt":
+		orderBy = "p.created_at " + dir + ", p.id"
+	case "numBooks":
+		orderBy = "num_books " + dir + ", LOWER(p.name)"
+	default: // name
+		orderBy = "LOWER(p.name) " + dir
+	}
+	dataSQL := `
 		SELECT p.id, p.name, COUNT(DISTINCT mi.content_id) AS num_books
 		FROM media_items mi
 		JOIN item_people ip ON ip.content_id = mi.content_id AND ip.kind = 7
 		JOIN people p ON p.id = ip.person_id
-		WHERE ` + strings.Join(conditions, " AND ") + `
+		WHERE ` + where + `
 		GROUP BY p.id, p.name
-		ORDER BY LOWER(p.name)
-		LIMIT $1
-	`
-	rows, err := s.Pool.Query(ctx, sql, args...)
+		ORDER BY ` + orderBy
+	dataArgs := append([]any(nil), args...)
+	if limit > 0 {
+		dataSQL += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
+		dataArgs = append(dataArgs, limit, offset)
+	}
+	rows, err := s.Pool.Query(ctx, dataSQL, dataArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("abs_media_store: list authors: %w", err)
+		return nil, 0, fmt.Errorf("abs_media_store: list authors (live): %w", err)
 	}
 	defer rows.Close()
-	out := make([]abs.AuthorSummary, 0, limit)
+	out := make([]abs.AuthorSummary, 0, 64)
 	for rows.Next() {
 		var (
 			id    int64
@@ -623,27 +782,27 @@ func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64,
 			books int
 		)
 		if err := rows.Scan(&id, &name, &books); err != nil {
-			return nil, fmt.Errorf("abs_media_store: scan author: %w", err)
+			return nil, 0, fmt.Errorf("abs_media_store: scan author (live): %w", err)
 		}
 		out = append(out, abs.AuthorSummary{ID: fmt.Sprintf("%d", id), Name: name, NumBooks: books})
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // ListLibrarySeries returns distinct series from audiobook_series for the
 // audiobook library, with per-series book count and up to 4 book preview
 // rows (content_id + title + updated_at) used by the ABS mobile client
 // to render the LazySeriesCard cover stack.
-func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]abs.SeriesSummary, error) {
+func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, limit, offset int, access catalog.AccessFilter) ([]abs.SeriesSummary, int, error) {
 	if s.Pool == nil {
-		return nil, nil
+		return nil, 0, nil
 	}
-	if limit <= 0 {
-		limit = 100
+	if offset < 0 {
+		offset = 0
 	}
-	args := []any{limit}
 	conditions := []string{`mi.type = 'audiobook'`}
-	argIdx := 2
+	args := []any{}
+	argIdx := 1
 	if libraryID != 0 {
 		conditions = append(conditions, fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM media_item_libraries mil
@@ -653,12 +812,30 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 		argIdx++
 	}
 	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	where := strings.Join(conditions, " AND ")
+
+	// Count distinct multi-book series (HAVING COUNT > 1) so pagination totals
+	// match what the data query returns.
+	var total int
+	countSQL := `SELECT COUNT(*) FROM (
+		SELECT s.series_name
+		FROM audiobook_series s JOIN media_items mi ON mi.content_id = s.content_id
+		WHERE ` + where + `
+		GROUP BY s.series_name HAVING COUNT(*) > 1
+	) t`
+	if err := s.Pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("abs_media_store: count series: %w", err)
+	}
+	if total == 0 {
+		return []abs.SeriesSummary{}, 0, nil
+	}
+
 	// Two-stage: window-rank books inside each series (lowest series_index
 	// first), then aggregate the top 4 ids/titles/updated_at into parallel
 	// arrays. `book_ids[]` is text because content_id is text in this
 	// schema; parallel `titles[]` and `updated_ats[]` keep iteration
 	// straightforward in Go without composite type plumbing.
-	sql := `
+	dataSQL := `
 		WITH ranked AS (
 			SELECT
 				s.series_name,
@@ -673,7 +850,7 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 			FROM audiobook_series s
 			JOIN media_items mi
 				ON mi.content_id = s.content_id
-			WHERE ` + strings.Join(conditions, " AND ") + `
+			WHERE ` + where + `
 		)
 		SELECT
 			series_name,
@@ -684,15 +861,18 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 		FROM ranked
 		GROUP BY series_name
 		HAVING MAX(series_count) > 1
-		ORDER BY LOWER(series_name)
-		LIMIT $1
-	`
-	rows, err := s.Pool.Query(ctx, sql, args...)
+		ORDER BY LOWER(series_name)`
+	dataArgs := append([]any(nil), args...)
+	if limit > 0 {
+		dataSQL += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
+		dataArgs = append(dataArgs, limit, offset)
+	}
+	rows, err := s.Pool.Query(ctx, dataSQL, dataArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("abs_media_store: list series: %w", err)
+		return nil, 0, fmt.Errorf("abs_media_store: list series: %w", err)
 	}
 	defer rows.Close()
-	out := make([]abs.SeriesSummary, 0, limit)
+	out := make([]abs.SeriesSummary, 0, 64)
 	for rows.Next() {
 		var (
 			name       string
@@ -702,7 +882,7 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 			updatedAts []time.Time
 		)
 		if err := rows.Scan(&name, &books, &ids, &titles, &updatedAts); err != nil {
-			return nil, fmt.Errorf("abs_media_store: scan series: %w", err)
+			return nil, 0, fmt.Errorf("abs_media_store: scan series: %w", err)
 		}
 		previews := make([]abs.SeriesBookPreview, 0, len(ids))
 		for i := range ids {
@@ -719,7 +899,7 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 		// series row yet, so the slug is stable for a given name.
 		out = append(out, abs.SeriesSummary{ID: name, Name: name, NumBooks: books, Books: previews})
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // GetAuthorByID looks up the author by people.id and returns the row

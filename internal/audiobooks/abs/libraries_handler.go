@@ -103,14 +103,14 @@ func (h *Handler) buildFilterData(r *http.Request, lib AudiobookLibrary) map[str
 	access, _, _ := h.accessFilterFromRequest(r)
 
 	authorObjs := []AuthorObj{}
-	if rows, err := h.deps.MediaStore.ListLibraryAuthors(ctx, lib.ID, fetchCap, access); err == nil {
+	if rows, _, err := h.deps.MediaStore.ListLibraryAuthors(ctx, lib.ID, fetchCap, 0, "name", false, access); err == nil {
 		for _, a := range rows {
 			authorObjs = append(authorObjs, AuthorObj{ID: a.ID, Name: a.Name})
 		}
 	}
 
 	seriesObjs := []SeriesObj{}
-	if rows, err := h.deps.MediaStore.ListLibrarySeries(ctx, lib.ID, fetchCap, access); err == nil {
+	if rows, _, err := h.deps.MediaStore.ListLibrarySeries(ctx, lib.ID, fetchCap, 0, access); err == nil {
 		for _, s := range rows {
 			seriesObjs = append(seriesObjs, SeriesObj{ID: s.ID, Name: s.Name})
 		}
@@ -172,18 +172,31 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the full visible library when filtering so local post-filter
-	// cannot truncate candidates before applying the predicate.
-	fetchLimit := limit
-	if hasFilter || collapseSeries || limit == 0 {
-		fetchLimit = 0
+	// authors/series/narrators filters push down into SQL (indexed) so we never
+	// load + hydrate the whole library. This applies even with collapseseries=1
+	// (the client's per-artist album sync): the SQL filter reduces to a handful
+	// of rows, then collapse + paging run in Go over that small set. Only
+	// progress/genre/tag/language filters still need the Go post-filter and the
+	// full fetch.
+	pushDown := hasFilter &&
+		(filter.Kind == FilterAuthors || filter.Kind == FilterSeries || filter.Kind == FilterNarrators)
+	sqlFilter := Filter{}
+	if pushDown {
+		sqlFilter = filter
 	}
-	fetchOffset := 0
-	if !hasFilter && !collapseSeries && limit > 0 {
+	goFilter := hasFilter && !pushDown
+
+	// SQL paginates only when nothing is post-processed in Go (no Go filter, no
+	// collapse) and the limit is positive; otherwise fetch the (now
+	// SQL-filtered, hence small) candidate set in full and slice in Go.
+	sqlPaginated := !goFilter && !collapseSeries && limit > 0
+	fetchLimit, fetchOffset := 0, 0
+	if sqlPaginated {
+		fetchLimit = limit
 		fetchOffset = page * limit
 	}
 
-	items, total, err := h.deps.MediaStore.ListAudiobooks(r.Context(), lib.ID, fetchLimit, fetchOffset, access)
+	items, total, err := h.deps.MediaStore.ListAudiobooks(r.Context(), lib.ID, fetchLimit, fetchOffset, access, sqlFilter)
 	if err != nil {
 		http.Error(w, "list audiobooks: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -196,8 +209,8 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 		all = append(all, siloItemToLibraryItem(item, lib, baseURL))
 	}
 
-	// Local filter (post-fetch).
-	if hasFilter {
+	// Local filter (post-fetch) — only for filters not pushed into SQL.
+	if goFilter {
 		filtered := make([]LibraryItem, 0, len(all))
 		for _, it := range all {
 			if filter.Matches(it, false, false, false) {
@@ -215,9 +228,9 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 		total = len(collapsed)
 	}
 
-	// Slice for page/limit.
+	// Slice for page/limit. When SQL already paginated we serve the rows as-is.
 	pageStart, pageEnd := 0, len(collapsed)
-	if limit > 0 && (hasFilter || collapseSeries) {
+	if limit > 0 && !sqlPaginated {
 		pageStart = page * limit
 		if pageStart > len(collapsed) {
 			pageStart = len(collapsed)
@@ -321,38 +334,26 @@ func (h *Handler) handleLibraryAuthors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, page := readPagedQuery(r, 50)
-	// Fetch the full list (capped at 5000) and paginate locally so the
-	// envelope's total reflects real DB count, not the page slice length.
-	// ABS clients use total to decide whether to fetch page 2.
-	const fetchCap = 5000
+	sortBy := r.URL.Query().Get("sort")
+	sortDesc := r.URL.Query().Get("desc") == "1"
 	access, _, err := h.accessFilterFromRequest(r)
 	if err != nil {
 		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	authors, err := h.deps.MediaStore.ListLibraryAuthors(r.Context(), lib.ID, fetchCap, access)
+	// Reads the precomputed author materialized view: indexed paginated read +
+	// trivial count, so large libraries aren't capped and full syncs don't blow
+	// the client's background-task window. limit=0 means "return all".
+	offset := 0
+	if limit > 0 {
+		offset = page * limit
+	}
+	pageAuthors, total, err := h.deps.MediaStore.ListLibraryAuthors(r.Context(), lib.ID, limit, offset, sortBy, sortDesc, access)
 	if err != nil {
 		http.Error(w, "list authors: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	libID := audiobookLibraryID(lib)
-	total := len(authors)
-	// Local slice for the requested page.
-	// ABS contract: limit=0 means "return all".
-	var pageAuthors []AuthorSummary
-	if limit == 0 {
-		pageAuthors = authors
-	} else {
-		start := page * limit
-		end := start + limit
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-		pageAuthors = authors[start:end]
-	}
 	results := make([]map[string]any, 0, len(pageAuthors))
 	for _, a := range pageAuthors {
 		results = append(results, authorObjectABS(a.ID, a.Name, libID, a.NumBooks))
@@ -380,35 +381,24 @@ func (h *Handler) handleLibrarySeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, page := readPagedQuery(r, 25)
-	const fetchCap = 5000
 	access, _, err := h.accessFilterFromRequest(r)
 	if err != nil {
 		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	series, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, fetchCap, access)
+	// Paginate in SQL with a separate COUNT so large libraries aren't truncated
+	// at a fixed cap. limit=0 means "return all" (ABS contract).
+	offset := 0
+	if limit > 0 {
+		offset = page * limit
+	}
+	pageSeries, total, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, limit, offset, access)
 	if err != nil {
 		http.Error(w, "list series: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	libID := audiobookLibraryID(lib)
 	baseURL := h.absBaseURL(r)
-	total := len(series)
-	// ABS contract: limit=0 means "return all".
-	var pageSeries []SeriesSummary
-	if limit == 0 {
-		pageSeries = series
-	} else {
-		start := page * limit
-		end := start + limit
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-		pageSeries = series[start:end]
-	}
 	results := make([]map[string]any, 0, len(pageSeries))
 	for _, s := range pageSeries {
 		// books[] is what LazySeriesCard reads to populate the GroupCover
@@ -493,7 +483,7 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 	const fetchCap = 5000
 
 	authorsOut := []any{}
-	if rows, err := h.deps.MediaStore.ListLibraryAuthors(r.Context(), lib.ID, fetchCap, access); err == nil {
+	if rows, _, err := h.deps.MediaStore.ListLibraryAuthors(r.Context(), lib.ID, fetchCap, 0, "name", false, access); err == nil {
 		for _, a := range rows {
 			if !strings.Contains(strings.ToLower(a.Name), qLower) {
 				continue
@@ -511,7 +501,7 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	seriesOut := []any{}
-	if rows, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, fetchCap, access); err == nil {
+	if rows, _, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, fetchCap, 0, access); err == nil {
 		for _, s := range rows {
 			if !strings.Contains(strings.ToLower(s.Name), qLower) {
 				continue
@@ -611,7 +601,7 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	}
 
 	libID := audiobookLibraryID(lib)
-	if series, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, shelfLimit, access); err == nil && len(series) > 0 {
+	if series, _, err := h.deps.MediaStore.ListLibrarySeries(r.Context(), lib.ID, shelfLimit, 0, access); err == nil && len(series) > 0 {
 		recent := make([]map[string]any, 0, len(series))
 		for _, s := range series {
 			// Full real-ABS series object + minified books (same shape as

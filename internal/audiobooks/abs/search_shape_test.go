@@ -29,12 +29,12 @@ func (s *searchStubMediaStore) SearchAudiobooks(_ context.Context, _ int64, _ st
 	return s.results, nil
 }
 
-func (s *searchStubMediaStore) ListLibraryAuthors(context.Context, int64, int, catalog.AccessFilter) ([]AuthorSummary, error) {
-	return s.authors, nil
+func (s *searchStubMediaStore) ListLibraryAuthors(context.Context, int64, int, int, string, bool, catalog.AccessFilter) ([]AuthorSummary, int, error) {
+	return s.authors, len(s.authors), nil
 }
 
-func (s *searchStubMediaStore) ListLibrarySeries(context.Context, int64, int, catalog.AccessFilter) ([]SeriesSummary, error) {
-	return s.series, nil
+func (s *searchStubMediaStore) ListLibrarySeries(context.Context, int64, int, int, catalog.AccessFilter) ([]SeriesSummary, int, error) {
+	return s.series, len(s.series), nil
 }
 
 func newSearchHarness() *Handler {
