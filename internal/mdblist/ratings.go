@@ -41,7 +41,7 @@ func (c *Client) RatingsByIMDB(ctx context.Context, imdbID string) (*TitleRating
 	q := url.Values{}
 	q.Set("apikey", c.currentAPIKey())
 	q.Set("i", imdbID)
-	u := c.baseURL + "/?" + q.Encode()
+	u := c.ratingsBaseURL + "/?" + q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating mdblist request: %w", err)
