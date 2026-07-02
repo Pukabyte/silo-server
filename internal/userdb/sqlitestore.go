@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/userstore"
@@ -106,6 +107,15 @@ func (s *SQLiteUserStore) ListProgressFiltered(_ context.Context, profileID, sta
 
 func (s *SQLiteUserStore) ListProgressByMediaItems(_ context.Context, profileID string, mediaItemIDs []string) (map[string]userstore.WatchProgress, error) {
 	return ListProgressByMediaItems(s.db, profileID, mediaItemIDs)
+}
+
+func (s *SQLiteUserStore) ListProgressSince(_ context.Context, profileID, cursor string) ([]userstore.WatchProgress, string, error) {
+	c, _ := strconv.ParseInt(cursor, 10, 64) // empty/invalid cursor → 0 (full delta)
+	rows, next, err := ListProgressSince(s.db, profileID, c, 0)
+	if err != nil {
+		return nil, cursor, err
+	}
+	return rows, strconv.FormatInt(next, 10), nil
 }
 
 func (s *SQLiteUserStore) AddHistory(_ context.Context, entry userstore.WatchHistoryEntry) error {
