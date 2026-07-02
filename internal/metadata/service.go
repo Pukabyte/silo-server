@@ -517,10 +517,30 @@ func (s *MetadataService) Process(ctx context.Context, req ProcessRequest) (*Pro
 		return chain, nil
 	}
 
+	// A folder-scoped manual refresh resolves exactly one language — the
+	// library's setting. When that differs from the item's stamped canonical
+	// language, adopt it so the base row is re-fetched in the library's
+	// language instead of the fetch being shunted into localization tables
+	// forever (issue #211). Adoption is decided here (not in mergeAndPersist)
+	// so identify/initial-match and multi-language item-scoped refreshes are
+	// never affected. Adoption also requires every library containing the item
+	// to agree on the target language — otherwise two libraries with different
+	// languages would flip the canonical row back and forth on each refresh.
+	adoptTarget := ""
+	if folderID > 0 && req.ContentID != "" && len(languages) == 1 && s.itemRepo != nil {
+		if item, err := s.itemRepo.GetByID(ctx, req.ContentID); err == nil && item != nil {
+			if adoptableFolderLanguage(req.Mode, item.DefaultMetadataLanguage, languages[0]) &&
+				s.itemLibrariesAgreeOnLanguage(ctx, req.ContentID, languages[0]) {
+				adoptTarget = languages[0]
+			}
+		}
+	}
+
 	var final ProcessResult
 	for _, language := range languages {
 		langReq := req
 		langReq.Language = language
+		langReq.AdoptLanguage = adoptTarget != "" && strings.EqualFold(language, adoptTarget)
 		result, err := s.processInternal(ctx, langReq, resolveChain)
 		if err != nil {
 			return nil, err
@@ -566,6 +586,48 @@ func (s *MetadataService) maybeAutoTranslate(ctx context.Context, folderID int, 
 		return
 	}
 	go s.autoTranslator.AutoEnqueue(context.WithoutCancel(ctx), contentID, library)
+}
+
+// adoptableFolderLanguage reports whether a folder-scoped refresh should
+// adopt the folder's language as the item's new canonical metadata language.
+// Only manual refreshes adopt: their MergeReplaceUnlocked policy actually
+// rewrites title/overview, whereas a scheduled refresh merges fill-empty and
+// would restamp the language without replacing the text — mislabeling the
+// base row.
+func adoptableFolderLanguage(mode RefreshMode, stampedLanguage, folderLanguage string) bool {
+	if mode != ModeManualRefresh {
+		return false
+	}
+	stamp := strings.TrimSpace(stampedLanguage)
+	target := strings.TrimSpace(folderLanguage)
+	return stamp != "" && target != "" && !strings.EqualFold(stamp, target)
+}
+
+// itemLibrariesAgreeOnLanguage reports whether every library containing the
+// item resolves to the same effective metadata language as target. An item can
+// live in several libraries (media_item_libraries); adopting the requesting
+// library's language while another library is configured differently would
+// rewrite the canonical base row to whichever library refreshed last, forever.
+// Disagreement (or a lookup failure) skips adoption — a stable stamp beats
+// flip-flopping. Unset library languages count as "en", the same default
+// resolveFolderLanguage applies, so both sides of the comparison use the same
+// effective-language rules.
+func (s *MetadataService) itemLibrariesAgreeOnLanguage(ctx context.Context, contentID, target string) bool {
+	if s.libraryRepo == nil {
+		return false
+	}
+	languages, err := s.libraryRepo.GetDistinctMetadataLanguagesForItem(ctx, contentID)
+	if err != nil {
+		slog.Warn("metadata: failed to look up library languages for adoption gate; keeping current stamp",
+			"content_id", contentID, "error", err)
+		return false
+	}
+	for _, language := range languages {
+		if !strings.EqualFold(strings.TrimSpace(language), strings.TrimSpace(target)) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseProcessFolderID(raw string) int {
@@ -1451,8 +1513,21 @@ func (s *MetadataService) mergeAndPersist(
 		}
 	}
 
+	// Adoption restamps default_metadata_language to req.Language while the
+	// merge below rewrites the language-bearing text (title, overview). Field
+	// locks win over adoption: if BOTH are locked, nothing would actually be
+	// rewritten, and restamping would permanently mislabel the old-language
+	// text as the new language (the quick-refresh mismatch predicate would
+	// never flag the item again). Fall back to the non-adopting behavior in
+	// that case — keep the existing stamp and let the fetch route to the
+	// localization tables like any other non-canonical refresh.
+	adoptLanguage := req.AdoptLanguage
+	if adoptLanguage && isFieldLocked(locked, FieldName) && isFieldLocked(locked, FieldOverview) {
+		adoptLanguage = false
+	}
+
 	canonicalLanguage := strings.TrimSpace(req.Language)
-	if existingItem != nil && strings.TrimSpace(existingItem.DefaultMetadataLanguage) != "" {
+	if !adoptLanguage && existingItem != nil && strings.TrimSpace(existingItem.DefaultMetadataLanguage) != "" {
 		canonicalLanguage = strings.TrimSpace(existingItem.DefaultMetadataLanguage)
 	}
 	if canonicalLanguage == "" {
