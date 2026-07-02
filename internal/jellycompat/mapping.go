@@ -175,7 +175,7 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		dto.ProductionLocations = append([]string{}, item.Countries...)
 	}
 	if allFields || fields["criticrating"] {
-		dto.CriticRating = intPtrToFloatPtr(item.RatingRTCritic)
+		dto.CriticRating = criticRating(item.RatingRTCritic, item.RatingTMDB)
 	}
 	if allFields || fields["mediasourcecount"] {
 		// The list path has no version data, so assume matched playable items
@@ -365,7 +365,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 	dto.OriginalTitle = firstNonEmpty(item.OriginalTitle, item.Title)
 	dto.SortName = firstNonEmpty(item.SortTitle, item.OriginalTitle, item.Title)
 	dto.ForcedSortName = dto.SortName
-	dto.CriticRating = intPtrToFloatPtr(item.RatingRTCritic)
+	dto.CriticRating = criticRating(item.RatingRTCritic, item.RatingTMDB)
 	dto.Studios = m.namePairs(item.Studios, EncodedIDStudio)
 	dto.ProductionLocations = append([]string{}, item.Countries...)
 	if item.Tagline != "" {
@@ -807,6 +807,17 @@ func intPtrToFloatPtr(v *int) *float64 {
 	}
 	f := float64(*v)
 	return &f
+}
+
+// criticRating resolves the Jellyfin CriticRating field: prefer the Rotten
+// Tomatoes critic score (0-100) when present, otherwise fall back to the TMDB
+// rating so titles not yet RT-backfilled still surface a rating. nil in both →
+// nil out.
+func criticRating(rtCritic *int, tmdb *float64) *float64 {
+	if rt := intPtrToFloatPtr(rtCritic); rt != nil {
+		return rt
+	}
+	return tmdb
 }
 
 func detailMediaSourceDTO(sourceID string, version catalog.FileVersion, streams []mediaStreamDTO) mediaSourceDTO {

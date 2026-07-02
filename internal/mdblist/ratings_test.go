@@ -20,7 +20,7 @@ func TestRatingsByIMDBHappyPath(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient("secret-key", srv.Client())
-	c.baseURL = srv.URL
+	c.ratingsBaseURL = srv.URL
 
 	got, err := c.RatingsByIMDB(context.Background(), "tt0111161")
 	if err != nil {
@@ -53,7 +53,7 @@ func TestRatingsByIMDBNullValuesLeftNil(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient("k", srv.Client())
-	c.baseURL = srv.URL
+	c.ratingsBaseURL = srv.URL
 
 	got, err := c.RatingsByIMDB(context.Background(), "tt0111161")
 	if err != nil {
@@ -82,7 +82,7 @@ func TestRatingsByIMDBRateLimited(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient("k", srv.Client())
-	c.baseURL = srv.URL
+	c.ratingsBaseURL = srv.URL
 
 	if _, err := c.RatingsByIMDB(context.Background(), "tt0111161"); err == nil {
 		t.Fatal("expected rate limit error, got nil")

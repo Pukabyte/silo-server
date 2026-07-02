@@ -18,6 +18,13 @@ import (
 
 const defaultBaseURL = "https://api.mdblist.com"
 
+// defaultRatingsBaseURL is the legacy MDBList lookup host used by
+// RatingsByIMDB. Unlike api.mdblist.com (the REST/discovery host), this
+// endpoint accepts ?i=<imdbID> and returns the full ratings array with the
+// "tomatoes"/"tomatoesaudience" source names the parser expects. The REST host
+// renames the audience source to "popcorn", so it is deliberately not used.
+const defaultRatingsBaseURL = "https://mdblist.com/api"
+
 // ErrNotConfigured is returned when no MDBList apikey has been configured.
 var ErrNotConfigured = errors.New("mdblist apikey is not configured")
 
@@ -42,9 +49,10 @@ type ListSummary struct {
 // is safe for concurrent use because http.Client is. The apikey is atomic so
 // admin settings changes apply to subsequent requests without restart.
 type Client struct {
-	apiKey  atomic.Pointer[string]
-	baseURL string
-	http    *http.Client
+	apiKey         atomic.Pointer[string]
+	baseURL        string
+	ratingsBaseURL string
+	http           *http.Client
 }
 
 // NewClient returns a discovery client. apiKey may be empty — the Search/Top
@@ -54,8 +62,9 @@ func NewClient(apiKey string, httpClient *http.Client) *Client {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	c := &Client{
-		baseURL: defaultBaseURL,
-		http:    httpClient,
+		baseURL:        defaultBaseURL,
+		ratingsBaseURL: defaultRatingsBaseURL,
+		http:           httpClient,
 	}
 	c.SetAPIKey(apiKey)
 	return c
