@@ -726,19 +726,24 @@ func (s *ABSMediaStore) RefreshAuthorCounts(ctx context.Context) error {
 // total author count for the library. It reads the precomputed
 // abs_audiobook_author_counts materialized view keyed by media_folder_id.
 //
-// ponytail: the MV carries no per-item access predicate. That's acceptable
-// because audiobook access is library-level all-or-nothing — resolveLibrary
-// has already access-checked the single library this endpoint is scoped to.
-// Per-item audiobook access would require revisiting this (and the MV itself).
+// The MV is keyed by library_id only and carries no per-item access predicate,
+// so it is safe only when the caller has no item-level restriction. When the
+// access filter carries an item-level predicate (a content-rating cap or
+// excluded media types), reading the MV would leak authors of books the caller
+// can't see, so we take the access-aware live path instead. Library-level
+// access is already enforced by scoping to a single resolved library.
 //
 // When the MV read returns zero rows (stale, empty, or not-yet-refreshed view)
-// we fall back to the live GROUP BY so /authors never blanks out.
+// we also fall back to the live GROUP BY so /authors never blanks out.
 func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64, limit, offset int, sortBy string, sortDesc bool, access catalog.AccessFilter) ([]abs.AuthorSummary, int, error) {
 	if s.Pool == nil {
 		return nil, 0, nil
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	if access.MaxContentRating != "" || len(access.ExcludedMediaTypes) > 0 {
+		return s.listLibraryAuthorsLive(ctx, libraryID, limit, offset, sortBy, sortDesc, access)
 	}
 	var total int
 	if err := s.Pool.QueryRow(ctx,

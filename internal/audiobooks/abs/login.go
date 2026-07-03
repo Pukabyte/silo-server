@@ -483,6 +483,16 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if refreshTok == "" {
+		// Cookie-flow clients (those that omit x-return-tokens at login) hold the
+		// refresh token only in the HttpOnly refresh_token cookie the server set —
+		// they send neither header nor body. Read it here or they get a spurious
+		// 400 once the access token expires. Mirrors real ABS Auth.js, which
+		// checks req.cookies.refresh_token.
+		if c, err := r.Cookie("refresh_token"); err == nil {
+			refreshTok = strings.TrimSpace(c.Value)
+		}
+	}
+	if refreshTok == "" {
 		http.Error(w, "refreshToken required", http.StatusBadRequest)
 		return
 	}

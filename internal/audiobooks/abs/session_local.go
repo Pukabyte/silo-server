@@ -3,8 +3,10 @@ package abs
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 )
@@ -31,13 +33,14 @@ import (
 //
 // silo does not persist arbitrary client-supplied sessions, so we do not
 // create a server-side playback-session row here. We mirror the *effect* that
-// matters — the caller's resume position — by calling
-// ProgressStore.UpdateProgressPosition (the same call handleSessionSync uses),
-// and emit the same user_item_progress_updated realtime event. Accumulated
+// matters — the caller's resume position — into user_watch_progress and emit
+// the same user_item_progress_updated realtime event handleSessionSync does.
+// An existing progress row is advanced monotonically (UpdateProgressPosition);
+// a book listened to entirely offline has no row yet, so one is created
+// (UpsertProgress) rather than silently dropping the position. Accumulated
 // offline listening time is not persisted: there is no store method to add
-// standalone listening time without an existing session row, and the brief
-// forbids inventing new persistence. Position sync is the client-visible
-// behaviour offline sync exists to restore.
+// standalone listening time without an existing session row. Position sync is
+// the client-visible behaviour offline sync exists to restore.
 
 // localPlaybackSession is the subset of the ABS PlaybackSession payload the
 // client POSTs for offline sync that silo acts on. EpisodeID is a pointer so a
@@ -70,7 +73,7 @@ func (h *Handler) handleSyncLocalSession(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var sess localPlaybackSession
-	if err := json.NewDecoder(r.Body).Decode(&sess); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&sess); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
@@ -104,7 +107,7 @@ func (h *Handler) handleSyncLocalSessions(w http.ResponseWriter, r *http.Request
 	var body struct {
 		Sessions []json.RawMessage `json:"sessions"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
@@ -161,15 +164,39 @@ func (h *Handler) syncOneLocalSession(ctx context.Context, a ctxAuth, access cat
 
 	res.Success = true
 
-	// Update resume position in user_watch_progress. As in handleSessionSync,
-	// use UpdateProgressPosition (not a full upsert) so a stale offline tick
-	// can't overwrite is_finished / progress_pct the user set explicitly.
+	// Persist the offline resume position into user_watch_progress.
+	//
+	// For an existing row we use UpdateProgressPosition (not a full upsert) so a
+	// stale offline tick can't overwrite is_finished / progress_pct the user set
+	// explicitly — it advances position monotonically and skips completed rows.
+	//
+	// But UpdateProgressPosition is UPDATE-only: when a book was listened to
+	// entirely offline no row exists yet, so it would affect zero rows, drop the
+	// position, and still report ProgressSynced=true — the client then clears its
+	// local session with nothing saved. Create the row in that case so the resume
+	// point survives.
 	if h.deps.ProgressStore != nil {
-		if err := h.deps.ProgressStore.UpdateProgressPosition(
-			ctx, a.UserID, a.ProfileID, sess.LibraryItemID, sess.CurrentTime,
-		); err != nil {
-			slog.Warn("abs local session sync: update progress position failed",
-				"library_item_id", sess.LibraryItemID, "error", err)
+		var syncErr error
+		existing, getErr := h.deps.ProgressStore.GetProgress(ctx, a.UserID, a.ProfileID, sess.LibraryItemID)
+		if getErr == nil && existing == nil {
+			syncErr = h.deps.ProgressStore.UpsertProgress(ctx, ProgressRow{
+				UserID:         a.UserID,
+				ProfileID:      a.ProfileID,
+				ContentID:      sess.LibraryItemID,
+				CurrentSeconds: sess.CurrentTime,
+				// For audiobooks MediaItem.Runtime holds total seconds (set by the
+				// scanner), matching what the ABS libraries handler reads.
+				DurationSeconds: float64(item.Runtime),
+				UpdatedAt:       time.Now(),
+			})
+		} else {
+			syncErr = h.deps.ProgressStore.UpdateProgressPosition(
+				ctx, a.UserID, a.ProfileID, sess.LibraryItemID, sess.CurrentTime,
+			)
+		}
+		if syncErr != nil {
+			slog.Warn("abs local session sync: persist progress position failed",
+				"library_item_id", sess.LibraryItemID, "error", syncErr)
 		} else {
 			res.ProgressSynced = true
 			// Realtime push so other connected clients see the caught-up
