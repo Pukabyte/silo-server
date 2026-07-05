@@ -21,6 +21,10 @@ const (
 	// watchlist), which lives on plex.tv infrastructure rather than the PMS.
 	plexDiscoverBaseURL = "https://discover.provider.plex.tv"
 	plexPageSize        = 500
+	// plexWatchlistPageSize is deliberately smaller: the discover API
+	// rejects the PMS page size with 400 "Invalid value provided for
+	// x-plex-container-size!".
+	plexWatchlistPageSize = 100
 )
 
 type PlexClient struct {
@@ -297,7 +301,7 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 		query := url.Values{}
 		query.Set("includeGuids", "1")
 		query.Set("X-Plex-Container-Start", strconv.Itoa(offset))
-		query.Set("X-Plex-Container-Size", strconv.Itoa(plexPageSize))
+		query.Set("X-Plex-Container-Size", strconv.Itoa(plexWatchlistPageSize))
 		reqURL := fmt.Sprintf("%s/library/sections/watchlist/all?%s", base, query.Encode())
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
