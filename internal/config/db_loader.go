@@ -598,5 +598,28 @@ func LoadFromDB(m map[string]string) (*Config, error) {
 	cfg.Download.MaxConcurrentPrepares = maxConcurrentPrepares
 	cfg.Download.ArtifactMaxBytes = artifactMaxBytes
 
+	// Policy
+	policyEvalTimeoutMS, err := intOr(m, "policy.eval_timeout_ms", 25)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Policy.EvalTimeoutMS = policyEvalTimeoutMS
+	policyEditorEnabled, err := boolOr(m, "policy.editor_enabled", false)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Policy.EditorEnabled = policyEditorEnabled
+	cfg.Policy.DecisionLogVerbosity = stringOr(m, "policy.decision_log_verbosity", "digest")
+	policyDecisionLogScopeSampleRate, err := intOr(m, "policy.decision_log_scope_sample_rate", 50)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Policy.DecisionLogScopeSampleRate = policyDecisionLogScopeSampleRate
+	policyDecisionLogRetentionDays, err := intOr(m, "policy.decision_log_retention_days", 14)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Policy.DecisionLogRetentionDays = policyDecisionLogRetentionDays
+
 	return cfg, nil
 }

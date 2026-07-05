@@ -78,16 +78,18 @@ type Capability struct {
 // policy, file resolution, and file serving for both ephemeral/account-level
 // rows (DeviceID == "") and managed device-library entries (DeviceID set).
 type Service struct {
-	repo        *Repository
-	policy      DownloadQualityResolver
-	bandwidth   *BandwidthManager
-	limiter     *QuantityLimiter
-	fileRepo    FileResolver
-	itemRepo    ItemResolver
-	episodeRepo EpisodeResolver
-	userRepo    UserResolver
-	itemAccess  ItemAccessChecker
-	settings    SettingsReader
+	repo          *Repository
+	policy        DownloadQualityResolver
+	actionDecider ActionDecider
+	bandwidth     *BandwidthManager
+	limiter       *QuantityLimiter
+	fileRepo      FileResolver
+	itemRepo      ItemResolver
+	episodeRepo   EpisodeResolver
+	userRepo      UserResolver
+	groupProvider access.GroupPolicyProvider
+	itemAccess    ItemAccessChecker
+	settings      SettingsReader
 
 	// Offline-manifest dependencies (Phase 2); nil until SetOfflineDeps wires them.
 	manifest       *ManifestBuilder
@@ -138,6 +140,12 @@ func (s *Service) SetArtifactManager(m *ArtifactManager) {
 // When unset, the subscription endpoints report unavailable.
 func (s *Service) SetSubscriptions(subRepo *SubscriptionRepository) {
 	s.subRepo = subRepo
+}
+
+// SetGroupPolicyProvider wires access-group policy composition into download
+// checks. Nil keeps legacy user-row behavior.
+func (s *Service) SetGroupPolicyProvider(provider access.GroupPolicyProvider) {
+	s.groupProvider = provider
 }
 
 // Config returns the current (live, cache-refreshed) download config. Used by
@@ -247,6 +255,10 @@ func (s *Service) Capability(ctx context.Context, userID int) (Capability, error
 	if err != nil {
 		return Capability{}, fmt.Errorf("loading user: %w", err)
 	}
+	user, err = s.effectiveDownloadUser(ctx, user)
+	if err != nil {
+		return Capability{}, fmt.Errorf("loading access group policy: %w", err)
+	}
 	c := Capability{
 		Enabled:              cfg.Enabled,
 		DownloadAllowed:      user.DownloadAllowed,
@@ -254,7 +266,11 @@ func (s *Service) Capability(ctx context.Context, userID int) (Capability, error
 		TranscodeEnabled:     cfg.TranscodeEnabled,
 		TranscodeUserAllowed: user.DownloadTranscodeAllowed,
 	}
-	c.QualityPresets = s.policy.PresetsFor(user, cfg, s.artifacts != nil)
+	if s.actionDecider != nil {
+		c.QualityPresets = s.policyPresetsFor(ctx, user, cfg, s.artifacts != nil)
+	} else {
+		c.QualityPresets = s.policy.PresetsFor(user, cfg, s.artifacts != nil)
+	}
 	if len(c.QualityPresets) > 0 {
 		// Per-season download is always available when downloads are enabled;
 		// auto-download monitoring additionally requires the subscription repo.
@@ -265,6 +281,25 @@ func (s *Service) Capability(ctx context.Context, userID int) (Capability, error
 		}
 	}
 	return c, nil
+}
+
+func (s *Service) effectiveDownloadUser(ctx context.Context, user *models.User) (*models.User, error) {
+	if user == nil {
+		return nil, nil
+	}
+	effective, err := access.EffectivePolicyForUser(ctx, user, s.groupProvider)
+	if err != nil {
+		return nil, err
+	}
+	out := *user
+	out.LibraryIDs = effective.LibraryIDs
+	out.MaxPlaybackQuality = effective.MaxPlaybackQuality
+	out.MaxStreams = effective.MaxStreams
+	out.MaxTranscodes = effective.MaxTranscodes
+	out.Permissions = effective.Permissions
+	out.DownloadAllowed = effective.DownloadAllowed
+	out.DownloadTranscodeAllowed = effective.DownloadTranscodeAllowed
+	return &out, nil
 }
 
 // CreateRequest holds the parameters for creating a download. A non-empty
@@ -288,16 +323,9 @@ type CreateRequest struct {
 // ephemeral row unless compatibility requires a prepared artifact. Bitrate
 // qualities always prepare a transcode artifact before the row becomes ready.
 func (s *Service) Create(ctx context.Context, userID int, req CreateRequest, filter catalog.AccessFilter) (*Download, error) {
-	cfg, err := s.enabledConfig(ctx)
+	cfg, user, err := s.downloadConfigForUser(ctx, userID, req.DeviceID)
 	if err != nil {
 		return nil, err
-	}
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("loading user: %w", err)
-	}
-	if !user.DownloadAllowed {
-		return nil, ErrDownloadNotAllowed
 	}
 	file, err := s.resolveFile(ctx, req)
 	if err != nil {
@@ -307,7 +335,7 @@ func (s *Service) Create(ctx context.Context, userID int, req CreateRequest, fil
 		return nil, err
 	}
 
-	decision, err := s.policy.Resolve(req.Quality, user, cfg, file, req.Caps, s.artifacts != nil)
+	decision, err := s.policy.Resolve(ctx, req.Quality, user, cfg, file, req.Caps, s.artifacts != nil, req.DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -323,31 +351,35 @@ func (s *Service) Create(ctx context.Context, userID int, req CreateRequest, fil
 		return rows[0], nil
 	}
 
-	if err := s.limiter.Check(ctx, userID, 1); err != nil {
-		return nil, err
-	}
-	id, err := idgen.NextID()
+	var d *Download
+	err = s.repo.WithUserQuotaLock(ctx, userID, func(ctx context.Context) error {
+		if err := s.limiter.Check(ctx, userID, 1); err != nil {
+			return err
+		}
+		id, err := idgen.NextID()
+		if err != nil {
+			return fmt.Errorf("generating download ID: %w", err)
+		}
+		now := time.Now()
+		d = &Download{
+			ID:               id,
+			UserID:           userID,
+			MediaFileID:      file.ID,
+			ContentID:        file.ContentID,
+			EpisodeID:        file.EpisodeID,
+			Kind:             KindQueued,
+			Status:           StatusQueued,
+			Format:           FormatOriginal,
+			Quality:          QualityOriginal,
+			EffectiveQuality: QualityOriginal,
+			Revision:         1,
+			FileSize:         file.FileSize,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		return s.repo.Create(ctx, d)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("generating download ID: %w", err)
-	}
-	now := time.Now()
-	d := &Download{
-		ID:               id,
-		UserID:           userID,
-		MediaFileID:      file.ID,
-		ContentID:        file.ContentID,
-		EpisodeID:        file.EpisodeID,
-		Kind:             KindQueued,
-		Status:           StatusQueued,
-		Format:           FormatOriginal,
-		Quality:          QualityOriginal,
-		EffectiveQuality: QualityOriginal,
-		Revision:         1,
-		FileSize:         file.FileSize,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.repo.Create(ctx, d); err != nil {
 		return nil, err
 	}
 	return d, nil
@@ -364,9 +396,7 @@ func (s *Service) createArtifactDownload(ctx context.Context, userID int, req Cr
 	}
 
 	// Resolve any existing managed entry first: replacing one doesn't add a
-	// row, so it stays quota-exempt. Every other path must pass the limiter
-	// BEFORE artifacts.Ensure — a rejected request must not leave an encode
-	// job behind (the worker would run it even though the caller saw 429).
+	// row, so it stays quota-exempt and needs no quota lock.
 	var existing *Download
 	if managed {
 		ex, err := s.repo.GetManagedEntry(ctx, userID, req.ProfileID, req.DeviceID, file.ContentID, file.EpisodeID)
@@ -377,71 +407,94 @@ func (s *Service) createArtifactDownload(ctx context.Context, userID int, req Cr
 			return nil, err
 		}
 	}
-	if existing == nil {
-		if err := s.limiter.Check(ctx, userID, 1); err != nil {
+	if existing != nil {
+		artifact, err := s.artifacts.Ensure(ctx, file, decision.DeliveryFormat, decision.PrepareTarget)
+		if err != nil {
 			return nil, err
 		}
-	}
-
-	artifact, err := s.artifacts.Ensure(ctx, file, decision.DeliveryFormat, decision.PrepareTarget)
-	if err != nil {
-		return nil, err
-	}
-
-	status := StatusPreparing
-	size := file.FileSize
-	if artifact.Status == ArtifactReady {
-		status = StatusReady
-		size = artifact.FileSize
-	}
-
-	if existing != nil {
+		status, size := artifactRowStatus(artifact, file)
 		replacement := buildManagedDownload(userID, req.ProfileID, req.DeviceID, managedItem{file: file, contentID: file.ContentID, episodeID: file.EpisodeID}, decision, "", status, size, artifact.ID)
 		return s.reuseOrReplaceManaged(ctx, existing, replacement)
 	}
-	if managed {
-		if err := s.repo.EnsureDevice(ctx, userID, req.ProfileID, req.DeviceID, req.DeviceName, req.DevicePlatform); err != nil {
-			return nil, err
-		}
-	}
 
-	id, err := idgen.NextID()
-	if err != nil {
-		return nil, fmt.Errorf("generating download ID: %w", err)
-	}
-	now := time.Now()
-	d := &Download{
-		ID:                id,
-		UserID:            userID,
-		MediaFileID:       file.ID,
-		ContentID:         file.ContentID,
-		EpisodeID:         file.EpisodeID,
-		Kind:              KindQueued,
-		Status:            status,
-		Format:            decision.DeliveryFormat,
-		Quality:           decision.RequestedQuality,
-		EffectiveQuality:  decision.EffectiveQuality,
-		TargetBitrateKbps: decision.TargetBitrateKbps,
-		Revision:          1,
-		ArtifactID:        artifact.ID,
-		FileSize:          size,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	if managed {
-		d.ProfileID = req.ProfileID
-		d.DeviceID = req.DeviceID
-	}
-	if err := s.repo.Create(ctx, d); err != nil {
+	// New row: the quota lock serializes check + insert across concurrent
+	// creates so they cannot all observe free quota before any row exists. The
+	// limiter must still pass BEFORE artifacts.Ensure — a rejected request must
+	// not leave an encode job behind (the worker would run it even though the
+	// caller saw 429) — so the lock spans Ensure too.
+	var d *Download
+	err := s.repo.WithUserQuotaLock(ctx, userID, func(ctx context.Context) error {
+		if err := s.limiter.Check(ctx, userID, 1); err != nil {
+			return err
+		}
+		artifact, err := s.artifacts.Ensure(ctx, file, decision.DeliveryFormat, decision.PrepareTarget)
+		if err != nil {
+			return err
+		}
+		status, size := artifactRowStatus(artifact, file)
+
 		if managed {
-			if existing, gerr := s.repo.GetManagedEntry(ctx, userID, req.ProfileID, req.DeviceID, file.ContentID, file.EpisodeID); gerr == nil {
-				replacement := buildManagedDownload(userID, req.ProfileID, req.DeviceID, managedItem{file: file, contentID: file.ContentID, episodeID: file.EpisodeID}, decision, "", status, size, artifact.ID)
-				return s.reuseOrReplaceManaged(ctx, existing, replacement)
+			if err := s.repo.EnsureDevice(ctx, userID, req.ProfileID, req.DeviceID, req.DeviceName, req.DevicePlatform); err != nil {
+				return err
 			}
 		}
+
+		id, err := idgen.NextID()
+		if err != nil {
+			return fmt.Errorf("generating download ID: %w", err)
+		}
+		now := time.Now()
+		d = &Download{
+			ID:                id,
+			UserID:            userID,
+			MediaFileID:       file.ID,
+			ContentID:         file.ContentID,
+			EpisodeID:         file.EpisodeID,
+			Kind:              KindQueued,
+			Status:            status,
+			Format:            decision.DeliveryFormat,
+			Quality:           decision.RequestedQuality,
+			EffectiveQuality:  decision.EffectiveQuality,
+			TargetBitrateKbps: decision.TargetBitrateKbps,
+			Revision:          1,
+			ArtifactID:        artifact.ID,
+			FileSize:          size,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}
+		if managed {
+			d.ProfileID = req.ProfileID
+			d.DeviceID = req.DeviceID
+		}
+		if err := s.repo.Create(ctx, d); err != nil {
+			if managed {
+				if existing, gerr := s.repo.GetManagedEntry(ctx, userID, req.ProfileID, req.DeviceID, file.ContentID, file.EpisodeID); gerr == nil {
+					replacement := buildManagedDownload(userID, req.ProfileID, req.DeviceID, managedItem{file: file, contentID: file.ContentID, episodeID: file.EpisodeID}, decision, "", status, size, artifact.ID)
+					row, rerr := s.reuseOrReplaceManaged(ctx, existing, replacement)
+					if rerr != nil {
+						return rerr
+					}
+					d = row
+					return nil
+				}
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return d, nil
+}
+
+// artifactRowStatus maps an ensured artifact to the download row status and
+// recorded size: ready artifacts serve immediately, anything else is preparing.
+func artifactRowStatus(artifact *Artifact, file *models.MediaFile) (string, int64) {
+	if artifact.Status == ArtifactReady {
+		return StatusReady, artifact.FileSize
+	}
+	return StatusPreparing, file.FileSize
 }
 
 // CreateSeries creates download records for every episode in a series. Managed
@@ -469,16 +522,9 @@ func (s *Service) CreateSeason(ctx context.Context, userID int, req CreateReques
 // queues ephemeral rows under one shared batch ID. Series/season downloads are
 // original-only.
 func (s *Service) createSeriesScoped(ctx context.Context, userID int, req CreateRequest, filter catalog.AccessFilter, listEpisodes func(context.Context) ([]*models.Episode, error)) ([]*Download, string, []SkippedDownload, error) {
-	cfg, err := s.enabledConfig(ctx)
+	cfg, user, err := s.downloadConfigForUser(ctx, userID, req.DeviceID)
 	if err != nil {
 		return nil, "", nil, err
-	}
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("loading user: %w", err)
-	}
-	if !user.DownloadAllowed {
-		return nil, "", nil, ErrDownloadNotAllowed
 	}
 	decision, err := s.resolveBulkQuality(req.Quality, user, cfg)
 	if err != nil {
@@ -547,10 +593,12 @@ func (s *Service) createSeriesScoped(ctx context.Context, userID int, req Create
 			UpdatedAt:        now,
 		})
 	}
-	if err := s.limiter.Check(ctx, userID, len(dls)); err != nil {
-		return nil, "", nil, err
-	}
-	if err := s.repo.CreateBatch(ctx, dls); err != nil {
+	if err := s.repo.WithUserQuotaLock(ctx, userID, func(ctx context.Context) error {
+		if err := s.limiter.Check(ctx, userID, len(dls)); err != nil {
+			return err
+		}
+		return s.repo.CreateBatch(ctx, dls)
+	}); err != nil {
 		return nil, "", nil, err
 	}
 	return dls, batchID, skipped, nil
@@ -636,20 +684,26 @@ func (s *Service) ensureManaged(ctx context.Context, userID int, req CreateReque
 	if len(newIdx) == 0 {
 		return results, nil
 	}
-	if err := s.limiter.Check(ctx, userID, len(newIdx)); err != nil {
-		return nil, err
-	}
-
-	toInsert := make([]*Download, 0, len(newIdx))
-	for _, i := range newIdx {
-		d, err := buildManagedOriginal(userID, req.ProfileID, req.DeviceID, items[i], decision, batchID)
-		if err != nil {
-			return nil, err
+	var inserted []*Download
+	if err := s.repo.WithUserQuotaLock(ctx, userID, func(ctx context.Context) error {
+		if err := s.limiter.Check(ctx, userID, len(newIdx)); err != nil {
+			return err
 		}
-		toInsert = append(toInsert, d)
-	}
-	inserted, err := s.repo.CreateManagedEntriesBatch(ctx, toInsert)
-	if err != nil {
+		toInsert := make([]*Download, 0, len(newIdx))
+		for _, i := range newIdx {
+			d, err := buildManagedOriginal(userID, req.ProfileID, req.DeviceID, items[i], decision, batchID)
+			if err != nil {
+				return err
+			}
+			toInsert = append(toInsert, d)
+		}
+		rows, err := s.repo.CreateManagedEntriesBatch(ctx, toInsert)
+		if err != nil {
+			return err
+		}
+		inserted = rows
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	byKey := make(map[ManagedEntryKey]*Download, len(inserted))
@@ -793,15 +847,8 @@ func (s *Service) List(ctx context.Context, userID int, profileID, deviceID stri
 // ServeDirect validates permissions and serves a file directly for browser
 // download. No persistent download record is created.
 func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, userID, fileID int, format string, filter catalog.AccessFilter) error {
-	if _, err := s.enabledConfig(ctx); err != nil {
+	if _, _, err := s.downloadConfigForUser(ctx, userID, ""); err != nil {
 		return err
-	}
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("loading user: %w", err)
-	}
-	if !user.DownloadAllowed {
-		return ErrDownloadNotAllowed
 	}
 	if format != "" && format != FormatOriginal {
 		return ErrFormatUnavailable
@@ -828,15 +875,8 @@ func (s *Service) ServeDirect(ctx context.Context, w http.ResponseWriter, r *htt
 // behavior. The ephemeral path never serves a managed row, and vice versa.
 func (s *Service) ServeFile(ctx context.Context, w http.ResponseWriter, r *http.Request, userID int, profileID, deviceID, downloadID string, filter catalog.AccessFilter) error {
 	// Re-check policy — admin may have disabled downloads or revoked permission.
-	if _, err := s.enabledConfig(ctx); err != nil {
+	if _, _, err := s.downloadConfigForUser(ctx, userID, deviceID); err != nil {
 		return err
-	}
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("loading user: %w", err)
-	}
-	if !user.DownloadAllowed {
-		return ErrDownloadNotAllowed
 	}
 
 	if deviceID != "" {

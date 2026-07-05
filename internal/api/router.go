@@ -51,6 +51,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/opslog"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/plugins"
+	"github.com/Silo-Server/silo-server/internal/policy"
 	"github.com/Silo-Server/silo-server/internal/ratelimit"
 	"github.com/Silo-Server/silo-server/internal/recommendations"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
@@ -125,6 +126,7 @@ type Dependencies struct {
 	LogStreamHub                 *logstream.Hub
 	RealtimeHub                  *notifications.Hub
 	Notifications                *notifications.System // user-facing release notifications (may be nil)
+	PolicySystem                 *policy.System        // policy engine lifecycle (may be nil)
 	EventsHub                    *evt.Hub
 	ScanRegistry                 *evt.ScanRegistry
 	LibraryScanQueue             *scanqueue.Service
@@ -269,9 +271,20 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 	}
 
+	var permissionPDP apimw.PermissionDecider
+	if deps.PolicySystem != nil {
+		permissionPDP = deps.PolicySystem.PDP()
+	}
+
 	// Admin authorization for routes: admin role, exercised through the
-	// account's primary household profile (see apimw.RequireActingAdmin).
-	requireActingAdmin := apimw.RequireActingAdmin(checkPrimaryProfile)
+	// account's primary household profile.
+	var requireActingAdmin func(http.Handler) http.Handler
+	if deps.PolicySystem != nil {
+		requireActingAdmin = apimw.NewPolicyActingAdminMiddleware(permissionPDP, checkPrimaryProfile)
+	} else {
+		// Legacy gate: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
+		requireActingAdmin = apimw.RequireActingAdmin(checkPrimaryProfile)
+	}
 
 	// Health handler advertises the server's identity so multi-server
 	// clients can display a friendly name. Falls back to empty strings
@@ -290,6 +303,10 @@ func NewRouter(deps Dependencies) chi.Router {
 	if deps.DB != nil {
 		settingsRepo = catalog.NewEncryptedSettingsRepo(catalog.NewServerSettingsRepo(deps.DB), deps.SecretCipher)
 	}
+	var accessGroupStore *access.GroupStore
+	if deps.DB != nil {
+		accessGroupStore = access.NewGroupStore(deps.DB)
+	}
 
 	// Build auth handler and auth middleware if DB and config are available.
 	var userRepo *auth.UserRepository
@@ -299,8 +316,9 @@ func NewRouter(deps Dependencies) chi.Router {
 	var authHandler *handlers.AuthHandler
 	var authMiddleware *apimw.AuthMiddleware
 	var viewerAccessMiddleware *apimw.ViewerAccessMiddleware
-	var permissionMiddleware *apimw.PermissionMiddleware
-	var viewerResolver *access.Resolver
+	var metadataCurationAccess func(http.Handler) http.Handler
+	var markerEditAccess func(http.Handler) http.Handler
+	var viewerResolver apimw.ViewerResolver
 	var profileTokenService *access.ProfileTokenService
 	var jwtService *auth.JWTService
 	var sessionRepo *auth.SessionRepository
@@ -339,15 +357,48 @@ func NewRouter(deps Dependencies) chi.Router {
 		authMiddleware = apimw.NewAuthMiddleware(jwtService, sessionRepo, apiKeyRepo, userRepo)
 		profileTokenService = access.NewProfileTokenService(deps.Config.Auth.JWTSecret, 0)
 		if deps.UserStoreProvider != nil {
-			viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService)
+			if deps.PolicySystem != nil {
+				viewerResolver = policy.NewViewerResolver(userRepo, deps.UserStoreProvider, profileTokenService, deps.PolicySystem.PDP(), accessGroupStore)
+			} else {
+				// Legacy resolver: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
+				viewerResolver = access.NewResolver(userRepo, deps.UserStoreProvider, profileTokenService, accessGroupStore)
+			}
 			viewerAccessMiddleware = apimw.NewViewerAccessMiddleware(viewerResolver)
 		}
 		if deps.DB != nil {
-			permissionMiddleware = apimw.NewPermissionMiddleware(
+			metadataLibraries := apimw.NewPGMetadataTargetLibraryResolver(deps.DB)
+			if deps.PolicySystem != nil {
+				metadataCurationAccess = apimw.NewPolicyPermissionMiddleware(
+					userRepo,
+					metadataLibraries,
+					checkPrimaryProfile,
+					permissionPDP,
+					accessGroupStore,
+				).RequireMetadataCurationForItem
+			} else {
+				// Legacy permission middleware: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
+				metadataCurationAccess = apimw.NewPermissionMiddleware(
+					userRepo,
+					metadataLibraries,
+					checkPrimaryProfile,
+				).RequireMetadataCurationForItem
+			}
+		}
+		if deps.PolicySystem != nil {
+			markerEditAccess = apimw.NewPolicyPermissionMiddleware(
 				userRepo,
-				apimw.NewPGMetadataTargetLibraryResolver(deps.DB),
+				nil, // marker gate does not resolve target libraries
 				checkPrimaryProfile,
-			)
+				permissionPDP,
+				accessGroupStore,
+			).RequireMarkerEdit
+		} else {
+			// Legacy gate: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
+			markerEditAccess = apimw.NewPermissionMiddleware(
+				userRepo,
+				nil,
+				checkPrimaryProfile,
+			).RequireMarkerEdit
 		}
 	}
 	if deps.SessionMgr != nil && userRepo != nil {
@@ -356,11 +407,18 @@ func NewRouter(deps Dependencies) chi.Router {
 			if err != nil {
 				return playback.SessionLimits{}, err
 			}
+			effective, err := access.EffectivePolicyForUser(ctx, user, accessGroupStore)
+			if err != nil {
+				return playback.SessionLimits{}, err
+			}
 			return playback.SessionLimits{
-				MaxStreams:    user.MaxStreams,
-				MaxTranscodes: user.MaxTranscodes,
+				MaxStreams:    effective.MaxStreams,
+				MaxTranscodes: effective.MaxTranscodes,
 			}, nil
 		})
+		if deps.PolicySystem != nil {
+			deps.SessionMgr.SetAdmissionDecider(policy.NewPlaybackAdmissionDecider(deps.PolicySystem.PDP()))
+		}
 	}
 
 	// Build demo guard middleware if server settings are available.
@@ -570,9 +628,10 @@ func NewRouter(deps Dependencies) chi.Router {
 			mediarequests.NewCatalogPresence(itemRepo, providerIDRepo),
 		)
 		AttachRequestRouter(requestSvc, deps.PluginService)
+		requestSvc.SetGroupPolicyProvider(accessGroupStore)
 		requestSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
 		if viewerResolver != nil {
-			requestSvc.SetEntitlementResolver(mediarequests.NewAccessEntitlements(viewerResolver))
+			requestSvc.SetEntitlementResolver(scopeEntitlementResolver{resolver: viewerResolver})
 		}
 		// Request lifecycle notifications (submitted / approved / declined):
 		// server-channel broadcasts plus personal deliveries to the requester
@@ -856,6 +915,7 @@ func NewRouter(deps Dependencies) chi.Router {
 
 	// Build admin handler if we have a user repo.
 	var adminHandler *handlers.AdminHandler
+	var accessGroupHandler *handlers.AccessGroupHandler
 	var catalogSeedHandler *handlers.CatalogSeedHandler
 	var adminJobsHandler *handlers.AdminJobsHandler
 	if userRepo != nil {
@@ -867,6 +927,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		adminHandler.ImpersonationService = authService
 		adminHandler.StatsSource = deps.AdminStatsProvider
 		adminHandler.RealtimeHub = deps.RealtimeHub
+		adminHandler.AccessGroups = accessGroupStore
 		adminHandler.BootstrapSensitiveConfigured = deps.BootstrapSensitiveConfigured
 		adminHandler.BootstrapSensitiveValues = deps.BootstrapSensitiveValues
 		adminHandler.RestartStatus = restartStatus
@@ -881,6 +942,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		if deps.OnServerSettingUpdated != nil {
 			adminHandler.OnServerSettingUpdated = deps.OnServerSettingUpdated
 		}
+	}
+	if accessGroupStore != nil {
+		accessGroupHandler = handlers.NewAccessGroupHandler(accessGroupStore)
 	}
 	if deps.DB != nil {
 		jobRepo := adminjob.NewRepository(deps.DB)
@@ -965,7 +1029,6 @@ func NewRouter(deps Dependencies) chi.Router {
 		)
 		markersHandler.BaseContext = deps.AppContext
 		markersHandler.AuditHistory = deps.FileRepo
-		markersHandler.Users = userRepo
 		if itemRepo != nil {
 			markersHandler.Authorizer = &handlers.MediaFileAuthorizer{
 				FileResolver:  deps.FileRepo,
@@ -1383,6 +1446,10 @@ func NewRouter(deps Dependencies) chi.Router {
 			settingsRepo,
 			&deps.Config.Download,
 		)
+		downloadSvc.SetGroupPolicyProvider(accessGroupStore)
+		if deps.PolicySystem != nil {
+			downloadSvc.SetActionDecider(deps.PolicySystem.PDP())
+		}
 		if detailSvc != nil {
 			// Offline manifest + artwork/subtitle proxies (Phase 2). subtitleManager
 			// may be nil when subtitles are unconfigured; pass a nil interface so the
@@ -1410,6 +1477,19 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 	} else {
 		downloadHandler = handlers.NewDownloadHandler(nil)
+	}
+
+	var policyHandler *handlers.PolicyHandler
+	if deps.PolicySystem != nil && deps.DB != nil {
+		policyHandler = handlers.NewPolicyHandler(
+			deps.PolicySystem,
+			policy.NewPolicyStore(deps.DB),
+			policy.NewDecisionRepository(deps.DB),
+			func() bool {
+				cfg := deps.CurrentConfig()
+				return cfg != nil && cfg.Policy.EditorEnabled
+			},
+		)
 	}
 
 	var historyImportHandler *handlers.HistoryImportHandler
@@ -1705,18 +1785,22 @@ func NewRouter(deps Dependencies) chi.Router {
 					})
 				}
 
-				// Marker read/write/clear for any authenticated viewer: users
-				// fix and create intro/recap/credits/preview markers from the
+				// Marker reads for any authenticated viewer; writes require the
+				// marker_edit permission, decided by the policy PDP. Users fix
+				// and create intro/recap/credits/preview markers from the
 				// player. Writes are stamped source="manual" and contributed to
 				// enabled providers in the background. Contribution + provider
 				// config stay admin-only (see the /admin group below).
-				if markersHandler != nil {
+				if markersHandler != nil && markerEditAccess != nil {
 					r.Route("/markers", func(r chi.Router) {
 						r.Get("/items/{id}", markersHandler.HandleGetItemMarkers)
-						r.Put("/items/{id}", markersHandler.HandleSetItemMarkers)
 						r.Get("/files/{fileId}", markersHandler.HandleGetFileMarkers)
-						r.Put("/files/{fileId}", markersHandler.HandleSetFileMarkers)
-						r.Delete("/files/{fileId}/{segment}", markersHandler.HandleClearFileSegment)
+						r.Group(func(r chi.Router) {
+							r.Use(markerEditAccess)
+							r.Put("/items/{id}", markersHandler.HandleSetItemMarkers)
+							r.Put("/files/{fileId}", markersHandler.HandleSetFileMarkers)
+							r.Delete("/files/{fileId}/{segment}", markersHandler.HandleClearFileSegment)
+						})
 					})
 				}
 
@@ -2187,6 +2271,9 @@ func NewRouter(deps Dependencies) chi.Router {
 				}
 
 				// Download routes.
+				if policyHandler != nil {
+					r.Get("/policy/capability", policyHandler.HandleCapability)
+				}
 				r.Route("/downloads", func(r chi.Router) {
 					r.Get("/capability", downloadHandler.HandleCapability)
 					r.Post("/", downloadHandler.HandleCreateDownload)
@@ -2268,8 +2355,8 @@ func NewRouter(deps Dependencies) chi.Router {
 				if adminHandler != nil {
 					r.Route("/admin", func(r chi.Router) {
 						metadataItemAccess := requireActingAdmin
-						if permissionMiddleware != nil {
-							metadataItemAccess = permissionMiddleware.RequireMetadataCurationForItem
+						if metadataCurationAccess != nil {
+							metadataItemAccess = metadataCurationAccess
 						}
 
 						r.Group(func(r chi.Router) {
@@ -2315,6 +2402,13 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Delete("/users/{id}/profiles/{profile_id}/devices/{device_id}/settings", adminHandler.HandleDeleteAllUserDeviceSettings)
 							r.Get("/devices", adminHandler.HandleListDevices)
 							r.Get("/devices/{user_id}/{device_id}", adminHandler.HandleGetDevice)
+							if accessGroupHandler != nil {
+								r.Get("/access-groups", accessGroupHandler.HandleList)
+								r.Post("/access-groups", accessGroupHandler.HandleCreate)
+								r.Get("/access-groups/{id}", accessGroupHandler.HandleGet)
+								r.Put("/access-groups/{id}", accessGroupHandler.HandleUpdate)
+								r.Delete("/access-groups/{id}", accessGroupHandler.HandleDelete)
+							}
 
 							r.Get("/sessions", adminHandler.HandleListSessions)
 							r.Get("/playback-history", adminHandler.HandleListPlaybackHistory)
@@ -2322,6 +2416,24 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Get("/stats", adminHandler.HandleGetStats)
 							r.Get("/server/status", adminHandler.HandleGetServerStatus)
 							r.Get("/catalog/search/status", adminHandler.HandleGetCatalogSearchStatus)
+							if policyHandler != nil {
+								r.Route("/policy", func(r chi.Router) {
+									r.Get("/vendor", policyHandler.HandleListVendor)
+									r.Get("/documents", policyHandler.HandleListDocuments)
+									r.Post("/documents", policyHandler.HandleCreateDocument)
+									r.Get("/documents/{id}", policyHandler.HandleGetDocument)
+									r.Delete("/documents/{id}", policyHandler.HandleDeleteDocument)
+									r.Get("/documents/{id}/versions", policyHandler.HandleListVersions)
+									r.Post("/documents/{id}/versions", policyHandler.HandleCreateVersion)
+									r.Get("/documents/{id}/versions/{version}", policyHandler.HandleGetVersion)
+									r.Post("/documents/{id}/versions/{version}/activate", policyHandler.HandleActivateVersion)
+									r.Post("/documents/{id}/enabled", policyHandler.HandleSetDocumentEnabled)
+									r.Post("/validate", policyHandler.HandleValidate)
+									r.Post("/simulate", policyHandler.HandleSimulate)
+									r.Get("/decisions", policyHandler.HandleListDecisions)
+									r.Get("/decisions/{id}", policyHandler.HandleGetDecision)
+								})
+							}
 							if literaryWorkHandler != nil {
 								r.Get("/literary-works/items/{content_id}/candidates", literaryWorkHandler.HandleListCandidates)
 								r.Post("/literary-works/link", literaryWorkHandler.HandleLinkItems)
@@ -3041,6 +3153,22 @@ func effectiveSubtitleAIConfig(cfg *config.Config) (subtitleai.Config, string) {
 func warnChatOnlyGateway(endpoint string) {
 	slog.Warn("subtitle transcription disabled: the effective transcription endpoint is a chat-only gateway; "+
 		"set a Whisper-compatible Transcription base URL in AI Services", "endpoint", endpoint)
+}
+
+type scopeEntitlementResolver struct {
+	resolver apimw.ViewerResolver
+}
+
+func (r scopeEntitlementResolver) MaxPlaybackQuality(ctx context.Context, userID int, profileID string) (string, error) {
+	scope, err := r.resolver.Resolve(ctx, access.ResolveInput{
+		UserID:              userID,
+		ProfileID:           profileID,
+		SkipPINVerification: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	return scope.MaxPlaybackQuality, nil
 }
 
 // metadataAIConfigFromServer derives the metadata translation service config

@@ -47,6 +47,7 @@ import RequestDetail from "@/pages/RequestDetail";
 import AdminDashboard from "@/pages/AdminDashboard";
 import AdminActivity from "@/pages/AdminActivity";
 import AdminLogs from "@/pages/AdminLogs";
+import AdminAccessGroups from "@/pages/AdminAccessGroups";
 import AdminUsers from "@/pages/AdminUsers";
 import AdminRequests from "@/pages/AdminRequests";
 import AdminAutoscan from "@/pages/AdminAutoscan";
@@ -68,6 +69,7 @@ import AdminTaskDetail from "@/pages/AdminTaskDetail";
 import AdminPlugins from "@/pages/AdminPlugins";
 import AdminHistoryImport from "@/pages/AdminHistoryImport";
 import AdminRecommendations from "@/pages/AdminRecommendations";
+import AdminPolicyLayout from "@/pages/admin-policy/AdminPolicyLayout";
 import Recommendations from "@/pages/Recommendations";
 import RecommendationsSection from "@/pages/RecommendationsSection";
 import Calendar from "@/pages/Calendar";
@@ -422,12 +424,14 @@ function AppRoutes() {
                   <Route path="history-import" element={<AdminHistoryImport />} />
                   <Route path="users" element={<AdminUsers />} />
                   <Route path="users/:id" element={<AdminUserDetail />} />
+                  <Route path="access-groups" element={<AdminAccessGroups />} />
                   <Route path="devices" element={<AdminDevices />} />
                   <Route path="devices/:userId/:deviceId" element={<AdminDevices />} />
                   <Route path="nodes" element={<AdminNodes />} />
                   <Route path="sections" element={<AdminSections />} />
                   <Route path="plugins" element={<AdminPlugins />} />
                   <Route path="settings" element={<AdminSettingsLayout />} />
+                  <Route path="policy" element={<AdminPolicyLayout />} />
                   <Route path="recommendations" element={<AdminRecommendations />} />
                   <Route path="api-keys" element={<AdminApiKeys />} />
                   <Route path="subtitles" element={<AdminSubtitles />} />

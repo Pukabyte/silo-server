@@ -102,12 +102,12 @@ export default function GeneralSettings() {
                 /32 (e.g. 203.0.113.7/32) if it reaches Silo from outside those ranges.
               </li>
               <li>
-                CDNs such as Cloudflare connect from many published IP ranges — you must list all
-                of their CIDRs and keep the list up to date as they change.
+                CDNs such as Cloudflare connect from many published IP ranges — you must list all of
+                their CIDRs and keep the list up to date as they change.
               </li>
               <li>
-                Avoid 0.0.0.0/0 (trust everything): any client could then spoof its IP with a
-                forged X-Forwarded-For header, affecting rate limits and audit logs.
+                Avoid 0.0.0.0/0 (trust everything): any client could then spoof its IP with a forged
+                X-Forwarded-For header, affecting rate limits and audit logs.
               </li>
             </ul>
           </div>
