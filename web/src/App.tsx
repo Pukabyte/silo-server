@@ -15,6 +15,7 @@ import { AuthProvider, useAuth } from "@/hooks/useAuth";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { ThemeProvider } from "@/hooks/useTheme";
+import { DateTimeFormatProvider, useDateTimeFormat } from "@/hooks/useDateTimeFormat";
 import { CustomThemeProvider } from "@/contexts/CustomThemeProvider";
 import { BrandingProvider } from "@/contexts/BrandingProvider";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -350,6 +351,14 @@ function LegacyUserCollectionRedirect() {
   );
 }
 
+// Re-renders the entire routed page tree when the date/time format
+// preference changes, so pages formatting dates via lib/datetime module state
+// pick up the new preference without per-component subscriptions.
+function ReactiveAppRoutes() {
+  useDateTimeFormat();
+  return <AppRoutes />;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -604,21 +613,23 @@ export default function App() {
             <BrandingProvider>
               <ThemeProvider>
                 <CustomThemeProvider>
-                  <WatchPlaybackProvider>
-                    <AudiobookPlaybackProvider>
-                      <RealtimeEventsProvider>
-                        <RealtimeEventChannels />
-                        <ScrollRestorationManager />
-                        <RouteAnnouncer />
-                        <QueryCacheManager />
-                        <AppChrome />
-                        <AppRoutes />
-                        <WatchPlaybackHost />
-                        <WatchPlaybackBar />
-                        <Toaster />
-                      </RealtimeEventsProvider>
-                    </AudiobookPlaybackProvider>
-                  </WatchPlaybackProvider>
+                  <DateTimeFormatProvider>
+                    <WatchPlaybackProvider>
+                      <AudiobookPlaybackProvider>
+                        <RealtimeEventsProvider>
+                          <RealtimeEventChannels />
+                          <ScrollRestorationManager />
+                          <RouteAnnouncer />
+                          <QueryCacheManager />
+                          <AppChrome />
+                          <ReactiveAppRoutes />
+                          <WatchPlaybackHost />
+                          <WatchPlaybackBar />
+                          <Toaster />
+                        </RealtimeEventsProvider>
+                      </AudiobookPlaybackProvider>
+                    </WatchPlaybackProvider>
+                  </DateTimeFormatProvider>
                 </CustomThemeProvider>
               </ThemeProvider>
             </BrandingProvider>
