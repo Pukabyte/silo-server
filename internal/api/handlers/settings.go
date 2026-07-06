@@ -231,10 +231,20 @@ var settingsRegistry = map[string]settingSpec{
 		DefaultValue: "true",
 		Validate:     validateBoolSetting("player.hdr_enabled"),
 	},
+	"player.dolby_vision_enabled": {
+		Scope:        scopeDevice,
+		DefaultValue: "true",
+		Validate:     validateBoolSetting("player.dolby_vision_enabled"),
+	},
 	"player.dv_profile7_hdr10_fallback": {
 		Scope:        scopeDevice,
 		DefaultValue: "false",
 		Validate:     validateBoolSetting("player.dv_profile7_hdr10_fallback"),
+	},
+	"player.seek_cache_enabled": {
+		Scope:        scopeDevice,
+		DefaultValue: "true",
+		Validate:     validateBoolSetting("player.seek_cache_enabled"),
 	},
 	"player.playback_speed": {
 		Scope:        scopeDevice,
