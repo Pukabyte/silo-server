@@ -565,6 +565,8 @@ func (h *AdminSplitHandler) persistOverrides(
 	target splitTarget,
 	actorUserID int,
 ) (rootPaths []string, filePaths []string, err error) {
+	// Non-nil so the JSON response carries [] instead of null.
+	rootPaths, filePaths = []string{}, []string{}
 	movedByRoot := map[string][]splitFile{}
 	folderByRoot := map[string]int{}
 	for _, f := range moved {
