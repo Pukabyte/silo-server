@@ -424,17 +424,17 @@ func watchlistRowsFromPayload(providerKey string, payload mdblistWatchlistRespon
 }
 
 func (p *Provider) ExportWatchlist(ctx context.Context, _ watchsync.ServerConfig, conn watchsync.Connection, items []watchsync.LocalFavorite) (watchsync.ExportResult, error) {
-	return p.sendWatchlist(ctx, conn, items, "/watchlist/items/add")
+	return p.sendWatchlist(ctx, conn, items, "/watchlist/items/add", false)
 }
 
 func (p *Provider) RemoveWatchlist(ctx context.Context, _ watchsync.ServerConfig, conn watchsync.Connection, items []watchsync.LocalFavorite) (watchsync.ExportResult, error) {
-	return p.sendWatchlist(ctx, conn, items, "/watchlist/items/remove")
+	return p.sendWatchlist(ctx, conn, items, "/watchlist/items/remove", true)
 }
 
-func (p *Provider) sendWatchlist(ctx context.Context, conn watchsync.Connection, favorites []watchsync.LocalFavorite, path string) (watchsync.ExportResult, error) {
+func (p *Provider) sendWatchlist(ctx context.Context, conn watchsync.Connection, favorites []watchsync.LocalFavorite, path string, removing bool) (watchsync.ExportResult, error) {
 	payload := buildWatchlistPayload(favorites)
 	if len(payload.Movies) == 0 && len(payload.Shows) == 0 {
-		return watchlistExportResult(favorites, false), nil
+		return watchlistExportResult(favorites, false, removing), nil
 	}
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(payload); err != nil {
@@ -444,13 +444,14 @@ func (p *Provider) sendWatchlist(ctx context.Context, conn watchsync.Connection,
 	if err := p.do(ctx, http.MethodPost, path, conn.AccessToken, &body, &response); err != nil {
 		return watchsync.ExportResult{}, err
 	}
-	return watchlistExportResult(favorites, response.NotFound > 0), nil
+	return watchlistExportResult(favorites, !emptyJSONValue(response.NotFound), removing), nil
 }
 
-func watchlistExportResult(favorites []watchsync.LocalFavorite, responseHasNotFound bool) watchsync.ExportResult {
+func watchlistExportResult(favorites []watchsync.LocalFavorite, responseHasNotFound, removing bool) watchsync.ExportResult {
 	result := watchsync.ExportResult{
-		Sent:   make([]string, 0, len(favorites)),
-		Failed: make(map[string]string),
+		Sent:     make([]string, 0, len(favorites)),
+		NotFound: make([]string, 0, len(favorites)),
+		Failed:   make(map[string]string),
 	}
 	for _, fav := range favorites {
 		if fav.MediaItemID == "" {
@@ -461,8 +462,15 @@ func watchlistExportResult(favorites []watchsync.LocalFavorite, responseHasNotFo
 			continue
 		}
 		if responseHasNotFound {
-			// The API returns only an aggregate count, so a partial rejection
-			// cannot be attributed safely to one favorite.
+			if removing {
+				// A successful removal leaves both removed and already-absent items
+				// absent remotely. MDBList returns only aggregate counts, so mark
+				// the batch reconciled without trying to attribute individual rows.
+				result.NotFound = append(result.NotFound, fav.MediaItemID)
+				continue
+			}
+			// Adds still need item-level identity that the aggregate response
+			// does not provide, so never claim that any item in the batch sent.
 			result.Failed[fav.MediaItemID] = "MDBList did not accept one or more watchlist items in the batch"
 			continue
 		}
@@ -470,6 +478,9 @@ func watchlistExportResult(favorites []watchsync.LocalFavorite, responseHasNotFo
 	}
 	if len(result.Failed) == 0 {
 		result.Failed = nil
+	}
+	if len(result.NotFound) == 0 {
+		result.NotFound = nil
 	}
 	return result
 }
@@ -758,6 +769,7 @@ type mdblistWatchedResponse struct {
 
 type mdblistPagination struct {
 	NextCursor string `json:"next_cursor"`
+	HasMore    bool   `json:"has_more"`
 }
 
 type mdblistPageState struct {
@@ -779,13 +791,22 @@ func (s mdblistPageState) path(base string) string {
 func (s *mdblistPageState) advance(pagination *mdblistPagination, fetched int) (bool, error) {
 	if pagination != nil {
 		next := strings.TrimSpace(pagination.NextCursor)
-		if next == "" {
+		if next != "" {
+			if next == s.cursor {
+				return false, errors.New("provider returned the same cursor twice")
+			}
+			s.cursor = next
+			return false, nil
+		}
+		if !pagination.HasMore {
 			return true, nil
 		}
-		if next == s.cursor {
-			return false, errors.New("provider returned the same cursor twice")
+		if fetched == 0 {
+			return false, errors.New("provider reported more pages without returning items")
 		}
-		s.cursor = next
+		s.cursor = ""
+		s.legacyOffset = true
+		s.offset += fetched
 		return false, nil
 	}
 	if fetched < syncPageLimit {
@@ -804,7 +825,7 @@ type mdblistWatchedWriteResponse struct {
 }
 
 type mdblistWatchlistWriteResponse struct {
-	NotFound int `json:"not_found"`
+	NotFound json.RawMessage `json:"not_found"`
 }
 
 func emptyJSONValue(raw json.RawMessage) bool {
@@ -1108,9 +1129,13 @@ func buildScrobblePayload(event watchsync.ScrobbleEvent) map[string]any {
 			showIDs = idsFromLocal(event.IMDbID, event.TMDBID, event.TVDBID)
 		}
 		payload["show"] = map[string]any{
-			"ids":     showIDs,
-			"season":  event.SeasonNumber,
-			"episode": event.EpisodeNumber,
+			"ids": showIDs,
+			"season": map[string]any{
+				"number": event.SeasonNumber,
+				"episode": map[string]any{
+					"number": event.EpisodeNumber,
+				},
+			},
 		}
 	default:
 		payload["movie"] = map[string]any{"ids": idsFromLocal(event.IMDbID, event.TMDBID, event.TVDBID)}

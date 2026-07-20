@@ -148,6 +148,32 @@ func TestFetchWatchedUsesCursorPagination(t *testing.T) {
 	}
 }
 
+func TestFetchWatchedContinuesOffsetPaginationWhenHasMore(t *testing.T) {
+	var offsets []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("offset") == "1" {
+			_, _ = w.Write([]byte(`{"movies":[],"episodes":[],"pagination":{"has_more":false}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"movies":[{"watched_at":"2025-11-01T08:30:00Z","movie":{"ids":{"imdb":"tt0111161"}}}],"episodes":[],"pagination":{"has_more":true}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	rows, err := p.FetchWatched(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"})
+	if err != nil {
+		t.Fatalf("fetch watched: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if len(offsets) != 2 || offsets[0] != "" || offsets[1] != "1" {
+		t.Fatalf("unexpected offsets: %#v", offsets)
+	}
+}
+
 func TestFetchProgressParsesFlatArray(t *testing.T) {
 	pausedAt := time.Date(2025, time.November, 1, 8, 30, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -349,14 +375,19 @@ func TestScrobbleStartUsesEpisodeShape(t *testing.T) {
 		t.Fatalf("expected progress 25, got %v", gotBody["progress"])
 	}
 	show, _ := gotBody["show"].(map[string]any)
-	if season, _ := show["season"].(float64); int(season) != 3 {
-		t.Fatalf("expected show season 3, got %v", show["season"])
+	season, _ := show["season"].(map[string]any)
+	if number, _ := season["number"].(float64); int(number) != 3 {
+		t.Fatalf("expected show season number 3, got %v", season["number"])
 	}
-	if episode, _ := show["episode"].(float64); int(episode) != 7 {
-		t.Fatalf("expected show episode 7, got %v", show["episode"])
+	episode, _ := season["episode"].(map[string]any)
+	if number, _ := episode["number"].(float64); int(number) != 7 {
+		t.Fatalf("expected show episode number 7, got %v", episode["number"])
 	}
 	if _, exists := gotBody["season"]; exists {
 		t.Fatalf("season must be nested under show: %#v", gotBody)
+	}
+	if _, exists := show["episode"]; exists {
+		t.Fatalf("episode must be nested under show season: %#v", show)
 	}
 	ids, _ := show["ids"].(map[string]any)
 	if ids["imdb"] != "tt0903747" {
@@ -397,7 +428,7 @@ func TestExportWatchlistSendsToWatchlistAdd(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &gotBody)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"added":1,"existing":0,"not_found":0}`))
+		_, _ = w.Write([]byte(`{"added":{"movies":1,"shows":1},"existing":{"movies":0,"shows":0},"not_found":{"movies":0,"shows":0}}`))
 	}))
 	defer server.Close()
 
@@ -427,7 +458,7 @@ func TestExportWatchlistSendsToWatchlistAdd(t *testing.T) {
 func TestExportWatchlistDoesNotClaimNotFoundBatchWasSent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"added":1,"existing":0,"not_found":1}`))
+		_, _ = w.Write([]byte(`{"added":{"movies":0,"shows":0},"existing":{"movies":0,"shows":0},"not_found":{"movies":1,"shows":0}}`))
 	}))
 	defer server.Close()
 
@@ -438,6 +469,27 @@ func TestExportWatchlistDoesNotClaimNotFoundBatchWasSent(t *testing.T) {
 		t.Fatalf("export watchlist: %v", err)
 	}
 	if len(result.Sent) != 0 || result.Failed["m1"] == "" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestRemoveWatchlistTreatsNotFoundBatchAsReconciled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/watchlist/items/remove" {
+			t.Fatalf("path = %q, want /watchlist/items/remove", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":{"movies":0,"shows":0},"existing":{"movies":0,"shows":0},"not_found":{"movies":1,"shows":0}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	favorites := []watchsync.LocalFavorite{{MediaItemID: "m1", Kind: historyimport.KindMovie, IMDbID: "tt0111161"}}
+	result, err := p.RemoveWatchlist(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, favorites)
+	if err != nil {
+		t.Fatalf("remove watchlist: %v", err)
+	}
+	if len(result.NotFound) != 1 || result.NotFound[0] != "m1" || len(result.Sent) != 0 || len(result.Failed) != 0 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }
@@ -478,6 +530,32 @@ func TestFetchWatchlistUsesCursorPagination(t *testing.T) {
 	}
 	if len(cursors) != 2 || cursors[0] != "" || cursors[1] != "watch-next" {
 		t.Fatalf("unexpected cursors: %#v", cursors)
+	}
+}
+
+func TestFetchWatchlistContinuesOffsetPaginationWhenHasMore(t *testing.T) {
+	var offsets []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("offset") == "1" {
+			_, _ = w.Write([]byte(`{"movies":[],"shows":[],"pagination":{"has_more":false}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"movies":[{"title":"The Shawshank Redemption","release_year":1994,"ids":{"imdb":"tt0111161"}}],"shows":[],"pagination":{"has_more":true}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	rows, err := p.FetchWatchlist(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"})
+	if err != nil {
+		t.Fatalf("fetch watchlist: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if len(offsets) != 2 || offsets[0] != "" || offsets[1] != "1" {
+		t.Fatalf("unexpected offsets: %#v", offsets)
 	}
 }
 

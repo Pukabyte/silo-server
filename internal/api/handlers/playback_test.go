@@ -493,6 +493,12 @@ func TestFinalizeSessionStop_UsesProviderLifecycleSemantics(t *testing.T) {
 			wantEventPosition: 120,
 		},
 		{
+			name:              "system teardown pauses persisted incomplete scrobble",
+			position:          600,
+			wantPauseCalls:    1,
+			wantEventPosition: 600,
+		},
+		{
 			name:              "completed system teardown stops scrobble",
 			position:          3500,
 			wantStopCalls:     1,
