@@ -32,6 +32,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
+	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
 
 type testUserStoreProvider struct {
@@ -132,6 +133,27 @@ func (noopPlaybackAdminStore) RecordHistory(context.Context, AdminPlaybackHistor
 }
 
 func (noopPlaybackAdminStore) DeleteSession(context.Context, string) error { return nil }
+
+type recordingPlaybackWatchScrobbler struct {
+	starts []watchsync.ScrobbleEvent
+	pauses []watchsync.ScrobbleEvent
+	stops  []watchsync.ScrobbleEvent
+}
+
+func (s *recordingPlaybackWatchScrobbler) ScrobbleStart(_ context.Context, event watchsync.ScrobbleEvent) error {
+	s.starts = append(s.starts, event)
+	return nil
+}
+
+func (s *recordingPlaybackWatchScrobbler) ScrobblePause(_ context.Context, event watchsync.ScrobbleEvent) error {
+	s.pauses = append(s.pauses, event)
+	return nil
+}
+
+func (s *recordingPlaybackWatchScrobbler) ScrobbleStop(_ context.Context, event watchsync.ScrobbleEvent) error {
+	s.stops = append(s.stops, event)
+	return nil
+}
 
 type testEpisodeLookup struct {
 	episode *models.Episode
@@ -444,6 +466,101 @@ func TestPlaybackSessionProgressPersistenceCanBeDisabled(t *testing.T) {
 	}
 	if progress == nil || progress.PositionSeconds != 500 || progress.DurationSeconds != 1200 {
 		t.Fatalf("progress after disabled session = %+v, want 500/1200", progress)
+	}
+}
+
+func TestFinalizeSessionStop_UsesProviderLifecycleSemantics(t *testing.T) {
+	tests := []struct {
+		name               string
+		position           float64
+		userInitiated      bool
+		disablePersistence bool
+		wantPauseCalls     int
+		wantStopCalls      int
+		wantEventPosition  float64
+	}{
+		{
+			name:              "user exit stops below-resume-threshold scrobble",
+			position:          120,
+			userInitiated:     true,
+			wantStopCalls:     1,
+			wantEventPosition: 120,
+		},
+		{
+			name:              "system teardown pauses reconstructable scrobble",
+			position:          120,
+			wantPauseCalls:    1,
+			wantEventPosition: 120,
+		},
+		{
+			name:              "system teardown pauses persisted incomplete scrobble",
+			position:          600,
+			wantPauseCalls:    1,
+			wantEventPosition: 600,
+		},
+		{
+			name:              "completed system teardown stops scrobble",
+			position:          3500,
+			wantStopCalls:     1,
+			wantEventPosition: 3500,
+		},
+		{
+			name:              "user exit at zero still stops scrobble",
+			userInitiated:     true,
+			wantStopCalls:     1,
+			wantEventPosition: 0,
+		},
+		{
+			name:               "disabled persistence does not scrobble",
+			position:           120,
+			userInitiated:      true,
+			disablePersistence: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newPlaybackTestStore(t)
+			file := &models.MediaFile{
+				ID:        42,
+				ContentID: "movie-1",
+				Duration:  3600,
+			}
+			scrobbler := &recordingPlaybackWatchScrobbler{}
+			handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
+			handler.StoreProvider = testUserStoreProvider{store: store}
+			handler.WatchScrobbler = scrobbler
+
+			session := &playback.Session{
+				ID:                         "session-1",
+				UserID:                     1,
+				ProfileID:                  "profile-1",
+				MediaFileID:                file.ID,
+				Position:                   tt.position,
+				DisableProgressPersistence: tt.disablePersistence,
+				StartedAt:                  time.Now().Add(-time.Minute),
+			}
+			handler.finalizeSessionStop(context.Background(), session, false, "", tt.userInitiated)
+
+			if got := len(scrobbler.pauses); got != tt.wantPauseCalls {
+				t.Fatalf("pause calls = %d, want %d", got, tt.wantPauseCalls)
+			}
+			if got := len(scrobbler.stops); got != tt.wantStopCalls {
+				t.Fatalf("stop calls = %d, want %d", got, tt.wantStopCalls)
+			}
+			if len(scrobbler.pauses)+len(scrobbler.stops) == 1 {
+				event := scrobbler.pauses
+				if len(event) == 0 {
+					event = scrobbler.stops
+				}
+				if event[0].MediaItemID != file.ContentID {
+					t.Fatalf("media item ID = %q, want %q", event[0].MediaItemID, file.ContentID)
+				}
+				if event[0].PositionSeconds != tt.wantEventPosition {
+					t.Fatalf("position = %v, want %v", event[0].PositionSeconds, tt.wantEventPosition)
+				}
+			}
+		})
 	}
 }
 
