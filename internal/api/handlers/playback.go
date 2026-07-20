@@ -1372,6 +1372,40 @@ func (h *PlaybackHandler) scrobbleEventForSession(ctx context.Context, session *
 	return event
 }
 
+func (h *PlaybackHandler) scrobbleEventForStoppedSession(
+	ctx context.Context,
+	session *playback.Session,
+	stopResult watchstate.PlaybackStopResult,
+) (watchsync.ScrobbleEvent, bool) {
+	if session == nil || session.DisableProgressPersistence {
+		return watchsync.ScrobbleEvent{}, false
+	}
+
+	mediaItemID := stopResult.MediaItemID
+	duration := stopResult.DurationSeconds
+	position := stopResult.FinalPositionSeconds
+	if mediaItemID == "" {
+		if h.fileResolver == nil {
+			return watchsync.ScrobbleEvent{}, false
+		}
+		file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID)
+		if err != nil || file == nil {
+			return watchsync.ScrobbleEvent{}, false
+		}
+		mediaItemID = playbackProgressTarget(file)
+		if mediaItemID == "" {
+			return watchsync.ScrobbleEvent{}, false
+		}
+		duration = float64(file.Duration)
+		position = session.Position
+	}
+
+	event := h.scrobbleEventForSession(ctx, session, mediaItemID, duration, position)
+	event.HistoryID = stopResult.HistoryID
+	event.Completed = stopResult.Completed
+	return event, true
+}
+
 func intPtrValue(value *int) int {
 	if value == nil {
 		return 0
@@ -1463,15 +1497,12 @@ func (h *PlaybackHandler) finalizeSessionStop(ctx context.Context, session *play
 	}
 
 	stopResult := h.persistStopAndHistory(ctx, session)
-	if h.WatchScrobbler != nil && stopResult.MediaItemID != "" {
-		event := h.scrobbleEventForSession(ctx, session, stopResult.MediaItemID, stopResult.DurationSeconds, stopResult.FinalPositionSeconds)
-		event.HistoryID = stopResult.HistoryID
-		event.Completed = stopResult.Completed
-		if stopResult.Completed {
+	if h.WatchScrobbler != nil {
+		if event, ok := h.scrobbleEventForStoppedSession(ctx, session, stopResult); ok && (userInitiated || stopResult.Completed) {
 			if err := h.WatchScrobbler.ScrobbleStop(ctx, event); err != nil {
 				slog.WarnContext(ctx, "failed to queue watch provider stop scrobble", "component", "api", "session", session.ID, "error", err)
 			}
-		} else if !stopResult.SkippedBelowMinResume {
+		} else if ok {
 			if err := h.WatchScrobbler.ScrobblePause(ctx, event); err != nil {
 				slog.WarnContext(ctx, "failed to queue watch provider pause scrobble", "component", "api", "session", session.ID, "error", err)
 			}

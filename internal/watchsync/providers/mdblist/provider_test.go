@@ -123,6 +123,31 @@ func TestFetchWatchedParsesMoviesAndEpisodes(t *testing.T) {
 	}
 }
 
+func TestFetchWatchedUsesCursorPagination(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("cursor") == "next-page" {
+			_, _ = w.Write([]byte(`{"movies":[],"episodes":[],"pagination":{"next_cursor":null}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"movies":[],"episodes":[],"pagination":{"next_cursor":"next-page"}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	if _, err := p.FetchWatched(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}); err != nil {
+		t.Fatalf("fetch watched: %v", err)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("got %d requests, want 2", len(queries))
+	}
+	if strings.Contains(queries[0], "offset=") || !strings.Contains(queries[1], "cursor=next-page") {
+		t.Fatalf("unexpected pagination queries: %#v", queries)
+	}
+}
+
 func TestFetchProgressParsesFlatArray(t *testing.T) {
 	pausedAt := time.Date(2025, time.November, 1, 8, 30, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +266,59 @@ func TestExportHistorySendsBulkPayload(t *testing.T) {
 	}
 }
 
+func TestExportHistoryDoesNotClaimNotFoundBatchWasSent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":{"movies":[]},"updated":{},"not_found":{"movies":[{"ids":{"imdb":"tt-missing"}}]}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	plays := []watchsync.LocalPlay{{HistoryID: "h1", Kind: historyimport.KindMovie, IMDbID: "tt-missing"}}
+	result, err := p.ExportHistory(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, plays)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(result.Sent) != 0 || result.Failed["h1"] == "" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestExportHistoryTreatsEmptyNotFoundBucketsAsSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":{"movies":1},"not_found":{"movies":[],"episodes":[]}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	plays := []watchsync.LocalPlay{{HistoryID: "h1", Kind: historyimport.KindMovie, IMDbID: "tt0111161"}}
+	result, err := p.ExportHistory(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, plays)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(result.Sent) != 1 || len(result.Failed) != 0 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestExportHistoryReportsUnsupportedItemWithoutCallingMDBList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("MDBList should not be called for an unsupported item")
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	plays := []watchsync.LocalPlay{{HistoryID: "h1", Kind: historyimport.KindMovie}}
+	result, err := p.ExportHistory(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, plays)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(result.Sent) != 0 || result.Failed["h1"] == "" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
 func TestScrobbleStartUsesEpisodeShape(t *testing.T) {
 	var gotPath string
 	var gotBody map[string]any
@@ -270,13 +348,44 @@ func TestScrobbleStartUsesEpisodeShape(t *testing.T) {
 	if progress, _ := gotBody["progress"].(float64); progress != 25 {
 		t.Fatalf("expected progress 25, got %v", gotBody["progress"])
 	}
-	if season, _ := gotBody["season"].(float64); int(season) != 3 {
-		t.Fatalf("expected season 3, got %v", gotBody["season"])
-	}
 	show, _ := gotBody["show"].(map[string]any)
+	if season, _ := show["season"].(float64); int(season) != 3 {
+		t.Fatalf("expected show season 3, got %v", show["season"])
+	}
+	if episode, _ := show["episode"].(float64); int(episode) != 7 {
+		t.Fatalf("expected show episode 7, got %v", show["episode"])
+	}
+	if _, exists := gotBody["season"]; exists {
+		t.Fatalf("season must be nested under show: %#v", gotBody)
+	}
 	ids, _ := show["ids"].(map[string]any)
 	if ids["imdb"] != "tt0903747" {
 		t.Fatalf("expected show imdb tt0903747, got %v", ids["imdb"])
+	}
+}
+
+func TestScrobbleRoundsProgressToMDBListPrecision(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	err := p.Start(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, watchsync.ScrobbleEvent{
+		Kind:            historyimport.KindMovie,
+		TMDBID:          "950387",
+		PositionSeconds: 611.8,
+		DurationSeconds: 2163.4,
+	})
+	if err != nil {
+		t.Fatalf("scrobble start: %v", err)
+	}
+	if got := gotBody["progress"]; got != 28.28 {
+		t.Fatalf("progress = %v, want 28.28", got)
 	}
 }
 
@@ -312,6 +421,63 @@ func TestExportWatchlistSendsToWatchlistAdd(t *testing.T) {
 	}
 	if _, ok := gotBody["shows"].([]any); !ok {
 		t.Fatalf("expected shows array in body: %#v", gotBody)
+	}
+}
+
+func TestExportWatchlistDoesNotClaimNotFoundBatchWasSent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":1,"existing":0,"not_found":1}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	favorites := []watchsync.LocalFavorite{{MediaItemID: "m1", Kind: historyimport.KindMovie, IMDbID: "tt0111161"}}
+	result, err := p.ExportWatchlist(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, favorites)
+	if err != nil {
+		t.Fatalf("export watchlist: %v", err)
+	}
+	if len(result.Sent) != 0 || result.Failed["m1"] == "" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestExportWatchlistReportsUnsupportedItemWithoutCallingMDBList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("MDBList should not be called for an unsupported item")
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	favorites := []watchsync.LocalFavorite{{MediaItemID: "m1", Kind: historyimport.KindMovie}}
+	result, err := p.ExportWatchlist(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}, favorites)
+	if err != nil {
+		t.Fatalf("export watchlist: %v", err)
+	}
+	if len(result.Sent) != 0 || result.Failed["m1"] == "" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestFetchWatchlistUsesCursorPagination(t *testing.T) {
+	var cursors []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cursors = append(cursors, r.URL.Query().Get("cursor"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("cursor") == "watch-next" {
+			_, _ = w.Write([]byte(`{"movies":[],"shows":[],"pagination":{"next_cursor":null}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"movies":[],"shows":[],"pagination":{"next_cursor":"watch-next"}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	if _, err := p.FetchWatchlist(context.Background(), watchsync.ServerConfig{}, watchsync.Connection{AccessToken: "k"}); err != nil {
+		t.Fatalf("fetch watchlist: %v", err)
+	}
+	if len(cursors) != 2 || cursors[0] != "" || cursors[1] != "watch-next" {
+		t.Fatalf("unexpected cursors: %#v", cursors)
 	}
 }
 
@@ -408,6 +574,21 @@ func TestDoReplaysBodyOnRateLimitRetry(t *testing.T) {
 	}
 	if len(bodies) != 2 || bodies[0] != bodies[1] || bodies[0] != `{"movies":[]}` {
 		t.Fatalf("body not replayed identically: %#v", bodies)
+	}
+}
+
+func TestDoIncludesMDBListValidationError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"progress":["Ensure that there are no more than 5 digits in total."]}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider(server.Client(), server.URL)
+	err := p.do(context.Background(), http.MethodPost, "/scrobble/start", "key", strings.NewReader(`{}`), nil)
+	if err == nil || !strings.Contains(err.Error(), "no more than 5 digits") {
+		t.Fatalf("expected validation detail, got %v", err)
 	}
 }
 
