@@ -43,6 +43,7 @@ import type {
   PlayerPlaybackStateChange,
   PlayerPlaybackTransport,
   PlaybackSessionPlaybackInfo,
+  PlaybackTransportRestart,
   PlayerAudioTrack,
   PlayerChapter,
   PlayMethod,
@@ -84,6 +85,7 @@ interface VideoPlayerProps {
   onSwitchVersion?: (fileId: number, currentPosition: number) => void;
   subtitleUrls: PlayerSubtitleInfo[];
   initialPosition: number;
+  transportRestart?: PlaybackTransportRestart | null;
   preferredSubtitleLanguage?: string | null;
   preferredSubtitleTrackSignature?: PlayerSubtitleTrackSignature | null;
   subtitleMode?: SubtitleMode;
@@ -174,6 +176,7 @@ export function VideoPlayer({
   onSwitchVersion,
   subtitleUrls,
   initialPosition,
+  transportRestart,
   preferredSubtitleLanguage,
   preferredSubtitleTrackSignature,
   subtitleMode,
@@ -337,6 +340,7 @@ export function VideoPlayer({
     playMethod,
     initialPosition,
     qualityPreference,
+    transportRestart,
   });
   const { cancelPendingTranscodeStart, startupGeneration } = transcodeQuality;
   const hlsStartupExpected =
