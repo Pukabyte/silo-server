@@ -136,12 +136,27 @@ func (h *Handler) handleDeleteItemProgress(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if h.deps.ProgressStore == nil {
+	contentID := chi.URLParam(r, "libraryItemId")
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	item, err := h.deps.MediaStore.GetAudiobookByID(r.Context(), contentID, access)
+	if err != nil || item == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	contentID := chi.URLParam(r, "libraryItemId")
-	if err := h.deps.ProgressStore.DeleteProgress(r.Context(), a.UserID, a.ProfileID, contentID); err != nil {
+	if item.Type == "ebook" {
+		if h.deps.EbookProgressStore == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		err = h.deps.EbookProgressStore.DeleteEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID)
+	} else if h.deps.ProgressStore != nil {
+		err = h.deps.ProgressStore.DeleteProgress(r.Context(), a.UserID, a.ProfileID, contentID)
+	}
+	if err != nil {
 		slog.WarnContext(r.Context(), "abs delete progress failed", "component", "audiobooks", "err", err, "content", contentID)
 		http.Error(w, "delete progress failed", http.StatusInternalServerError)
 		return

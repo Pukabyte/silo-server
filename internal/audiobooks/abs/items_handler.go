@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 
 	"github.com/go-chi/chi/v5"
 
@@ -185,15 +186,27 @@ func (h *Handler) handleItemsInProgress(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if h.deps.ProgressStore == nil {
+	if h.deps.ProgressStore == nil && h.deps.EbookProgressStore == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"libraryItems": []any{}})
 		return
 	}
 
-	rows, err := h.deps.ProgressStore.ListProgressForAudiobooks(r.Context(), a.UserID, a.ProfileID, 25)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var audioRows []ProgressRow
+	var ebookRows []EbookProgress
+	var err error
+	if h.deps.ProgressStore != nil {
+		audioRows, err = h.deps.ProgressStore.ListProgressForAudiobooks(r.Context(), a.UserID, a.ProfileID, 25)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if h.deps.EbookProgressStore != nil {
+		ebookRows, err = h.deps.EbookProgressStore.ListEbookProgress(r.Context(), a.UserID, a.ProfileID, 25)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	access, err := h.accessFilterForAuth(r.Context(), a)
@@ -201,31 +214,52 @@ func (h *Handler) handleItemsInProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	lib := h.resolveDefaultLibrary(r.Context(), access)
 	baseURL := h.absBaseURL(r)
-	ids := make([]string, 0, len(rows))
-	for _, p := range rows {
+	type candidate struct {
+		contentID string
+		updatedAt int64
+	}
+	candidates := make([]candidate, 0, len(audioRows)+len(ebookRows))
+	for _, p := range audioRows {
 		if !p.IsFinished && p.CurrentSeconds > 0 {
-			ids = append(ids, p.ContentID)
+			candidates = append(candidates, candidate{contentID: p.ContentID, updatedAt: p.UpdatedAt.UnixMilli()})
 		}
 	}
+	for _, p := range ebookRows {
+		if p.Progress > 0 && p.Progress < 0.9 {
+			candidates = append(candidates, candidate{contentID: p.ContentID, updatedAt: p.UpdatedAt.UnixMilli()})
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].updatedAt > candidates[j].updatedAt })
+	if len(candidates) > 25 {
+		candidates = candidates[:25]
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates { ids = append(ids, candidate.contentID) }
 	byID, err := h.deps.MediaStore.GetAudiobooksByIDs(r.Context(), ids, access)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	items := make([]any, 0, len(rows))
-	for _, p := range rows {
-		if p.IsFinished || p.CurrentSeconds <= 0 {
-			continue
-		}
-		si := byID[p.ContentID]
+	items := make([]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		si := byID[candidate.contentID]
 		if si == nil {
 			continue
 		}
-		mli := Minify(siloItemToLibraryItem(si, lib, baseURL))
+		lib := h.resolveLibraryForItem(r.Context(), si.Type, access)
+		entry := siloItemToLibraryItem(si, lib, baseURL)
+		if si.Type == "ebook" {
+			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), si.ContentID, access); err == nil {
+				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(r.Context(), si.ContentID)
+				if primaryErr == nil {
+					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
+				}
+			}
+		}
+		mli := Minify(entry)
 		wire := minifiedItemToWireMap(mli)
-		wire["progressLastUpdate"] = p.UpdatedAt.UnixMilli()
+		wire["progressLastUpdate"] = candidate.updatedAt
 		items = append(items, wire)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"libraryItems": items})

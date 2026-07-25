@@ -210,7 +210,7 @@ func (h *Handler) handleGetItemProgress(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	contentID := chi.URLParam(r, "libraryItemId")
-	if h.deps.ProgressStore == nil {
+	if h.deps.ProgressStore == nil && h.deps.EbookProgressStore == nil {
 		http.Error(w, "progress not found", http.StatusNotFound)
 		return
 	}
