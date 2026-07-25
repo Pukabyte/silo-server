@@ -74,6 +74,9 @@ type MediaStore interface {
 	// Home tab's discover shelf (helps new users browse the library).
 	ListDiscover(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
 	ListLibraryGenres(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
+	ListLibraryNarrators(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
+	ListLibraryPublishers(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
+	ListLibraryLanguages(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
 	// ListLibraryAuthors returns one page of distinct audiobook authors (from a
 	// precomputed materialized view) plus the total author count. sortBy is one
 	// of "name" (default), "addedAt", or "numBooks"; limit<=0 returns all.

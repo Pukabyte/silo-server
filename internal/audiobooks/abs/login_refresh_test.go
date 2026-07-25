@@ -56,6 +56,15 @@ func (noopMediaStore) ListDiscover(context.Context, int64, int, catalog.AccessFi
 func (noopMediaStore) ListLibraryGenres(context.Context, int64, catalog.AccessFilter) ([]string, error) {
 	return nil, nil
 }
+func (noopMediaStore) ListLibraryNarrators(context.Context, int64, catalog.AccessFilter) ([]string, error) {
+	return nil, nil
+}
+func (noopMediaStore) ListLibraryPublishers(context.Context, int64, catalog.AccessFilter) ([]string, error) {
+	return nil, nil
+}
+func (noopMediaStore) ListLibraryLanguages(context.Context, int64, catalog.AccessFilter) ([]string, error) {
+	return nil, nil
+}
 func (noopMediaStore) ListLibraryAuthors(context.Context, int64, int, int, string, bool, catalog.AccessFilter) ([]AuthorSummary, int, error) {
 	return nil, 0, nil
 }

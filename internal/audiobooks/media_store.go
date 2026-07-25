@@ -880,6 +880,45 @@ func (s *ABSMediaStore) ListLibraryGenres(ctx context.Context, libraryID int64, 
 	return out, rows.Err()
 }
 
+func (s *ABSMediaStore) listLibraryStringValues(ctx context.Context, libraryID int64, access catalog.AccessFilter, from, value string) ([]string, error) {
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'", value + " <> ''"}
+	args := []any{}
+	argIdx := 1
+	if libraryID != 0 {
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+		args = append(args, int(libraryID))
+		argIdx++
+	}
+	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT `+value+` FROM media_items mi `+from+` WHERE `+strings.Join(conditions, " AND ")+` ORDER BY LOWER(`+value+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (s *ABSMediaStore) ListLibraryNarrators(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	return s.listLibraryStringValues(ctx, libraryID, access, `JOIN item_people ip ON ip.content_id = mi.content_id AND ip.kind = 8 JOIN people p ON p.id = ip.person_id`, `p.name`)
+}
+func (s *ABSMediaStore) ListLibraryPublishers(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	return s.listLibraryStringValues(ctx, libraryID, access, `CROSS JOIN LATERAL unnest(COALESCE(mi.studios, ARRAY[]::text[])) AS publisher`, `publisher`)
+}
+func (s *ABSMediaStore) ListLibraryLanguages(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	return s.listLibraryStringValues(ctx, libraryID, access, ``, `mi.original_language`)
+}
+
 // RefreshAuthorCounts rebuilds the abs_audiobook_author_counts materialized
 // view that ListLibraryAuthors reads. CONCURRENTLY keeps it readable during the
 // refresh (requires the unique index). Driven by a periodic ticker in the

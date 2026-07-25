@@ -135,14 +135,17 @@ func (h *Handler) buildFilterData(r *http.Request, lib AudiobookLibrary) map[str
 	if rows, err := h.deps.MediaStore.ListLibraryGenres(ctx, lib.ID, access); err == nil {
 		genres = rows
 	}
+	narrators, _ := h.deps.MediaStore.ListLibraryNarrators(ctx, lib.ID, access)
+	publishers, _ := h.deps.MediaStore.ListLibraryPublishers(ctx, lib.ID, access)
+	languages, _ := h.deps.MediaStore.ListLibraryLanguages(ctx, lib.ID, access)
 
 	return map[string]any{
 		"authors":    authorObjs,
 		"series":     seriesObjs,
-		"narrators":  []string{},
+		"narrators":  narrators,
 		"genres":     genres,
-		"publishers": []string{},
-		"languages":  []string{},
+		"publishers": publishers,
+		"languages":  languages,
 		"tags":       []string{},
 	}
 }
