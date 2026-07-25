@@ -52,10 +52,6 @@ type minifiedMedia struct {
 	Duration      float64          `json:"duration"`
 	Size          int64            `json:"size"`
 	EbookFormat   *string          `json:"ebookFormat"`
-	// Still reads ebookFile directly from its browse cache before requesting
-	// item detail. Real ABS only guarantees ebookFormat here, but including
-	// the primary file is additive and lets Still enter its reader.
-	EbookFile *EbookFile `json:"ebookFile"`
 }
 
 // Keys mirror real ABS Book.oldMetadataToJSONMinified — flat author/series
@@ -166,7 +162,6 @@ func Minify(item LibraryItem) MinifiedLibraryItem {
 			Duration:      item.Media.Duration,
 			Size:          0,
 			EbookFormat:   ebookFormat,
-			EbookFile:     item.Media.EbookFile,
 		},
 		NumFiles:        numTracks,
 		Size:            0,

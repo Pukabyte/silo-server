@@ -105,9 +105,6 @@ func TestMinifyEbookPreservesReaderSignal(t *testing.T) {
 	if got.Media.EbookFormat == nil || *got.Media.EbookFormat != format {
 		t.Fatalf("ebookFormat = %v, want %q", got.Media.EbookFormat, format)
 	}
-	if got.Media.EbookFile == nil || got.Media.EbookFile.EbookFormat != format {
-		t.Fatalf("ebookFile = %#v, want %q primary ebook", got.Media.EbookFile, format)
-	}
 	if got.Media.NumTracks != 0 || got.Media.NumAudioFiles != 0 {
 		t.Fatalf("ebook audio counts = (%d, %d), want zero", got.Media.NumTracks, got.Media.NumAudioFiles)
 	}
