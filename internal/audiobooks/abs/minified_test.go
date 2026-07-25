@@ -94,7 +94,8 @@ func TestSiloItemToLibraryItem_MediaHasID(t *testing.T) {
 func TestMinifyEbookPreservesReaderSignal(t *testing.T) {
 	format := "pdf"
 	item := LibraryItem{
-		ID: "ebook-1",
+		ID:           "ebook-1",
+		LibraryFiles: []map[string]any{{"fileType": "ebook"}},
 		Media: LibraryItemMedia{
 			ID:        "ebook-1",
 			EbookFile: &EbookFile{EbookFormat: format},
@@ -107,5 +108,8 @@ func TestMinifyEbookPreservesReaderSignal(t *testing.T) {
 	}
 	if got.Media.NumTracks != 0 || got.Media.NumAudioFiles != 0 {
 		t.Fatalf("ebook audio counts = (%d, %d), want zero", got.Media.NumTracks, got.Media.NumAudioFiles)
+	}
+	if got.NumFiles != 1 {
+		t.Fatalf("ebook numFiles = %d, want 1", got.NumFiles)
 	}
 }

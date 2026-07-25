@@ -121,6 +121,13 @@ func Minify(item LibraryItem) MinifiedLibraryItem {
 	if numTracks < 1 && ebookFormat == nil {
 		numTracks = 1
 	}
+	// ABS numFiles counts all library files, not just audio tracks. Ebooks
+	// intentionally have no audio tracks but do have readable files; zero here
+	// makes clients discard them as empty.
+	numFiles := numTracks
+	if len(item.LibraryFiles) > 0 {
+		numFiles = len(item.LibraryFiles)
+	}
 	return MinifiedLibraryItem{
 		ID:          item.ID,
 		Ino:         item.Ino,
@@ -160,11 +167,11 @@ func Minify(item LibraryItem) MinifiedLibraryItem {
 			NumAudioFiles: numTracks,
 			NumChapters:   len(item.Media.Chapters),
 			Duration:      item.Media.Duration,
-			Size:          0,
+			Size:          item.Media.Size,
 			EbookFormat:   ebookFormat,
 		},
-		NumFiles:        numTracks,
-		Size:            0,
+		NumFiles:        numFiles,
+		Size:            item.Size,
 		CollapsedSeries: item.CollapsedSeries,
 	}
 }
