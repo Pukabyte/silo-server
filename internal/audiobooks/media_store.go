@@ -185,7 +185,7 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 	appendAudiobookFilterConditions(filter, &conditions, &args, &argIdx)
 	where := strings.Join(conditions, " AND ")
 
-	total, err := s.cachedAudiobookCount(ctx, `SELECT COUNT(*) FROM media_items mi WHERE `+where, args)
+	total, err = s.cachedAudiobookCount(ctx, `SELECT COUNT(*) FROM media_items mi WHERE `+where, args)
 	if err != nil {
 		return nil, 0, fmt.Errorf("abs_media_store: count audiobooks: %w", err)
 	}
