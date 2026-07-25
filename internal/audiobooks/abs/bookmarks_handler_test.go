@@ -65,6 +65,20 @@ func (m *memBookmarkStore) List(_ context.Context, userID, profileID, itemID str
 	return out, nil
 }
 
+func (m *memBookmarkStore) ListByUser(_ context.Context, userID, profileID string) ([]Bookmark, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Bookmark{}
+	prefix := userID + "|" + profileID + "|"
+	for k, b := range m.rows {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out, nil
+}
+
 func (m *memBookmarkStore) Upsert(_ context.Context, userID, profileID, itemID string, t float64, title string) (Bookmark, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

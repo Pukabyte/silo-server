@@ -73,6 +73,7 @@ type MediaStore interface {
 	// ListDiscover returns a randomized sampling of audiobooks for the
 	// Home tab's discover shelf (helps new users browse the library).
 	ListDiscover(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
+	ListLibraryGenres(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
 	// ListLibraryAuthors returns one page of distinct audiobook authors (from a
 	// precomputed materialized view) plus the total author count. sortBy is one
 	// of "name" (default), "addedAt", or "numBooks"; limit<=0 returns all.
@@ -453,6 +454,8 @@ func (h *Handler) mountRoutes(r chi.Router) {
 			// POST  /session/local-all      — batch-sync offline-recorded sessions
 			r.Post(prefix+"/session/local-all", h.handleSyncLocalSessions)
 			// Bookmarks — POST/PATCH both upsert; DELETE is idempotent.
+			r.Get(prefix+"/me/bookmarks", h.handleListBookmarks)
+			r.Get(prefix+"/me/item/{itemId}/bookmarks", h.handleListBookmarks)
 			r.Post(prefix+"/me/item/{itemId}/bookmark", h.handleUpsertBookmark("bookmark_created"))
 			r.Patch(prefix+"/me/item/{itemId}/bookmark", h.handleUpsertBookmark("bookmark_updated"))
 			r.Delete(prefix+"/me/item/{itemId}/bookmark/{time}", h.handleDeleteBookmark)

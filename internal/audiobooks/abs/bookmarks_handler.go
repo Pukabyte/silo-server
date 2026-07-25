@@ -19,6 +19,35 @@ type bookmarkBody struct {
 	Time  *float64 `json:"time"`
 }
 
+func (h *Handler) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
+	a, ok := absAuthFrom(r)
+	if !ok || a.UserID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if h.deps.BookmarkStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"bookmarks": []any{}})
+		return
+	}
+	itemID := chi.URLParam(r, "itemId")
+	var rows []Bookmark
+	var err error
+	if itemID == "" {
+		rows, err = h.deps.BookmarkStore.ListByUser(r.Context(), a.UserID, a.ProfileID)
+	} else {
+		rows, err = h.deps.BookmarkStore.List(r.Context(), a.UserID, a.ProfileID, itemID)
+	}
+	if err != nil {
+		http.Error(w, "list bookmarks: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]any, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, bookmarkToABS(b))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bookmarks": out})
+}
+
 // handleUpsertBookmark backs both POST (reason="bookmark_created") and
 // PATCH (reason="bookmark_updated") /me/item/{itemId}/bookmark. Both
 // share the exact same upsert semantics — only the realtime event

@@ -849,6 +849,37 @@ func (s *ABSMediaStore) ListDiscover(ctx context.Context, libraryID int64, limit
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
+// ListLibraryGenres returns the distinct catalog genres used by a library.
+func (s *ABSMediaStore) ListLibraryGenres(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'", `genre <> ''`}
+	args := []any{}
+	argIdx := 1
+	if libraryID != 0 {
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+		args = append(args, int(libraryID))
+		argIdx++
+	}
+	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT genre FROM media_items mi CROSS JOIN LATERAL unnest(COALESCE(mi.genres, ARRAY[]::text[])) AS genre WHERE `+strings.Join(conditions, " AND ")+` ORDER BY LOWER(genre)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("abs_media_store: list genres: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var genre string
+		if err := rows.Scan(&genre); err != nil {
+			return nil, err
+		}
+		out = append(out, genre)
+	}
+	return out, rows.Err()
+}
+
 // RefreshAuthorCounts rebuilds the abs_audiobook_author_counts materialized
 // view that ListLibraryAuthors reads. CONCURRENTLY keeps it readable during the
 // refresh (requires the unique index). Driven by a periodic ticker in the
@@ -883,6 +914,15 @@ func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64,
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	// The materialized view deliberately contains audiobooks only. Ebooks use
+	// the indexed live aggregation until they receive their own aggregate.
+	if itemType == "ebook" {
+		return s.listLibraryAuthorsLive(ctx, libraryID, limit, offset, sortBy, sortDesc, access)
 	}
 	if access.MaxContentRating != "" || len(access.ExcludedMediaTypes) > 0 {
 		return s.listLibraryAuthorsLive(ctx, libraryID, limit, offset, sortBy, sortDesc, access)
@@ -950,7 +990,11 @@ func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64,
 // listLibraryAuthorsLive is the pre-materialized-view live aggregation, kept as
 // a fallback for ListLibraryAuthors when the MV has no rows for the library.
 func (s *ABSMediaStore) listLibraryAuthorsLive(ctx context.Context, libraryID int64, limit, offset int, sortBy string, sortDesc bool, access catalog.AccessFilter) ([]abs.AuthorSummary, int, error) {
-	conditions := []string{`mi.type = 'audiobook'`}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	args := []any{}
 	argIdx := 1
 	if libraryID != 0 {

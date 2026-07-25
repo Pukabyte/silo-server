@@ -53,6 +53,9 @@ func (noopMediaStore) ListRecentlyAdded(context.Context, int64, int, catalog.Acc
 func (noopMediaStore) ListDiscover(context.Context, int64, int, catalog.AccessFilter) ([]*models.MediaItem, error) {
 	return nil, nil
 }
+func (noopMediaStore) ListLibraryGenres(context.Context, int64, catalog.AccessFilter) ([]string, error) {
+	return nil, nil
+}
 func (noopMediaStore) ListLibraryAuthors(context.Context, int64, int, int, string, bool, catalog.AccessFilter) ([]AuthorSummary, int, error) {
 	return nil, 0, nil
 }

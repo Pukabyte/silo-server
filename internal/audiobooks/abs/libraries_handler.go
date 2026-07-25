@@ -131,12 +131,16 @@ func (h *Handler) buildFilterData(r *http.Request, lib AudiobookLibrary) map[str
 			seriesObjs = append(seriesObjs, SeriesObj{ID: s.ID, Name: s.Name})
 		}
 	}
+	genres := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryGenres(ctx, lib.ID, access); err == nil {
+		genres = rows
+	}
 
 	return map[string]any{
 		"authors":    authorObjs,
 		"series":     seriesObjs,
 		"narrators":  []string{},
-		"genres":     []string{},
+		"genres":     genres,
 		"publishers": []string{},
 		"languages":  []string{},
 		"tags":       []string{},
