@@ -957,43 +957,50 @@ func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFi
 // web/mobile readers.  Ebooks have no audio tracks; each file is exposed as
 // `ebookFile`, with the preferred EPUB first where multiple editions exist.
 func siloEbookToLibraryItemDetail(base LibraryItem, files []*models.MediaFile) LibraryItem {
-	var selected *models.MediaFile
-	for _, file := range files {
-		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(file.FilePath)), ".")
-		if ext == "epub" {
-			selected = file
-			break
-		}
-		if selected == nil {
-			selected = file
-		}
-	}
+	selected := selectEbookFile(files, 0)
 	if selected == nil {
 		return base
 	}
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(selected.FilePath)), ".")
-	updatedAt := selected.UpdatedAt.UnixMilli()
-	addedAt := selected.CreatedAt.UnixMilli()
-	base.Media.EbookFile = &EbookFile{
-		Ino:         strconv.Itoa(selected.ID),
-		EbookFormat: ext,
-		AddedAt:     addedAt,
-		UpdatedAt:   updatedAt,
-	}
-	base.Media.EbookFile.Metadata.Filename = filepath.Base(selected.FilePath)
-	base.Media.EbookFile.Metadata.Ext = "." + ext
-	base.Media.EbookFile.Metadata.Size = selected.FileSize
+	primary := ebookFileFromMediaFile(selected)
+	base.Media.EbookFile = &primary
 	base.Media.Size = selected.FileSize
 	base.Size = selected.FileSize
-	base.LibraryFiles = []map[string]any{{
-		"ino":             strconv.Itoa(selected.ID),
-		"metadata":        base.Media.EbookFile.Metadata,
-		"isSupplementary": false,
-		"addedAt":         addedAt,
-		"updatedAt":       updatedAt,
-		"fileType":        "ebook",
-	}}
+	base.LibraryFiles = make([]map[string]any, 0, len(files))
+	for _, file := range files {
+		if ebookContentType(filepath.Ext(file.FilePath)) == "" {
+			continue
+		}
+		ebook := ebookFileFromMediaFile(file)
+		base.LibraryFiles = append(base.LibraryFiles, map[string]any{
+			"ino":             ebook.Ino,
+			"metadata":        ebook.Metadata,
+			"isSupplementary": file.ID != selected.ID,
+			"addedAt":         ebook.AddedAt,
+			"updatedAt":       ebook.UpdatedAt,
+			"fileType":        "ebook",
+		})
+	}
 	return base
+}
+
+func ebookFileFromMediaFile(file *models.MediaFile) EbookFile {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(file.FilePath)), ".")
+	ebook := EbookFile{
+		Ino:         strconv.Itoa(file.ID),
+		EbookFormat: ext,
+		AddedAt:     file.CreatedAt.UnixMilli(),
+		UpdatedAt:   file.UpdatedAt.UnixMilli(),
+	}
+	ebook.Metadata.Filename = filepath.Base(file.FilePath)
+	ebook.Metadata.Ext = "." + ext
+	ebook.Metadata.Path = file.FilePath
+	ebook.Metadata.RelPath = filepath.Base(file.FilePath)
+	ebook.Metadata.Size = file.FileSize
+	ebook.Metadata.MtimeMs = file.UpdatedAt.UnixMilli()
+	ebook.Metadata.CtimeMs = file.CreatedAt.UnixMilli()
+	ebook.Metadata.BirthtimeMs = file.CreatedAt.UnixMilli()
+	ebook.Metadata.Format = ext
+	return ebook
 }
 
 // siloFilesToAudioTracks converts silo MediaFile rows into ABS AudioTrack

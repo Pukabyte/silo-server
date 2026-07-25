@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
@@ -175,8 +176,9 @@ func (h *Handler) handleSetEpisodeProgress(w http.ResponseWriter, r *http.Reques
 // Ebooks
 // ---------------------------------------------------------------------------
 
-// handleEbookFile — GET /items/{id}/ebook/{fileid}
-// Streams an ebook file after verifying caller access and item/file ownership.
+// handleEbookFile — GET /items/{id}/ebook[/{fileid}]
+// Streams the primary ebook when fileid is omitted, or a selected
+// supplementary ebook when it is present.
 func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok || a.UserID == "" {
@@ -184,9 +186,17 @@ func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	contentID := chi.URLParam(r, "id")
-	fileID, err := strconv.Atoi(chi.URLParam(r, "fileid"))
-	if contentID == "" || err != nil || fileID <= 0 {
-		http.Error(w, "item and file required", http.StatusBadRequest)
+	fileID := 0
+	if rawFileID := chi.URLParam(r, "fileid"); rawFileID != "" {
+		var err error
+		fileID, err = strconv.Atoi(rawFileID)
+		if err != nil || fileID <= 0 {
+			http.Error(w, "invalid ebook file", http.StatusBadRequest)
+			return
+		}
+	}
+	if contentID == "" {
+		http.Error(w, "item required", http.StatusBadRequest)
 		return
 	}
 	access, err := h.accessFilterForAuth(r.Context(), a)
@@ -199,16 +209,39 @@ func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load files: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	for _, file := range files {
-		contentType := ebookContentType(filepath.Ext(file.FilePath))
-		if file.ID != fileID || contentType == "" {
-			continue
-		}
-		w.Header().Set("Content-Type", contentType)
-		_ = playback.ServeDirectPlay(w, r, file.FilePath)
+	selected := selectEbookFile(files, fileID)
+	if selected == nil {
+		http.Error(w, "ebook not found", http.StatusNotFound)
 		return
 	}
-	http.Error(w, "ebook not found", http.StatusNotFound)
+	w.Header().Set("Content-Type", ebookContentType(filepath.Ext(selected.FilePath)))
+	_ = playback.ServeDirectPlay(w, r, selected.FilePath)
+}
+
+// selectEbookFile follows ABS primary-file behavior: use an explicitly
+// requested supported ebook, otherwise prefer EPUB and fall back to the first
+// supported ebook in stable media-file order.
+func selectEbookFile(files []*models.MediaFile, fileID int) *models.MediaFile {
+	var first *models.MediaFile
+	for _, file := range files {
+		contentType := ebookContentType(filepath.Ext(file.FilePath))
+		if contentType == "" {
+			continue
+		}
+		if fileID != 0 {
+			if file.ID == fileID {
+				return file
+			}
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(file.FilePath), ".epub") {
+			return file
+		}
+		if first == nil {
+			first = file
+		}
+	}
+	return first
 }
 
 // handleEbookStatus — PATCH /items/{id}/ebook/{fileid}/status

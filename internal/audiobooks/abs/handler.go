@@ -504,8 +504,9 @@ func (h *Handler) mountRoutes(r chi.Router) {
 			// Year-in-review stats — AudioBooth's "Year Stats" widget on the
 			// profile screen. Synthesized from AggregateStats today.
 			r.Get(prefix+"/me/stats/year/{year}", h.handleYearStats)
-			// Ebook surface — stubs until the ebook scanner lands.
-			// Mobile clients call these but degrade cleanly on empty/404.
+			// Ebook surface. The no-file-ID form serves the selected primary
+			// ebook; a file ID selects a supplementary ebook.
+			r.Get(prefix+"/items/{id}/ebook", h.handleEbookFile)
 			r.Get(prefix+"/items/{id}/ebook/{fileid}", h.handleEbookFile)
 			r.Patch(prefix+"/items/{id}/ebook/{fileid}/status", h.handleEbookStatus)
 			// E-reader devices + ebook email delivery — empty list / 503
