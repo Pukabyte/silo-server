@@ -714,14 +714,19 @@ func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profi
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListRecentlyAdded returns the most recently added audiobooks. Added-at
-// for audiobooks comes from MIN(first_seen_at) in media_item_libraries.
+// ListRecentlyAdded returns the most recently added items in the requested
+// audiobook or ebook library. Added-at comes from MIN(first_seen_at) in
+// media_item_libraries.
 func (s *ABSMediaStore) ListRecentlyAdded(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
 	args := []any{limit}
-	conditions := []string{`mi.type = 'audiobook'`}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	argIdx := 2
 	libFilter := ""
 	if libraryID != 0 {
@@ -744,15 +749,19 @@ func (s *ABSMediaStore) ListRecentlyAdded(ctx context.Context, libraryID int64, 
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListDiscover returns a random sampling of audiobooks for the home
+// ListDiscover returns a random sampling of library items for the home
 // Discover shelf. Uses TABLESAMPLE for cheap random sampling on large
 // libraries (38k+ books); falls back to ORDER BY random() for tiny libs.
 func (s *ABSMediaStore) ListDiscover(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
 	args := []any{limit}
-	conditions := []string{`mi.type = 'audiobook'`, `COALESCE(mi.poster_path, '') <> ''`}
+	conditions := []string{"mi.type = '" + itemType + "'", `COALESCE(mi.poster_path, '') <> ''`}
 	argIdx := 2
 	if libraryID != 0 {
 		conditions = append(conditions, fmt.Sprintf(`EXISTS (

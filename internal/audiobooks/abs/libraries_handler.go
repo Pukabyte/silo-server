@@ -1,6 +1,7 @@
 package abs
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -643,12 +645,12 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if items, err := h.deps.MediaStore.ListContinueListening(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[0]["entities"] = minifiedSlice(items, lib, baseURL)
+		shelves[0]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
 		shelves[0]["total"] = len(items)
 	}
 
 	if items, err := h.deps.MediaStore.ListRecentlyAdded(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[2]["entities"] = minifiedSlice(items, lib, baseURL)
+		shelves[2]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
 		shelves[2]["total"] = len(items)
 	}
 
@@ -676,7 +678,7 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if items, err := h.deps.MediaStore.ListDiscover(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[4]["entities"] = minifiedSlice(items, lib, baseURL)
+		shelves[4]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
 		shelves[4]["total"] = len(items)
 	}
 
@@ -684,10 +686,19 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 }
 
 // minifiedSlice converts a batch of MediaItems into ABS Minified entries.
-func minifiedSlice(items []*models.MediaItem, lib AudiobookLibrary, baseURL string) []MinifiedLibraryItem {
+func (h *Handler) minifiedShelfSlice(ctx context.Context, items []*models.MediaItem, lib AudiobookLibrary, baseURL string, access catalog.AccessFilter) []MinifiedLibraryItem {
 	out := make([]MinifiedLibraryItem, 0, len(items))
 	for _, it := range items {
-		out = append(out, Minify(siloItemToLibraryItem(it, lib, baseURL)))
+		entry := siloItemToLibraryItem(it, lib, baseURL)
+		if it.Type == "ebook" {
+			if files, err := h.deps.MediaStore.GetMediaFiles(ctx, it.ContentID, access); err == nil {
+				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(ctx, it.ContentID)
+				if primaryErr == nil {
+					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
+				}
+			}
+		}
+		out = append(out, Minify(entry))
 	}
 	return out
 }
