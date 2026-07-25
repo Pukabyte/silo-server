@@ -73,15 +73,13 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the ino back to a file by recomputing trackInoFor for each file
-	// at its 0-based position in the sorted slice. Keeping the resolution logic
-	// here (symmetric with handlePlayStart's generation) means both paths stay
-	// in sync whenever the sort order or ino derivation changes.
+	// Resolve the inode back to a file. Audio playback receives the synthetic
+	// inode emitted by handlePlayStart; ebook readers instead use the real
+	// media_files ID that we expose as media.ebookFile.ino. Accept both forms.
 	fileIdx := -1
 	for i, f := range files {
-		if trackInoFor(contentID, i) == inoStr {
+		if trackInoFor(contentID, i) == inoStr || strconv.Itoa(f.ID) == inoStr {
 			fileIdx = i
-			_ = f
 			break
 		}
 	}
