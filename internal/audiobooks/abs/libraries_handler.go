@@ -220,7 +220,16 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 	baseURL := h.absBaseURL(r)
 	all := make([]LibraryItem, 0, len(items))
 	for _, item := range items {
-		all = append(all, siloItemToLibraryItem(item, lib, baseURL))
+		entry := siloItemToLibraryItem(item, lib, baseURL)
+		if item.Type == "ebook" {
+			// ABS includes ebookFormat in minified browse results. Still uses
+			// that field (not just the detail-only ebookFile) to select its
+			// reader and label the primary action “Read”.
+			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), item.ContentID, access); err == nil {
+				entry = siloEbookToLibraryItemDetail(entry, files)
+			}
+		}
+		all = append(all, entry)
 	}
 
 	// Local filter (post-fetch) — only for filters not pushed into SQL.
