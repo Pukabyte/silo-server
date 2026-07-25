@@ -235,7 +235,9 @@ func (h *Handler) handleItemsInProgress(w http.ResponseWriter, r *http.Request) 
 		candidates = candidates[:25]
 	}
 	ids := make([]string, 0, len(candidates))
-	for _, candidate := range candidates { ids = append(ids, candidate.contentID) }
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.contentID)
+	}
 	byID, err := h.deps.MediaStore.GetAudiobooksByIDs(r.Context(), ids, access)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
