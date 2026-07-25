@@ -675,9 +675,9 @@ func (s *ABSMediaStore) SearchAudiobooks(ctx context.Context, libraryID int64, q
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListContinueListening returns audiobooks the user has in-progress (and
-// hasn't finished). userID is the silo integer-id-as-string from the ABS
-// JWT; we filter by user_watch_progress for that user + this audiobook.
+// ListContinueListening returns in-progress audiobooks or ebooks. Ebook
+// progress is stored separately by Silo's native reader, so it needs its own
+// query while keeping the same ABS shelf contract.
 func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if userID == "" {
 		return []*models.MediaItem{}, nil
@@ -685,7 +685,38 @@ func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profi
 	if limit <= 0 {
 		limit = 10
 	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
 	args := []any{userID, profileID, limit}
+	if itemType == "ebook" {
+		conditions := []string{
+			`mi.type = 'ebook'`,
+			`erp.user_id::text = $1`,
+			`($2 = '' OR erp.profile_id = $2)`,
+			`erp.progress > 0`,
+			`erp.progress < 0.9`,
+		}
+		argIdx := 4
+		if libraryID != 0 {
+			conditions = append(conditions, fmt.Sprintf(`EXISTS (
+				SELECT 1 FROM media_item_libraries mil
+				WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d
+			)`, argIdx))
+			args = append(args, int(libraryID))
+			argIdx++
+		}
+		appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+		return s.listAudiobookIDs(ctx, `
+			SELECT mi.content_id FROM media_items mi
+			JOIN ebook_reader_progress erp ON erp.content_id = mi.content_id
+			WHERE `+strings.Join(conditions, " AND ")+`
+			ORDER BY erp.updated_at DESC
+			LIMIT $3
+		`, args)
+	}
+
 	conditions := []string{
 		`mi.type = 'audiobook'`,
 		`wp.user_id::text = $1`,
@@ -972,7 +1003,11 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 	if offset < 0 {
 		offset = 0
 	}
-	conditions := []string{`mi.type = 'audiobook'`}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	args := []any{}
 	argIdx := 1
 	if libraryID != 0 {
