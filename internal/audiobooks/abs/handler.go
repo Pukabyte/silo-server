@@ -601,6 +601,9 @@ func (h *Handler) accessFilterFromRequest(r *http.Request) (catalog.AccessFilter
 		return catalog.AccessFilter{}, false, nil
 	}
 	filter, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		slog.WarnContext(r.Context(), "abs access resolution failed", "component", "audiobooks", "user_id", a.UserID, "profile_id", a.ProfileID, "path", r.URL.Path, "err", err)
+	}
 	return filter, true, err
 }
 
