@@ -86,8 +86,28 @@ func (h *Handler) handleItem(w http.ResponseWriter, r *http.Request) {
 
 	lib := h.resolveLibraryForItem(r.Context(), item.Type, access)
 	baseURL := h.absBaseURL(r)
-	result := siloItemToLibraryItemDetail(item, files, lib, baseURL)
+	result := h.siloItemToLibraryItemDetail(r.Context(), item, files, lib, baseURL)
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) siloItemToLibraryItemDetail(ctx context.Context, item *models.MediaItem, files []*models.MediaFile, lib AudiobookLibrary, baseURL string) LibraryItem {
+	base := siloItemToLibraryItem(item, lib, baseURL)
+	if item.Type != "ebook" {
+		return siloItemToLibraryItemDetail(item, files, lib, baseURL)
+	}
+	primaryID, configured, hasPrimary, err := h.ebookPrimary(ctx, item.ContentID)
+	if err != nil {
+		return siloEbookToLibraryItemDetail(base, files, 0, false, false)
+	}
+	return siloEbookToLibraryItemDetail(base, files, primaryID, configured, hasPrimary)
+}
+
+func (h *Handler) ebookPrimary(ctx context.Context, contentID string) (int, bool, bool, error) {
+	store, ok := h.deps.MediaStore.(ebookPrimaryStore)
+	if !ok {
+		return 0, false, false, nil
+	}
+	return store.GetPrimaryEbookFileID(ctx, contentID)
 }
 
 // handleSimilarItems — GET /abs/api/items/{id}/similar

@@ -484,17 +484,33 @@ func (s *ABSMediaStore) GetMediaFileByID(ctx context.Context, fileID int) (*mode
 }
 
 // GetPrimaryEbookFileID returns the explicit ABS primary ebook selection.
-// A false result means callers should apply ABS's EPUB-first default.
-func (s *ABSMediaStore) GetPrimaryEbookFileID(ctx context.Context, contentID string) (int, bool, error) {
-	var fileID int
+// A missing row means callers should apply ABS's EPUB-first default. A row
+// with a NULL file_id is an explicit ABS "no primary" selection.
+func (s *ABSMediaStore) GetPrimaryEbookFileID(ctx context.Context, contentID string) (int, bool, bool, error) {
+	var fileID *int
 	err := s.Pool.QueryRow(ctx, `SELECT file_id FROM abs_ebook_primary_files WHERE content_id = $1`, contentID).Scan(&fileID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		return 0, false, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("abs_media_store: get primary ebook: %w", err)
+		return 0, false, false, fmt.Errorf("abs_media_store: get primary ebook: %w", err)
 	}
-	return fileID, true, nil
+	if fileID == nil {
+		return 0, true, false, nil
+	}
+	return *fileID, true, true, nil
+}
+
+// ClearPrimaryEbookFileID records ABS's explicit "all files supplementary"
+// state, reached by toggling the currently primary file's status.
+func (s *ABSMediaStore) ClearPrimaryEbookFileID(ctx context.Context, contentID string) error {
+	_, err := s.Pool.Exec(ctx, `INSERT INTO abs_ebook_primary_files (content_id, file_id, updated_at)
+		VALUES ($1, NULL, now())
+		ON CONFLICT (content_id) DO UPDATE SET file_id = NULL, updated_at = now()`, contentID)
+	if err != nil {
+		return fmt.Errorf("abs_media_store: clear primary ebook: %w", err)
+	}
+	return nil
 }
 
 // SetPrimaryEbookFileID persists a primary ebook selection made through ABS.

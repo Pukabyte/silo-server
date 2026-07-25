@@ -1,7 +1,7 @@
 package abs
 
 import (
-	"encoding/json"
+	"context"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -211,10 +211,14 @@ func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if fileID == 0 {
 		if store, ok := h.deps.MediaStore.(ebookPrimaryStore); ok {
-			if primaryID, configured, err := store.GetPrimaryEbookFileID(r.Context(), contentID); err != nil {
+			if primaryID, configured, hasPrimary, err := store.GetPrimaryEbookFileID(r.Context(), contentID); err != nil {
 				http.Error(w, "load primary ebook: "+err.Error(), http.StatusInternalServerError)
 				return
 			} else if configured {
+				if !hasPrimary {
+					http.Error(w, "ebook not found", http.StatusNotFound)
+					return
+				}
 				fileID = primaryID
 			}
 		}
@@ -286,7 +290,17 @@ func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ebook primary selection unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if err := store.SetPrimaryEbookFileID(r.Context(), contentID, fileID); err != nil {
+	primaryID, configured, hasPrimary, err := store.GetPrimaryEbookFileID(r.Context(), contentID)
+	if err != nil {
+		http.Error(w, "load primary ebook: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if (configured && hasPrimary && primaryID == fileID) || (!configured && selectEbookFile(files, 0) != nil && selectEbookFile(files, 0).ID == fileID) {
+		err = store.ClearPrimaryEbookFileID(r.Context(), contentID)
+	} else {
+		err = store.SetPrimaryEbookFileID(r.Context(), contentID, fileID)
+	}
+	if err != nil {
 		http.Error(w, "set primary ebook: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -294,8 +308,9 @@ func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type ebookPrimaryStore interface {
-	GetPrimaryEbookFileID(ctx context.Context, contentID string) (fileID int, configured bool, err error)
+	GetPrimaryEbookFileID(ctx context.Context, contentID string) (fileID int, configured bool, hasPrimary bool, err error)
 	SetPrimaryEbookFileID(ctx context.Context, contentID string, fileID int) error
+	ClearPrimaryEbookFileID(ctx context.Context, contentID string) error
 }
 
 func ebookContentType(ext string) string {

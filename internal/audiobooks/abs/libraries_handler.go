@@ -226,7 +226,12 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 			// that field (not just the detail-only ebookFile) to select its
 			// reader and label the primary action “Read”.
 			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), item.ContentID, access); err == nil {
-				entry = siloEbookToLibraryItemDetail(entry, files)
+				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(r.Context(), item.ContentID)
+				if primaryErr == nil {
+					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
+				} else {
+					entry = siloEbookToLibraryItemDetail(entry, files, 0, false, false)
+				}
 			}
 		}
 		all = append(all, entry)
@@ -889,7 +894,7 @@ func siloItemToMetadata(item *models.MediaItem) Metadata {
 func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFile, lib AudiobookLibrary, baseURL string) LibraryItem {
 	base := siloItemToLibraryItem(item, lib, baseURL)
 	if item.Type == "ebook" {
-		return siloEbookToLibraryItemDetail(base, files)
+		return siloEbookToLibraryItemDetail(base, files, 0, false, false)
 	}
 
 	tracks := siloFilesToAudioTracks(item.ContentID, files, baseURL, "")
@@ -956,15 +961,21 @@ func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFi
 // siloEbookToLibraryItemDetail produces the ABS BookMedia form used by its
 // web/mobile readers.  Ebooks have no audio tracks; each file is exposed as
 // `ebookFile`, with the preferred EPUB first where multiple editions exist.
-func siloEbookToLibraryItemDetail(base LibraryItem, files []*models.MediaFile) LibraryItem {
+func siloEbookToLibraryItemDetail(base LibraryItem, files []*models.MediaFile, primaryID int, primaryConfigured, hasPrimary bool) LibraryItem {
 	selected := selectEbookFile(files, 0)
-	if selected == nil {
-		return base
+	if primaryConfigured {
+		if hasPrimary {
+			selected = selectEbookFile(files, primaryID)
+		} else {
+			selected = nil
+		}
 	}
-	primary := ebookFileFromMediaFile(selected)
-	base.Media.EbookFile = &primary
-	base.Media.Size = selected.FileSize
-	base.Size = selected.FileSize
+	if selected != nil {
+		primary := ebookFileFromMediaFile(selected)
+		base.Media.EbookFile = &primary
+		base.Media.Size = selected.FileSize
+		base.Size = selected.FileSize
+	}
 	base.LibraryFiles = make([]map[string]any, 0, len(files))
 	for _, file := range files {
 		if ebookContentType(filepath.Ext(file.FilePath)) == "" {
@@ -974,7 +985,7 @@ func siloEbookToLibraryItemDetail(base LibraryItem, files []*models.MediaFile) L
 		base.LibraryFiles = append(base.LibraryFiles, map[string]any{
 			"ino":             ebook.Ino,
 			"metadata":        ebook.Metadata,
-			"isSupplementary": file.ID != selected.ID,
+			"isSupplementary": selected == nil || file.ID != selected.ID,
 			"addedAt":         ebook.AddedAt,
 			"updatedAt":       ebook.UpdatedAt,
 			"fileType":        "ebook",
