@@ -118,7 +118,15 @@ func Minify(item LibraryItem) MinifiedLibraryItem {
 		format := item.Media.EbookFile.EbookFormat
 		ebookFormat = &format
 	}
-	if numTracks < 1 && ebookFormat == nil {
+	ebookOnlyFiles := len(item.LibraryFiles) > 0
+	for _, file := range item.LibraryFiles {
+		fileType, _ := file["fileType"].(string)
+		if fileType != "ebook" {
+			ebookOnlyFiles = false
+			break
+		}
+	}
+	if numTracks < 1 && ebookFormat == nil && !ebookOnlyFiles {
 		numTracks = 1
 	}
 	// ABS numFiles counts all library files, not just audio tracks. Ebooks

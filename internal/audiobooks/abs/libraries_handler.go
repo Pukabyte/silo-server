@@ -132,17 +132,25 @@ func (h *Handler) buildFilterData(r *http.Request, lib AudiobookLibrary) map[str
 		}
 	}
 	genres := []string{}
-	if rows, err := h.deps.MediaStore.ListLibraryGenres(ctx, lib.ID, access); err == nil {
+	if rows, err := h.deps.MediaStore.ListLibraryGenres(ctx, lib.ID, access); err == nil && rows != nil {
 		genres = rows
 	}
 	// Narrators describe audio performance. Ebook libraries intentionally leave
 	// this filter empty even if a legacy item happens to carry that credit.
 	narrators := []string{}
 	if lib.Type != "ebook" && lib.Type != "ebooks" {
-		narrators, _ = h.deps.MediaStore.ListLibraryNarrators(ctx, lib.ID, access)
+		if rows, err := h.deps.MediaStore.ListLibraryNarrators(ctx, lib.ID, access); err == nil && rows != nil {
+			narrators = rows
+		}
 	}
-	publishers, _ := h.deps.MediaStore.ListLibraryPublishers(ctx, lib.ID, access)
-	languages, _ := h.deps.MediaStore.ListLibraryLanguages(ctx, lib.ID, access)
+	publishers := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryPublishers(ctx, lib.ID, access); err == nil && rows != nil {
+		publishers = rows
+	}
+	languages := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryLanguages(ctx, lib.ID, access); err == nil && rows != nil {
+		languages = rows
+	}
 
 	return map[string]any{
 		"authors":    authorObjs,
@@ -234,21 +242,7 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 	baseURL := h.absBaseURL(r)
 	all := make([]LibraryItem, 0, len(items))
 	for _, item := range items {
-		entry := siloItemToLibraryItem(item, lib, baseURL)
-		if item.Type == "ebook" {
-			// ABS includes ebookFormat in minified browse results. Still uses
-			// that field (not just the detail-only ebookFile) to select its
-			// reader and label the primary action “Read”.
-			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), item.ContentID, access); err == nil {
-				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(r.Context(), item.ContentID)
-				if primaryErr == nil {
-					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
-				} else {
-					entry = siloEbookToLibraryItemDetail(entry, files, 0, false, false)
-				}
-			}
-		}
-		all = append(all, entry)
+		all = append(all, siloItemToLibraryItem(item, lib, baseURL))
 	}
 
 	// Local filter (post-fetch) — only for filters not pushed into SQL.
@@ -283,6 +277,11 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pageSlice := collapsed[pageStart:pageEnd]
+	for i := range pageSlice {
+		if lib.Type == "ebook" || lib.Type == "ebooks" {
+			pageSlice[i] = h.enrichEbookLibraryItem(r.Context(), pageSlice[i], access)
+		}
+	}
 
 	// Serialise.
 	var results any
@@ -693,22 +692,29 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, shelves)
 }
 
-// minifiedSlice converts a batch of MediaItems into ABS Minified entries.
+// minifiedShelfSlice converts a batch of MediaItems into ABS Minified entries.
 func (h *Handler) minifiedShelfSlice(ctx context.Context, items []*models.MediaItem, lib AudiobookLibrary, baseURL string, access catalog.AccessFilter) []MinifiedLibraryItem {
 	out := make([]MinifiedLibraryItem, 0, len(items))
 	for _, it := range items {
 		entry := siloItemToLibraryItem(it, lib, baseURL)
 		if it.Type == "ebook" {
-			if files, err := h.deps.MediaStore.GetMediaFiles(ctx, it.ContentID, access); err == nil {
-				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(ctx, it.ContentID)
-				if primaryErr == nil {
-					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
-				}
-			}
+			entry = h.enrichEbookLibraryItem(ctx, entry, access)
 		}
 		out = append(out, Minify(entry))
 	}
 	return out
+}
+
+func (h *Handler) enrichEbookLibraryItem(ctx context.Context, entry LibraryItem, access catalog.AccessFilter) LibraryItem {
+	files, err := h.deps.MediaStore.GetMediaFiles(ctx, entry.ID, access)
+	if err != nil {
+		return entry
+	}
+	primaryID, configured, hasPrimary, err := h.ebookPrimary(ctx, entry.ID)
+	if err != nil {
+		return siloEbookToLibraryItemDetail(entry, files, 0, false, false)
+	}
+	return siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
 }
 
 // ---------------------------------------------------------------------------

@@ -38,12 +38,30 @@ func (h *Handler) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 		rows, err = h.deps.BookmarkStore.List(r.Context(), a.UserID, a.ProfileID, itemID)
 	}
 	if err != nil {
-		http.Error(w, "list bookmarks: "+err.Error(), http.StatusInternalServerError)
+		slog.ErrorContext(r.Context(), "abs bookmark list failed", "component", "audiobooks", "err", err, "user", a.UserID)
+		http.Error(w, "list bookmarks failed", http.StatusInternalServerError)
+		return
+	}
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access", http.StatusForbidden)
+		return
+	}
+	ids := make([]string, 0, len(rows))
+	for _, b := range rows {
+		ids = append(ids, b.LibraryItemID)
+	}
+	allowed, err := h.deps.MediaStore.GetAudiobooksByIDs(r.Context(), ids, access)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "abs bookmark access check failed", "component", "audiobooks", "err", err, "user", a.UserID)
+		http.Error(w, "bookmark access check failed", http.StatusInternalServerError)
 		return
 	}
 	out := make([]any, 0, len(rows))
 	for _, b := range rows {
-		out = append(out, bookmarkToABS(b))
+		if _, ok := allowed[b.LibraryItemID]; ok {
+			out = append(out, bookmarkToABS(b))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bookmarks": out})
 }

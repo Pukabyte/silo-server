@@ -310,11 +310,14 @@ func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load primary ebook: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if (configured && hasPrimary && primaryID == fileID) || (!configured && selectEbookFile(files, 0) != nil && selectEbookFile(files, 0).ID == fileID) {
-		err = store.ClearPrimaryEbookFileID(r.Context(), contentID)
-	} else {
-		err = store.SetPrimaryEbookFileID(r.Context(), contentID, fileID)
+	defaultFile := selectEbookFile(files, 0)
+	if (configured && hasPrimary && primaryID == fileID) || (!configured && defaultFile != nil && defaultFile.ID == fileID) {
+		// The effective primary remains readable. Treat its status toggle as a
+		// no-op rather than persisting a no-primary state that removes Read.
+		w.WriteHeader(http.StatusOK)
+		return
 	}
+	err = store.SetPrimaryEbookFileID(r.Context(), contentID, fileID)
 	if err != nil {
 		http.Error(w, "set primary ebook: "+err.Error(), http.StatusInternalServerError)
 		return

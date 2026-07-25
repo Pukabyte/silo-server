@@ -487,6 +487,9 @@ func (s *ABSMediaStore) GetMediaFileByID(ctx context.Context, fileID int) (*mode
 // A missing row means callers should apply ABS's EPUB-first default. A row
 // with a NULL file_id is an explicit ABS "no primary" selection.
 func (s *ABSMediaStore) GetPrimaryEbookFileID(ctx context.Context, contentID string) (int, bool, bool, error) {
+	if s.Pool == nil {
+		return 0, false, false, nil
+	}
 	var fileID *int
 	err := s.Pool.QueryRow(ctx, `SELECT file_id FROM abs_ebook_primary_files WHERE content_id = $1`, contentID).Scan(&fileID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -504,6 +507,9 @@ func (s *ABSMediaStore) GetPrimaryEbookFileID(ctx context.Context, contentID str
 // ClearPrimaryEbookFileID records ABS's explicit "all files supplementary"
 // state, reached by toggling the currently primary file's status.
 func (s *ABSMediaStore) ClearPrimaryEbookFileID(ctx context.Context, contentID string) error {
+	if s.Pool == nil {
+		return fmt.Errorf("abs_media_store: no pgx pool")
+	}
 	_, err := s.Pool.Exec(ctx, `INSERT INTO abs_ebook_primary_files (content_id, file_id, updated_at)
 		VALUES ($1, NULL, now())
 		ON CONFLICT (content_id) DO UPDATE SET file_id = NULL, updated_at = now()`, contentID)
@@ -515,6 +521,9 @@ func (s *ABSMediaStore) ClearPrimaryEbookFileID(ctx context.Context, contentID s
 
 // SetPrimaryEbookFileID persists a primary ebook selection made through ABS.
 func (s *ABSMediaStore) SetPrimaryEbookFileID(ctx context.Context, contentID string, fileID int) error {
+	if s.Pool == nil {
+		return fmt.Errorf("abs_media_store: no pgx pool")
+	}
 	_, err := s.Pool.Exec(ctx, `INSERT INTO abs_ebook_primary_files (content_id, file_id, updated_at)
 		VALUES ($1, $2, now())
 		ON CONFLICT (content_id) DO UPDATE SET file_id = EXCLUDED.file_id, updated_at = now()`, contentID, fileID)
@@ -851,6 +860,9 @@ func (s *ABSMediaStore) ListDiscover(ctx context.Context, libraryID int64, limit
 
 // ListLibraryGenres returns the distinct catalog genres used by a library.
 func (s *ABSMediaStore) ListLibraryGenres(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	if s.Pool == nil {
+		return []string{}, nil
+	}
 	itemType, err := s.libraryItemType(ctx, libraryID)
 	if err != nil {
 		return nil, err
@@ -881,6 +893,9 @@ func (s *ABSMediaStore) ListLibraryGenres(ctx context.Context, libraryID int64, 
 }
 
 func (s *ABSMediaStore) listLibraryStringValues(ctx context.Context, libraryID int64, access catalog.AccessFilter, from, value string) ([]string, error) {
+	if s.Pool == nil {
+		return []string{}, nil
+	}
 	itemType, err := s.libraryItemType(ctx, libraryID)
 	if err != nil {
 		return nil, err
