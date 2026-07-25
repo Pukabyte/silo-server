@@ -42,6 +42,24 @@ type ProgressStore interface {
 	DeleteProgress(ctx context.Context, userID, profileID, contentID string) error
 }
 
+// EbookProgressStore persists the reader state used by Silo's native ebook
+// reader. It stays separate from ProgressStore: audiobooks use time-based
+// user_watch_progress, while ebooks use CFI/location progress.
+type EbookProgressStore interface {
+	GetEbookProgress(ctx context.Context, userID, profileID, contentID string) (*EbookProgress, error)
+	UpsertEbookProgress(ctx context.Context, progress EbookProgress) error
+	DeleteEbookProgress(ctx context.Context, userID, profileID, contentID string) error
+}
+
+type EbookProgress struct {
+	UserID    string
+	ProfileID string
+	ContentID string
+	FileID    int
+	Location  string
+	Progress  float64
+}
+
 // ABSPlaybackSessionStore tracks the active /abs/api/items/{id}/play sessions
 // for per-session listening-time accounting (migration 143).
 // Implemented by ABSPlaybackSessionStore in

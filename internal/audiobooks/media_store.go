@@ -81,9 +81,9 @@ func (s *ABSMediaStore) cachedAudiobookCount(ctx context.Context, countSQL strin
 
 var _ abs.MediaStore = (*ABSMediaStore)(nil)
 
-// GetAudiobookByID returns the media_item with the given content_id, provided
-// it is of type 'audiobook'. Returns nil and a wrapped error for any other
-// outcome; the caller interprets a nil result as not-found.
+// GetAudiobookByID returns an ABS-supported book: either an audiobook or an
+// ebook.  The historical method name is retained to avoid widening the ABS
+// adapter interface for every consumer.
 func (s *ABSMediaStore) GetAudiobookByID(ctx context.Context, contentID string, access catalog.AccessFilter) (*models.MediaItem, error) {
 	items, err := s.Items.GetByIDsWithAccess(ctx, []string{contentID}, access)
 	if err != nil {
@@ -93,7 +93,7 @@ func (s *ABSMediaStore) GetAudiobookByID(ctx context.Context, contentID string, 
 		return nil, nil
 	}
 	item := items[0]
-	if item == nil || item.Type != "audiobook" {
+	if item == nil || (item.Type != "audiobook" && item.Type != "ebook") {
 		return nil, nil
 	}
 	// Hydrate authors + narrators so the ABS metadata mapper can fill
@@ -102,8 +102,10 @@ func (s *ABSMediaStore) GetAudiobookByID(ctx context.Context, contentID string, 
 		// Non-fatal: caller can still render the item without people data.
 		_ = err
 	}
-	if err := s.hydrateAudiobookSeries(ctx, []*models.MediaItem{item}); err != nil {
-		_ = err
+	if item.Type == "audiobook" {
+		if err := s.hydrateAudiobookSeries(ctx, []*models.MediaItem{item}); err != nil {
+			_ = err
+		}
 	}
 	return item, nil
 }
@@ -123,7 +125,7 @@ func (s *ABSMediaStore) GetAudiobooksByIDs(ctx context.Context, contentIDs []str
 	}
 	books := make([]*models.MediaItem, 0, len(items))
 	for _, item := range items {
-		if item != nil && item.Type == "audiobook" {
+		if item != nil && (item.Type == "audiobook" || item.Type == "ebook") {
 			books = append(books, item)
 		}
 	}
@@ -161,7 +163,11 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 	}
 
 	var total int
-	conditions := []string{"mi.type = 'audiobook'"}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	args := []any{}
 	argIdx := 1
 	if libraryID != 0 {
@@ -244,10 +250,28 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 		// just stay empty in the ABS payload). Log via the caller if needed.
 		_ = err
 	}
-	if err := s.hydrateAudiobookSeries(ctx, ordered); err != nil {
-		_ = err
+	if itemType == "audiobook" {
+		if err := s.hydrateAudiobookSeries(ctx, ordered); err != nil {
+			_ = err
+		}
 	}
 	return ordered, total, nil
+}
+
+// libraryItemType maps a Silo media_folder type to its media_items type.
+// Unknown/virtual folders preserve the long-standing audiobook default.
+func (s *ABSMediaStore) libraryItemType(ctx context.Context, libraryID int64) (string, error) {
+	if libraryID == 0 || s.Pool == nil {
+		return "audiobook", nil
+	}
+	var folderType string
+	if err := s.Pool.QueryRow(ctx, `SELECT type FROM media_folders WHERE id = $1`, libraryID).Scan(&folderType); err != nil {
+		return "", fmt.Errorf("abs_media_store: resolve library %d: %w", libraryID, err)
+	}
+	if folderType == "ebook" || folderType == "ebooks" {
+		return "ebook", nil
+	}
+	return "audiobook", nil
 }
 
 // appendAudiobookFilterConditions pushes an ABS authors/series/narrators
@@ -459,13 +483,14 @@ func (s *ABSMediaStore) GetMediaFileByID(ctx context.Context, fileID int) (*mode
 	return file, nil
 }
 
-// ListAudiobookLibraries returns media_folder rows where type='audiobooks'
-// (the canonical silo type for the audiobooks sub-plan).
+// ListAudiobookLibraries returns every Silo folder ABS can render as a book
+// library: audiobooks and ebooks.  ABS uses the same `book` media type for
+// both; Type remains the Silo source type for query isolation.
 func (s *ABSMediaStore) ListAudiobookLibraries(ctx context.Context, access catalog.AccessFilter) ([]abs.AudiobookLibrary, error) {
 	if s.Pool == nil {
 		return nil, nil
 	}
-	conditions := []string{"type IN ('audiobooks', 'audiobook')", "enabled = TRUE"}
+	conditions := []string{"type IN ('audiobooks', 'audiobook', 'ebooks', 'ebook')", "enabled = TRUE"}
 	args := []any{}
 	argIdx := 1
 	appendLibraryAccessConditions("media_folders", access, &conditions, &args, &argIdx)

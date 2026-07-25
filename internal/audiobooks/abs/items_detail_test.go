@@ -85,3 +85,25 @@ func TestSiloItemToLibraryItemDetail_ExpandedShape(t *testing.T) {
 		t.Errorf("descriptionPlain = %q, want %q", dp, "Hello world")
 	}
 }
+
+func TestSiloEbookToLibraryItemDetail_ExposesReaderFile(t *testing.T) {
+	item := &models.MediaItem{ContentID: "ebook-7", Type: "ebook", Title: "Reader Test"}
+	files := []*models.MediaFile{
+		{ID: 11, FilePath: "/x/reader-test.pdf", FileSize: 100},
+		{ID: 12, FilePath: "/x/reader-test.epub", FileSize: 200},
+	}
+
+	detail := siloItemToLibraryItemDetail(item, files, AudiobookLibrary{ID: 17, Name: "Books", Type: "ebook"}, "http://x")
+	if detail.Media.EbookFile == nil {
+		t.Fatal("ebookFile is missing")
+	}
+	if detail.Media.EbookFile.Ino != "12" || detail.Media.EbookFile.EbookFormat != "epub" {
+		t.Fatalf("ebookFile = %#v, want preferred EPUB file", detail.Media.EbookFile)
+	}
+	if detail.Media.EbookFile.Metadata.Filename != "reader-test.epub" || detail.Media.EbookFile.Metadata.Size != 200 {
+		t.Fatalf("ebook metadata = %#v", detail.Media.EbookFile.Metadata)
+	}
+	if detail.Media.NumTracks != 0 || len(detail.Media.Tracks) != 0 || detail.Size != 200 {
+		t.Fatalf("ebook detail has audio state: tracks=%d size=%d", detail.Media.NumTracks, detail.Size)
+	}
+}

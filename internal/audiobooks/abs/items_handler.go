@@ -26,6 +26,28 @@ func (h *Handler) resolveDefaultLibrary(ctx context.Context, filters ...catalog.
 	return AudiobookLibrary{ID: 0, Name: VirtualLibraryName, Type: "audiobooks"}
 }
 
+// resolveLibraryForItem keeps item-detail responses attached to the source
+// library that supplied the item.  This matters now that the ABS listener
+// exposes both audiobook and ebook folders under the shared ABS `book` type.
+func (h *Handler) resolveLibraryForItem(ctx context.Context, itemType string, access catalog.AccessFilter) AudiobookLibrary {
+	if libs, err := h.deps.MediaStore.ListAudiobookLibraries(ctx, access); err == nil {
+		for _, lib := range libs {
+			if (itemType == "ebook" && (lib.Type == "ebook" || lib.Type == "ebooks")) ||
+				(itemType == "audiobook" && lib.Type != "ebook" && lib.Type != "ebooks") {
+				return lib
+			}
+		}
+	}
+	return resolveFallbackLibrary(itemType)
+}
+
+func resolveFallbackLibrary(itemType string) AudiobookLibrary {
+	if itemType == "ebook" {
+		return AudiobookLibrary{ID: 0, Name: "Books", Type: "ebook"}
+	}
+	return AudiobookLibrary{ID: 0, Name: VirtualLibraryName, Type: "audiobooks"}
+}
+
 // handleItem — GET /abs/api/items/{id} (and /api/items/{id})
 //
 // Returns the full ABS LibraryItem with audio track details for the given
@@ -62,7 +84,7 @@ func (h *Handler) handleItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lib := h.resolveDefaultLibrary(r.Context(), access)
+	lib := h.resolveLibraryForItem(r.Context(), item.Type, access)
 	baseURL := h.absBaseURL(r)
 	result := siloItemToLibraryItemDetail(item, files, lib, baseURL)
 	writeJSON(w, http.StatusOK, result)

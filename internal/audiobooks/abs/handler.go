@@ -33,7 +33,10 @@ import (
 type AudiobookLibrary struct {
 	ID   int64
 	Name string
-	Type string // always "audiobooks" for this surface
+	// Type is Silo's persisted folder type (audiobook or ebook).  ABS calls
+	// both of these a "book" library, but the adapter needs the source type
+	// to keep each catalog isolated.
+	Type string
 }
 
 // MediaStore is the slice of silo's catalog the ABS handler reads.
@@ -247,6 +250,9 @@ type Dependencies struct {
 	// ProgressStore provides access to user_watch_progress for ABS
 	// progress endpoints. May be nil; handlers degrade gracefully.
 	ProgressStore ProgressStore
+	// EbookProgressStore backs ABS ebook read/unread state and shares progress
+	// with Silo's native reader.
+	EbookProgressStore EbookProgressStore
 	// PlaybackSessionStore persists abs_playback_sessions rows
 	// (migration 143) for /session/{sid}/sync and /session/{sid}/close.
 	// May be nil; handlers degrade gracefully.

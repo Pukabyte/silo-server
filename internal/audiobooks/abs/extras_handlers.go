@@ -1,11 +1,16 @@
 package abs
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 // extras_handlers.go bundles the ABS endpoints that don't fit naturally
@@ -167,29 +172,116 @@ func (h *Handler) handleSetEpisodeProgress(w http.ResponseWriter, r *http.Reques
 }
 
 // ---------------------------------------------------------------------------
-// Ebooks — stub surface until ebook scanner lands
+// Ebooks
 // ---------------------------------------------------------------------------
 
 // handleEbookFile — GET /items/{id}/ebook/{fileid}
-// Streams an ebook file (epub / pdf / mobi / cbz). silo's audiobook
-// scanner does not yet enumerate ebook files; until it does this returns
-// 404. The shape was intentionally chosen over 501 because the ABS web
-// reader treats 404 as "no ebook available for this item" and degrades
-// cleanly; 501 surfaces an alarming error banner.
-func (h *Handler) handleEbookFile(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "ebook not available", http.StatusNotFound)
+// Streams an ebook file after verifying caller access and item/file ownership.
+func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
+	a, ok := absAuthFrom(r)
+	if !ok || a.UserID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	contentID := chi.URLParam(r, "id")
+	fileID, err := strconv.Atoi(chi.URLParam(r, "fileid"))
+	if contentID == "" || err != nil || fileID <= 0 {
+		http.Error(w, "item and file required", http.StatusBadRequest)
+		return
+	}
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), contentID, access)
+	if err != nil {
+		http.Error(w, "load files: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, file := range files {
+		contentType := ebookContentType(filepath.Ext(file.FilePath))
+		if file.ID != fileID || contentType == "" {
+			continue
+		}
+		w.Header().Set("Content-Type", contentType)
+		_ = playback.ServeDirectPlay(w, r, file.FilePath)
+		return
+	}
+	http.Error(w, "ebook not found", http.StatusNotFound)
 }
 
 // handleEbookStatus — PATCH /items/{id}/ebook/{fileid}/status
-// Marks an ebook file as read/unread. silo has no ebook catalog yet;
-// accept the request and return the empty status object so the client
-// optimistic update succeeds.
 func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
+	a, ok := absAuthFrom(r)
+	if !ok || a.UserID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if h.deps.EbookProgressStore == nil {
+		http.Error(w, "ebook progress unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	contentID := chi.URLParam(r, "id")
+	fileID, err := strconv.Atoi(chi.URLParam(r, "fileid"))
+	if contentID == "" || err != nil || fileID <= 0 {
+		http.Error(w, "item and file required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		IsRead   *bool    `json:"isRead"`
+		Progress *float64 `json:"progress"`
+		Location string   `json:"ebookLocation"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+		http.Error(w, "invalid ebook status", http.StatusBadRequest)
+		return
+	}
+	if body.IsRead != nil && !*body.IsRead {
+		if err := h.deps.EbookProgressStore.DeleteEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID); err != nil {
+			http.Error(w, "clear ebook status: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		progress := 0.0
+		if body.Progress != nil {
+			progress = *body.Progress
+		}
+		if body.IsRead != nil && *body.IsRead && progress < 0.9 {
+			progress = 1
+		}
+		if progress < 0 || progress > 1 {
+			http.Error(w, "progress must be between 0 and 1", http.StatusBadRequest)
+			return
+		}
+		if err := h.deps.EbookProgressStore.UpsertEbookProgress(r.Context(), EbookProgress{UserID: a.UserID, ProfileID: a.ProfileID, ContentID: contentID, FileID: fileID, Location: body.Location, Progress: progress}); err != nil {
+			http.Error(w, "save ebook status: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"libraryItemId":   chi.URLParam(r, "id"),
-		"fileId":          chi.URLParam(r, "fileid"),
+		"libraryItemId":   contentID,
+		"fileId":          strconv.Itoa(fileID),
 		"isSupplementary": false,
 	})
+}
+
+func ebookContentType(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".epub":
+		return "application/epub+zip"
+	case ".pdf":
+		return "application/pdf"
+	case ".mobi", ".azw", ".azw3":
+		return "application/x-mobipocket-ebook"
+	case ".cbz":
+		return "application/vnd.comicbook+zip"
+	case ".cbr":
+		return "application/vnd.comicbook-rar"
+	case ".fb2":
+		return "application/x-fictionbook+xml"
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

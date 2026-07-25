@@ -879,6 +879,9 @@ func siloItemToMetadata(item *models.MediaItem) Metadata {
 // handleItem (single-item GET).
 func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFile, lib AudiobookLibrary, baseURL string) LibraryItem {
 	base := siloItemToLibraryItem(item, lib, baseURL)
+	if item.Type == "ebook" {
+		return siloEbookToLibraryItemDetail(base, files)
+	}
 
 	tracks := siloFilesToAudioTracks(item.ContentID, files, baseURL, "")
 
@@ -938,6 +941,49 @@ func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFi
 	base.NumTracks = len(tracks)
 	base.LibraryFiles = libraryFiles
 	base.Size = totalSize
+	return base
+}
+
+// siloEbookToLibraryItemDetail produces the ABS BookMedia form used by its
+// web/mobile readers.  Ebooks have no audio tracks; each file is exposed as
+// `ebookFile`, with the preferred EPUB first where multiple editions exist.
+func siloEbookToLibraryItemDetail(base LibraryItem, files []*models.MediaFile) LibraryItem {
+	var selected *models.MediaFile
+	for _, file := range files {
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(file.FilePath)), ".")
+		if ext == "epub" {
+			selected = file
+			break
+		}
+		if selected == nil {
+			selected = file
+		}
+	}
+	if selected == nil {
+		return base
+	}
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(selected.FilePath)), ".")
+	updatedAt := selected.UpdatedAt.UnixMilli()
+	addedAt := selected.CreatedAt.UnixMilli()
+	base.Media.EbookFile = &EbookFile{
+		Ino:         strconv.Itoa(selected.ID),
+		EbookFormat: ext,
+		AddedAt:     addedAt,
+		UpdatedAt:   updatedAt,
+	}
+	base.Media.EbookFile.Metadata.Filename = filepath.Base(selected.FilePath)
+	base.Media.EbookFile.Metadata.Ext = "." + ext
+	base.Media.EbookFile.Metadata.Size = selected.FileSize
+	base.Media.Size = selected.FileSize
+	base.Size = selected.FileSize
+	base.LibraryFiles = []map[string]any{{
+		"ino":             strconv.Itoa(selected.ID),
+		"metadata":        base.Media.EbookFile.Metadata,
+		"isSupplementary": false,
+		"addedAt":         addedAt,
+		"updatedAt":       updatedAt,
+		"fileType":        "ebook",
+	}}
 	return base
 }
 
