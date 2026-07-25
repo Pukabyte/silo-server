@@ -202,6 +202,23 @@ func (h *Handler) handleGetItemProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "progress not found", http.StatusNotFound)
 		return
 	}
+	if item.Type == "ebook" {
+		if h.deps.EbookProgressStore == nil {
+			http.Error(w, "progress not found", http.StatusNotFound)
+			return
+		}
+		p, err := h.deps.EbookProgressStore.GetEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if p == nil {
+			http.Error(w, "progress not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, ebookProgressToABS(*p))
+		return
+	}
 	p, err := h.deps.ProgressStore.GetProgress(r.Context(), a.UserID, a.ProfileID, contentID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -265,6 +282,10 @@ func (h *Handler) handleSetItemProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "item not found", http.StatusNotFound)
 		return
 	}
+	if item.Type == "ebook" {
+		h.handleSetEbookProgress(w, r, a, contentID, body)
+		return
+	}
 
 	// Read existing row to merge (PATCH semantics).
 	var cur ProgressRow
@@ -309,6 +330,67 @@ func (h *Handler) handleSetItemProgress(w http.ResponseWriter, r *http.Request) 
 	payload := progressRowToABS(*updated)
 	h.publish(a.UserID, "user_item_progress_updated", map[string]any{"data": payload})
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (h *Handler) handleSetEbookProgress(w http.ResponseWriter, r *http.Request, a ctxAuth, contentID string, body progressBody) {
+	if h.deps.EbookProgressStore == nil {
+		http.Error(w, "ebook progress unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	current := EbookProgress{UserID: a.UserID, ProfileID: a.ProfileID, ContentID: contentID}
+	if existing, err := h.deps.EbookProgressStore.GetEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if existing != nil {
+		current = *existing
+	}
+	if body.EbookProgress != nil {
+		current.Progress = *body.EbookProgress
+	}
+	if body.EbookLocation != nil {
+		current.Location = *body.EbookLocation
+	}
+	if current.Progress < 0 || current.Progress > 1 {
+		http.Error(w, "ebookProgress must be between 0 and 1", http.StatusBadRequest)
+		return
+	}
+	if current.FileID == 0 {
+		access, err := h.accessFilterForAuth(r.Context(), a)
+		if err != nil {
+			http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
+			return
+		}
+		files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), contentID, access)
+		if err != nil {
+			http.Error(w, "load ebook files: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		primary := selectEbookFile(files, 0)
+		if primary == nil {
+			http.Error(w, "ebook not found", http.StatusNotFound)
+			return
+		}
+		current.FileID = primary.ID
+	}
+	if err := h.deps.EbookProgressStore.UpsertEbookProgress(r.Context(), current); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, ebookProgressToABS(current))
+}
+
+func ebookProgressToABS(p EbookProgress) map[string]any {
+	return map[string]any{
+		"id":            p.UserID + "-" + p.ContentID,
+		"libraryItemId": p.ContentID,
+		"episodeId":     nil,
+		"duration":      0,
+		"progress":      p.Progress,
+		"currentTime":   0,
+		"isFinished":    p.Progress >= 0.9,
+		"ebookLocation": p.Location,
+		"ebookProgress": p.Progress,
+	}
 }
 
 // syncPayload is the JSON body for PATCH /abs/api/session/{sid}/sync.
