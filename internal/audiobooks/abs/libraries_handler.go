@@ -607,12 +607,8 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 
 // handlePersonalized — GET /abs/api/libraries/{id}/personalized
 //
-// Emits the canonical six-shelf Home tab payload that ABS mobile clients
-// expect: continue-listening, continue-series, newest, recent-series,
-// discover, listen-again. Shelves we don't yet populate (continue-series,
-// listen-again) ship with empty entities/total — the client iterates the
-// shelf list by id and skips empties cleanly, but it crashes on a missing
-// shelf id. Matches continuum-plugin-audiobooks/handlePersonalized layout.
+// Emits populated Audiobookshelf-compatible Home shelves. Upstream omits a
+// shelf when there is no data; it does not send permanent empty placeholders.
 func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	lib, ok := h.resolveLibrary(w, r)
 	if !ok {
@@ -635,23 +631,21 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	shelves := []map[string]any{
-		{"id": "continue-listening", "label": "Continue Listening", "labelStringKey": "LabelContinueListening", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "continue-series", "label": "Continue Series", "labelStringKey": "LabelContinueSeries", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "newest", "label": "Newest", "labelStringKey": "LabelNewest", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "recent-series", "label": "Recent Series", "labelStringKey": "LabelRecentSeries", "type": "series", "entities": []any{}, "total": 0},
-		{"id": "discover", "label": "Discover", "labelStringKey": "LabelDiscover", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "listen-again", "label": "Listen Again", "labelStringKey": "LabelListenAgain", "type": "book", "entities": []any{}, "total": 0},
+	isEbook := lib.Type == "ebook" || lib.Type == "ebooks"
+	continueID, continueLabel, continueKey := "continue-listening", "Continue Listening", "LabelContinueListening"
+	againID, againLabel, againKey := "listen-again", "Listen Again", "LabelListenAgain"
+	if isEbook {
+		continueID, continueLabel, continueKey = "continue-reading", "Continue Reading", "LabelContinueReading"
+		againID, againLabel, againKey = "read-again", "Read Again", "LabelReadAgain"
 	}
+	shelves := make([]map[string]any, 0, 5)
 
 	if items, err := h.deps.MediaStore.ListContinueListening(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[0]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
-		shelves[0]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": continueID, "label": continueLabel, "labelStringKey": continueKey, "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	if items, err := h.deps.MediaStore.ListRecentlyAdded(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[2]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
-		shelves[2]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": "recently-added", "label": "Recently Added", "labelStringKey": "LabelRecentlyAdded", "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	libID := audiobookLibraryID(lib)
@@ -673,13 +667,15 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 			obj["books"] = books
 			recent = append(recent, obj)
 		}
-		shelves[3]["entities"] = recent
-		shelves[3]["total"] = len(recent)
+		shelves = append(shelves, map[string]any{"id": "recent-series", "label": "Recent Series", "labelStringKey": "LabelRecentSeries", "type": "series", "entities": recent, "total": len(recent)})
 	}
 
 	if items, err := h.deps.MediaStore.ListDiscover(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[4]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
-		shelves[4]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": "discover", "label": "Discover", "labelStringKey": "LabelDiscover", "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
+	}
+
+	if items, err := h.deps.MediaStore.ListFinished(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
+		shelves = append(shelves, map[string]any{"id": againID, "label": againLabel, "labelStringKey": againKey, "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	writeJSON(w, http.StatusOK, shelves)

@@ -44,6 +44,9 @@ func (noopMediaStore) SearchAudiobooks(context.Context, int64, string, int, cata
 func (noopMediaStore) ListContinueListening(context.Context, string, string, int64, int, catalog.AccessFilter) ([]*models.MediaItem, error) {
 	return nil, nil
 }
+func (noopMediaStore) ListFinished(context.Context, string, string, int64, int, catalog.AccessFilter) ([]*models.MediaItem, error) {
+	return nil, nil
+}
 func (noopMediaStore) ListRecentlyAdded(context.Context, int64, int, catalog.AccessFilter) ([]*models.MediaItem, error) {
 	return nil, nil
 }

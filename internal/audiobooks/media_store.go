@@ -745,6 +745,42 @@ func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profi
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
+// ListFinished returns books completed by the active ABS profile. It feeds
+// Audiobookshelf's Listen Again or Read Again shelf.
+func (s *ABSMediaStore) ListFinished(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
+	if userID == "" {
+		return []*models.MediaItem{}, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	args := []any{userID, profileID, limit}
+	if itemType == "ebook" {
+		conditions := []string{`mi.type = 'ebook'`, `erp.user_id::text = $1`, `($2 = '' OR erp.profile_id = $2)`, `erp.progress >= 0.9`}
+		argIdx := 4
+		if libraryID != 0 {
+			conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+			args = append(args, int(libraryID))
+			argIdx++
+		}
+		appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+		return s.listAudiobookIDs(ctx, `SELECT mi.content_id FROM media_items mi JOIN ebook_reader_progress erp ON erp.content_id = mi.content_id WHERE `+strings.Join(conditions, " AND ")+` ORDER BY erp.updated_at DESC LIMIT $3`, args)
+	}
+	conditions := []string{`mi.type = 'audiobook'`, `wp.user_id::text = $1`, `($2 = '' OR wp.profile_id = $2)`, `COALESCE(wp.completed, FALSE) = TRUE`}
+	argIdx := 4
+	if libraryID != 0 {
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+		args = append(args, int(libraryID))
+		argIdx++
+	}
+	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	return s.listAudiobookIDs(ctx, `SELECT mi.content_id FROM media_items mi JOIN user_watch_progress wp ON wp.media_item_id = mi.content_id WHERE `+strings.Join(conditions, " AND ")+` ORDER BY wp.updated_at DESC LIMIT $3`, args)
+}
+
 // ListRecentlyAdded returns the most recently added items in the requested
 // audiobook or ebook library. Added-at comes from MIN(first_seen_at) in
 // media_item_libraries.

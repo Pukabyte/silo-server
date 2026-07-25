@@ -66,6 +66,7 @@ type MediaStore interface {
 	// ListContinueListening returns books that the given user has progress
 	// on but hasn't finished — feeds the Home tab's continue shelf.
 	ListContinueListening(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
+	ListFinished(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
 	// ListRecentlyAdded returns the most recently added audiobooks for the
 	// Home tab's recently-added shelf.
 	ListRecentlyAdded(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
