@@ -483,6 +483,31 @@ func (s *ABSMediaStore) GetMediaFileByID(ctx context.Context, fileID int) (*mode
 	return file, nil
 }
 
+// GetPrimaryEbookFileID returns the explicit ABS primary ebook selection.
+// A false result means callers should apply ABS's EPUB-first default.
+func (s *ABSMediaStore) GetPrimaryEbookFileID(ctx context.Context, contentID string) (int, bool, error) {
+	var fileID int
+	err := s.Pool.QueryRow(ctx, `SELECT file_id FROM abs_ebook_primary_files WHERE content_id = $1`, contentID).Scan(&fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("abs_media_store: get primary ebook: %w", err)
+	}
+	return fileID, true, nil
+}
+
+// SetPrimaryEbookFileID persists a primary ebook selection made through ABS.
+func (s *ABSMediaStore) SetPrimaryEbookFileID(ctx context.Context, contentID string, fileID int) error {
+	_, err := s.Pool.Exec(ctx, `INSERT INTO abs_ebook_primary_files (content_id, file_id, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (content_id) DO UPDATE SET file_id = EXCLUDED.file_id, updated_at = now()`, contentID, fileID)
+	if err != nil {
+		return fmt.Errorf("abs_media_store: set primary ebook: %w", err)
+	}
+	return nil
+}
+
 // ListAudiobookLibraries returns every Silo folder ABS can render as a book
 // library: audiobooks and ebooks.  ABS uses the same `book` media type for
 // both; Type remains the Silo source type for query isolation.

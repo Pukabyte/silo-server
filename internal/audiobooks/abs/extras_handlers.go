@@ -209,6 +209,16 @@ func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load files: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if fileID == 0 {
+		if store, ok := h.deps.MediaStore.(ebookPrimaryStore); ok {
+			if primaryID, configured, err := store.GetPrimaryEbookFileID(r.Context(), contentID); err != nil {
+				http.Error(w, "load primary ebook: "+err.Error(), http.StatusInternalServerError)
+				return
+			} else if configured {
+				fileID = primaryID
+			}
+		}
+	}
 	selected := selectEbookFile(files, fileID)
 	if selected == nil {
 		http.Error(w, "ebook not found", http.StatusNotFound)
@@ -251,52 +261,41 @@ func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if h.deps.EbookProgressStore == nil {
-		http.Error(w, "ebook progress unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	contentID := chi.URLParam(r, "id")
 	fileID, err := strconv.Atoi(chi.URLParam(r, "fileid"))
 	if contentID == "" || err != nil || fileID <= 0 {
 		http.Error(w, "item and file required", http.StatusBadRequest)
 		return
 	}
-	var body struct {
-		IsRead   *bool    `json:"isRead"`
-		Progress *float64 `json:"progress"`
-		Location string   `json:"ebookLocation"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
-		http.Error(w, "invalid ebook status", http.StatusBadRequest)
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	if body.IsRead != nil && !*body.IsRead {
-		if err := h.deps.EbookProgressStore.DeleteEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID); err != nil {
-			http.Error(w, "clear ebook status: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		progress := 0.0
-		if body.Progress != nil {
-			progress = *body.Progress
-		}
-		if body.IsRead != nil && *body.IsRead && progress < 0.9 {
-			progress = 1
-		}
-		if progress < 0 || progress > 1 {
-			http.Error(w, "progress must be between 0 and 1", http.StatusBadRequest)
-			return
-		}
-		if err := h.deps.EbookProgressStore.UpsertEbookProgress(r.Context(), EbookProgress{UserID: a.UserID, ProfileID: a.ProfileID, ContentID: contentID, FileID: fileID, Location: body.Location, Progress: progress}); err != nil {
-			http.Error(w, "save ebook status: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), contentID, access)
+	if err != nil {
+		http.Error(w, "load ebook files: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"libraryItemId":   contentID,
-		"fileId":          strconv.Itoa(fileID),
-		"isSupplementary": false,
-	})
+	if selectEbookFile(files, fileID) == nil {
+		http.Error(w, "invalid ebook file id", http.StatusBadRequest)
+		return
+	}
+	store, ok := h.deps.MediaStore.(ebookPrimaryStore)
+	if !ok {
+		http.Error(w, "ebook primary selection unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := store.SetPrimaryEbookFileID(r.Context(), contentID, fileID); err != nil {
+		http.Error(w, "set primary ebook: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+type ebookPrimaryStore interface {
+	GetPrimaryEbookFileID(ctx context.Context, contentID string) (fileID int, configured bool, err error)
+	SetPrimaryEbookFileID(ctx context.Context, contentID string, fileID int) error
 }
 
 func ebookContentType(ext string) string {
