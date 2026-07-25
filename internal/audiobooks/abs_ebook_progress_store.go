@@ -35,18 +35,26 @@ func (s *ABSEbookProgressStore) GetEbookProgress(ctx context.Context, userID, pr
 
 func (s *ABSEbookProgressStore) ListEbookProgress(ctx context.Context, userID, profileID string, limit int) ([]abs.EbookProgress, error) {
 	uid, err := strconv.Atoi(userID)
-	if err != nil { return nil, fmt.Errorf("invalid user id: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("invalid user id: %w", err)
+	}
 	rows, err := s.Pool.Query(ctx, `SELECT content_id, file_id, location, progress, updated_at
 		FROM ebook_reader_progress WHERE user_id = $1 AND profile_id = $2 ORDER BY updated_at DESC LIMIT $3`, uid, profileID, limit)
-	if err != nil { return nil, fmt.Errorf("list ebook progress: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("list ebook progress: %w", err)
+	}
 	defer rows.Close()
 	out := make([]abs.EbookProgress, 0)
 	for rows.Next() {
 		p := abs.EbookProgress{UserID: userID, ProfileID: profileID}
-		if err := rows.Scan(&p.ContentID, &p.FileID, &p.Location, &p.Progress, &p.UpdatedAt); err != nil { return nil, fmt.Errorf("scan ebook progress: %w", err) }
+		if err := rows.Scan(&p.ContentID, &p.FileID, &p.Location, &p.Progress, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan ebook progress: %w", err)
+		}
 		out = append(out, p)
 	}
-	if err := rows.Err(); err != nil { return nil, fmt.Errorf("iterate ebook progress: %w", err) }
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate ebook progress: %w", err)
+	}
 	return out, nil
 }
 

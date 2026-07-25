@@ -155,11 +155,17 @@ func (h *Handler) handleGetMyProgress(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if h.deps.ProgressStore != nil {
 		rows, err = h.deps.ProgressStore.ListProgressForAudiobooks(r.Context(), a.UserID, a.ProfileID, 500)
-		if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	if h.deps.EbookProgressStore != nil {
 		ebookRows, err = h.deps.EbookProgressStore.ListEbookProgress(r.Context(), a.UserID, a.ProfileID, 500)
-		if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	access, err := h.accessFilterForAuth(r.Context(), a)
 	if err != nil {
@@ -170,7 +176,9 @@ func (h *Handler) handleGetMyProgress(w http.ResponseWriter, r *http.Request) {
 	for _, p := range rows {
 		ids = append(ids, p.ContentID)
 	}
-	for _, p := range ebookRows { ids = append(ids, p.ContentID) }
+	for _, p := range ebookRows {
+		ids = append(ids, p.ContentID)
+	}
 	// One batch fetch acts as the access/existence gate (the item itself isn't
 	// rendered here), instead of one query per progress row.
 	byID, err := h.deps.MediaStore.GetAudiobooksByIDs(r.Context(), ids, access)
@@ -186,7 +194,9 @@ func (h *Handler) handleGetMyProgress(w http.ResponseWriter, r *http.Request) {
 		out = append(out, progressRowToABS(p))
 	}
 	for _, p := range ebookRows {
-		if byID[p.ContentID] != nil { out = append(out, ebookProgressToABS(p)) }
+		if byID[p.ContentID] != nil {
+			out = append(out, ebookProgressToABS(p))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mediaProgress": out})
 }
