@@ -2217,16 +2217,26 @@ func (s *Scanner) syncFolderScopedAudioLibraryState(ctx context.Context, folderI
 	}
 
 	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		WITH chosen_roots AS MATERIALIZED (
+			SELECT DISTINCT ON (mf.media_folder_id, mf.canonical_root_path)
+				mf.media_folder_id, mf.canonical_root_path, mf.content_id
+			FROM media_files mf
+			JOIN media_items mi ON mi.content_id = mf.content_id
+			WHERE mf.media_folder_id = $1
+			  AND mf.missing_since IS NULL
+			  AND mf.content_id IS NOT NULL
+			  AND COALESCE(mf.canonical_root_path, '') <> ''
+			  AND mi.type IN ('audiobook', 'podcast')
+			ORDER BY mf.media_folder_id, mf.canonical_root_path, mf.content_id
+		), locked_roots AS MATERIALIZED (
+			SELECT cr.media_folder_id, cr.canonical_root_path, cr.content_id
+			FROM chosen_roots cr
+			JOIN media_items mi ON mi.content_id = cr.content_id
+			FOR KEY SHARE OF mi
+		)
 		INSERT INTO media_item_roots (media_folder_id, canonical_root_path, content_id)
-		SELECT DISTINCT ON (mf.media_folder_id, mf.canonical_root_path)
-			mf.media_folder_id, mf.canonical_root_path, mf.content_id
-		FROM media_files mf
-		JOIN media_items mi ON mi.content_id = mf.content_id
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.content_id IS NOT NULL
-		  AND COALESCE(mf.canonical_root_path, '') <> ''
-		  AND mi.type IN ('audiobook', 'podcast')
+		SELECT media_folder_id, canonical_root_path, content_id
+		FROM locked_roots
 		ON CONFLICT (media_folder_id, canonical_root_path)
 		DO UPDATE SET content_id = EXCLUDED.content_id,
 			last_seen_at = NOW()
