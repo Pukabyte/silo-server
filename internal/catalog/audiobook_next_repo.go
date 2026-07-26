@@ -94,52 +94,7 @@ func (r *AudiobookNextRepository) ListNextInSeries(ctx context.Context, q NextIn
 		argIdx++
 	}
 
-	query := fmt.Sprintf(`
-		WITH finished_series AS (
-			SELECT
-				LOWER(BTRIM(s.series_name)) AS series_key,
-				MIN(BTRIM(s.series_name)) AS series_name,
-				MAX(s.series_index) AS max_finished_index,
-				MAX(uwp.updated_at) AS last_finished_at
-			FROM user_watch_progress uwp
-			JOIN audiobook_series s ON s.content_id = uwp.media_item_id
-			JOIN media_items mi ON mi.content_id = uwp.media_item_id
-			WHERE uwp.user_id = $1
-			  AND uwp.profile_id = $2
-			  AND uwp.completed = TRUE
-			  AND mi.type = 'audiobook'
-			  AND s.series_index IS NOT NULL
-			GROUP BY LOWER(BTRIM(s.series_name))
-		)
-		SELECT
-			next_book.content_id,
-			fs.series_name,
-			next_book.series_index,
-			fs.last_finished_at
-		FROM finished_series fs
-		JOIN LATERAL (
-			SELECT m.content_id, s2.series_index
-			FROM audiobook_series s2
-			JOIN media_items m ON m.content_id = s2.content_id
-			WHERE LOWER(BTRIM(s2.series_name)) = fs.series_key
-			  AND s2.series_index IS NOT NULL
-			  AND s2.series_index > fs.max_finished_index
-			  AND m.type = 'audiobook'
-			  AND EXISTS (
-				  SELECT 1 FROM media_files mf
-				  WHERE mf.content_id = m.content_id AND mf.missing_since IS NULL
-			  )
-			  AND NOT EXISTS (
-				  SELECT 1 FROM user_watch_progress uwp2
-				  WHERE uwp2.user_id = $1
-				    AND uwp2.profile_id = $2
-				    AND uwp2.media_item_id = m.content_id
-			  )%s
-			ORDER BY s2.series_index, LOWER(m.sort_title)
-			LIMIT 1
-		) next_book ON true
-		ORDER BY fs.last_finished_at DESC
-		LIMIT $%d`, candidateScope, argIdx)
+	query := buildAudiobookNextSeriesSQL(candidateScope, argIdx)
 	args = append(args, limit)
 
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -160,4 +115,55 @@ func (r *AudiobookNextRepository) ListNextInSeries(ctx context.Context, q NextIn
 		return nil, fmt.Errorf("iterating next-in-series rows: %w", err)
 	}
 	return results, nil
+}
+
+func buildAudiobookNextSeriesSQL(candidateScope string, limitArgIdx int) string {
+	return fmt.Sprintf(`
+		WITH finished_series AS (
+			SELECT
+				s.series_key,
+				MIN(BTRIM(s.series_name)) AS series_name,
+				MAX(s.series_index) AS max_finished_index,
+				MAX(uwp.updated_at) AS last_finished_at
+			FROM user_watch_progress uwp
+			JOIN audiobook_series s ON s.content_id = uwp.media_item_id
+			JOIN media_items mi ON mi.content_id = uwp.media_item_id
+			WHERE uwp.user_id = $1
+			  AND uwp.profile_id = $2
+			  AND uwp.completed = TRUE
+			  AND mi.type = 'audiobook'
+			  AND s.series_key <> ''
+			  AND s.series_index IS NOT NULL
+			GROUP BY s.series_key
+		)
+		SELECT
+			next_book.content_id,
+			fs.series_name,
+			next_book.series_index,
+			fs.last_finished_at
+		FROM finished_series fs
+		JOIN LATERAL (
+			SELECT m.content_id, s2.series_index
+			FROM audiobook_series s2
+			JOIN media_items m ON m.content_id = s2.content_id
+			WHERE s2.series_key = fs.series_key
+			  AND s2.series_key <> ''
+			  AND s2.series_index IS NOT NULL
+			  AND s2.series_index > fs.max_finished_index
+			  AND m.type = 'audiobook'
+			  AND EXISTS (
+				  SELECT 1 FROM media_files mf
+				  WHERE mf.content_id = m.content_id AND mf.missing_since IS NULL
+			  )
+			  AND NOT EXISTS (
+				  SELECT 1 FROM user_watch_progress uwp2
+				  WHERE uwp2.user_id = $1
+				    AND uwp2.profile_id = $2
+				    AND uwp2.media_item_id = m.content_id
+			  )%s
+			ORDER BY s2.series_index, LOWER(m.sort_title)
+			LIMIT 1
+		) next_book ON true
+		ORDER BY fs.last_finished_at DESC
+		LIMIT $%d`, candidateScope, limitArgIdx)
 }

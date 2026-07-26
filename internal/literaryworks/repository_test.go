@@ -57,6 +57,21 @@ func TestRepositoryLinkAndFetchSummary(t *testing.T) {
 	}
 }
 
+func TestNormalizedSeriesMatch(t *testing.T) {
+	t.Parallel()
+	index := 2.5
+	key, gotIndex, ok := normalizedSeriesMatch("  The Expanse: Book!  ", &index)
+	if !ok || key != "theexpansebook" || gotIndex != index {
+		t.Fatalf("normalizedSeriesMatch = (%q, %v, %v)", key, gotIndex, ok)
+	}
+	if _, _, ok := normalizedSeriesMatch("---", &index); ok {
+		t.Fatal("punctuation-only series must not produce match predicate")
+	}
+	if _, _, ok := normalizedSeriesMatch("The Expanse", nil); ok {
+		t.Fatal("series without index must not produce exact-volume match predicate")
+	}
+}
+
 func newLiteraryWorksTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")

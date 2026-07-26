@@ -168,6 +168,7 @@ type Scanner struct {
 	movieQueueSyncer     MovieQueueSyncer
 	seriesQueueSyncer    SeriesQueueSyncer
 	literaryWorkLinker   LiteraryWorkLinker
+	mediaItemMerger      MediaItemMerger
 }
 
 // SetImageCacher installs the imagecache.Cacher used by book scanners to push
@@ -209,6 +210,19 @@ type EbookEnrichmentQueue interface {
 
 type LiteraryWorkLinker interface {
 	AutoLinkContent(ctx context.Context, contentID string) (workID string, linked bool, err error)
+}
+
+// MediaItemMerger moves every user-visible reference from one catalog item to
+// another before deleting the source item.
+type MediaItemMerger interface {
+	MergeItems(ctx context.Context, fromContentID, toContentID string) error
+}
+
+func (s *Scanner) SetMediaItemMerger(merger MediaItemMerger) {
+	if s == nil {
+		return
+	}
+	s.mediaItemMerger = merger
 }
 
 func (s *Scanner) SetLiteraryWorkLinker(linker LiteraryWorkLinker) {

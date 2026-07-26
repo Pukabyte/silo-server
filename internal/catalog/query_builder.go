@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -522,12 +523,17 @@ func (qb *QueryBuilder) bookSeriesTable() string {
 }
 
 func (qb *QueryBuilder) buildBookSeriesClause(rule QueryRule) (string, error) {
-	qb.args = append(qb.args, rule.Value)
+	value, ok := rule.Value.(string)
+	if !ok {
+		return "", fmt.Errorf("series requires a string value")
+	}
+	qb.args = append(qb.args, bookmeta.NormalizeSeriesKey(value))
 	clause := fmt.Sprintf(`EXISTS (
 		SELECT 1
 		FROM %s s
 		WHERE s.content_id = %s.content_id
-		  AND LOWER(BTRIM(s.series_name)) = LOWER(BTRIM($%d))
+		  AND s.series_key <> ''
+		  AND s.series_key = $%d
 )`, qb.bookSeriesTable(), qb.alias, qb.argIdx)
 	qb.argIdx++
 	if rule.Op == "is_not" {

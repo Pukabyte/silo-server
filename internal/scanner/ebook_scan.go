@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/imageutil"
 	"github.com/Silo-Server/silo-server/internal/models"
@@ -515,24 +516,7 @@ func (s *Scanner) reconcileEbookFile(ctx context.Context, folder *models.MediaFo
 	if err != nil {
 		return fmt.Errorf("parse ebook file %s: %w", filePath, err)
 	}
-	if parsed.Title == "" {
-		parsed.Title = ebookTitleFromPath(filePath)
-	}
-	if len(parsed.Authors) == 0 {
-		if author := ebookAuthorFromPath(filePath); author != "" {
-			parsed.Authors = []string{author}
-			// A path-derived title carries the same " - Author" suffix; drop it
-			// so the title, group key, and enrichment query stay clean. Compare
-			// normalized so case/spacing variants (e.g. "a. f.  carter") match
-			// the recovered author and don't leave a duplicated suffix.
-			if idx := strings.LastIndex(parsed.Title, " - "); idx >= 0 {
-				suffixAuthor := strings.TrimSpace(parsed.Title[idx+len(" - "):])
-				if normalizeEbookIdentityPart(suffixAuthor) == normalizeEbookIdentityPart(author) {
-					parsed.Title = strings.TrimSpace(parsed.Title[:idx])
-				}
-			}
-		}
-	}
+	prepareEbookScanMetadata(&parsed, filePath)
 
 	groupKey := ebookContentGroupKey(&parsed, filePath)
 	unlock := groupLocks.lock(groupKey)
@@ -1020,6 +1004,134 @@ func ebookTitleFromPath(filePath string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
+// prepareEbookScanMetadata establishes metadata trusted for scanner identity,
+// people creation, and enrichment. OPF sidecars remain authoritative only for
+// values that pass the same hard artifact gate as embedded metadata.
+func prepareEbookScanMetadata(book *parsedEbook, filePath string) {
+	if book == nil {
+		return
+	}
+	pathTitle := strings.TrimSpace(ebookTitleFromPath(filePath))
+	if strings.TrimSpace(book.Title) == "" {
+		book.Title = pathTitle
+	} else if !book.titleFromSidecar &&
+		isLowTrustEmbeddedEbookTitle(book.Title) &&
+		isSubstantiveEbookPathTitle(pathTitle) &&
+		normalizeEbookIdentityPart(book.Title) != normalizeEbookIdentityPart(pathTitle) {
+		book.Title = pathTitle
+	}
+
+	trusted := make([]string, 0, len(book.Authors))
+	for _, author := range book.Authors {
+		if bookmeta.TrustedAutomaticCredit(author) {
+			trusted = append(trusted, strings.TrimSpace(author))
+		}
+	}
+	book.Authors = uniqueTrimmedStrings(trusted)
+
+	if len(book.Authors) == 0 {
+		author := ebookAuthorFromPath(filePath)
+		if bookmeta.TrustedAutomaticCredit(author) {
+			book.Authors = []string{author}
+		}
+	}
+
+	// Files and embedded metadata often repeat a trusted author as a
+	// " - Author" title suffix. Remove it regardless of author source so
+	// title, group key, and enrichment query use the work title.
+	if idx := strings.LastIndex(book.Title, " - "); idx >= 0 {
+		suffixAuthor := strings.TrimSpace(book.Title[idx+len(" - "):])
+		suffixKey := normalizeEbookIdentityPart(suffixAuthor)
+		for _, author := range book.Authors {
+			if bookmeta.TrustedAutomaticCredit(author) &&
+				suffixKey == normalizeEbookIdentityPart(author) {
+				book.Title = strings.TrimSpace(book.Title[:idx])
+				break
+			}
+		}
+	}
+}
+
+func looksLikeEbookURLArtifact(value string) bool {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "://") || strings.HasPrefix(lower, "www.") {
+		return true
+	}
+	// Domain-only producer tags are normally lowercase. Keeping this case
+	// check avoids rejecting dotted names and initials such as Will.I.Am.
+	if value != lower || strings.ContainsAny(value, " \t\r\n/@") {
+		return false
+	}
+	labels := strings.Split(strings.Trim(value, "."), ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" {
+			return false
+		}
+		for _, r := range label {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 || len(tld) > 24 {
+		return false
+	}
+	for _, r := range tld {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	if len(labels) >= 3 {
+		return true
+	}
+	commonTLD := map[string]struct{}{
+		"com": {}, "org": {}, "net": {}, "io": {}, "co": {}, "de": {},
+		"uk": {}, "us": {}, "info": {}, "biz": {}, "me": {}, "xyz": {},
+	}
+	_, ok := commonTLD[tld]
+	return ok
+}
+
+func isLowTrustEmbeddedEbookTitle(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || looksLikeEbookURLArtifact(value) {
+		return true
+	}
+	normalized := normalizeEbookIdentityPart(value)
+	switch normalized {
+	case "cover", "content", "contents", "title page", "vorwort", "geleitwort",
+		"inhalt", "inhaltsverzeichnis", "danksagung", "preface", "foreword",
+		"untitled", "document":
+		return true
+	}
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"microsoft word -", "microsoft word:", "adobe indesign -", "adobe indesign:"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSubstantiveEbookPathTitle(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || isLowTrustEmbeddedEbookTitle(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // ebookAuthorFromPath recovers an author for libraries that shelve books as
 // ".../<Author>/<Title>/<Title> - <Author>.ext" but embed no author in the file
 // (common for PDF/MOBI/AZW3). It returns a value only when two independent path
@@ -1414,10 +1526,6 @@ func (s *Scanner) upsertEbookPeople(ctx context.Context, contentID string, book 
 			desired = append(desired, ebookCredit{Name: name, Kind: models.PersonKindAuthor})
 		}
 	}
-	if len(desired) == 0 {
-		return nil
-	}
-
 	existing, err := s.itemRepo.GetPeople(ctx, contentID)
 	if err != nil {
 		return fmt.Errorf("get ebook people: %w", err)
@@ -1427,6 +1535,13 @@ func (s *Scanner) upsertEbookPeople(ctx context.Context, contentID string, book 
 	}
 	if ebookPeopleCreditsEqual(existing, desired) {
 		return nil
+	}
+	if len(desired) == 0 {
+		people, replaceErr := ebookPeopleForReplace(existing, nil, nil)
+		if replaceErr != nil {
+			return replaceErr
+		}
+		return s.itemRepo.ReplacePeople(ctx, contentID, people)
 	}
 
 	authors := make([]ebookResolvedAuthor, 0, len(desired))
@@ -1454,9 +1569,10 @@ func (s *Scanner) upsertEbookSeries(ctx context.Context, contentID string, book 
 
 	var currentName *string
 	var currentIdx *float64
+	var currentKey *string
 	err := s.fileRepo.Pool().QueryRow(ctx, `
-		SELECT series_name, series_index FROM ebook_series WHERE content_id = $1
-	`, contentID).Scan(&currentName, &currentIdx)
+		SELECT series_name, series_index, series_key FROM ebook_series WHERE content_id = $1
+	`, contentID).Scan(&currentName, &currentIdx, &currentKey)
 
 	plan, err := planEbookSeriesWrite(book, currentName, currentIdx, err, curated)
 	if err != nil {
@@ -1465,6 +1581,19 @@ func (s *Scanner) upsertEbookSeries(ctx context.Context, contentID string, book 
 
 	switch plan.Kind {
 	case ebookSeriesWriteNone:
+		// Keep normalized identity current even for curated rows whose display
+		// metadata is fill-only and therefore must not be replaced by file data.
+		if currentName != nil {
+			expectedKey := bookmeta.NormalizeSeriesKey(*currentName)
+			if currentKey == nil || *currentKey != expectedKey {
+				if _, updateErr := s.fileRepo.Pool().Exec(ctx, `
+					UPDATE ebook_series SET series_key = $2, updated_at = NOW()
+					WHERE content_id = $1
+				`, contentID, expectedKey); updateErr != nil {
+					return fmt.Errorf("update ebook_series key: %w", updateErr)
+				}
+			}
+		}
 		return nil
 	case ebookSeriesWriteDelete:
 		if _, delErr := s.fileRepo.Pool().Exec(ctx,
@@ -1478,13 +1607,14 @@ func (s *Scanner) upsertEbookSeries(ctx context.Context, contentID string, book 
 			idx = *plan.Index
 		}
 		if _, err := s.fileRepo.Pool().Exec(ctx, `
-		INSERT INTO ebook_series (content_id, series_name, series_index, updated_at)
-		VALUES ($1, $2, $3, NOW())
+		INSERT INTO ebook_series (content_id, series_name, series_key, series_index, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
 		ON CONFLICT (content_id) DO UPDATE SET
 			series_name  = EXCLUDED.series_name,
+			series_key   = EXCLUDED.series_key,
 			series_index = EXCLUDED.series_index,
 			updated_at   = NOW()
-	`, contentID, plan.Name, idx); err != nil {
+	`, contentID, plan.Name, bookmeta.NormalizeSeriesKey(plan.Name), idx); err != nil {
 			return fmt.Errorf("upsert ebook_series row: %w", err)
 		}
 		return nil
@@ -1497,7 +1627,11 @@ func ebookSeriesDesired(book *parsedEbook) (string, *float64) {
 	if book == nil {
 		return "", nil
 	}
-	return strings.TrimSpace(book.Series), parseSeriesIndex(book.SeriesIndex)
+	name := bookmeta.CleanSeriesDisplay(book.Series)
+	if bookmeta.NormalizeSeriesKey(name) == "" {
+		return "", nil
+	}
+	return name, parseSeriesIndex(book.SeriesIndex)
 }
 
 type ebookSeriesWriteKind int

@@ -160,6 +160,87 @@ func TestMergeStepsPreserveEbookReaderProgress(t *testing.T) {
 	}
 }
 
+func TestMergeStepsPreserveABSBookmarks(t *testing.T) {
+	wants := map[string][]string{
+		"merge duplicate abs bookmarks": {
+			"UPDATE abs_bookmarks dest",
+			"src.profile_id IS NOT DISTINCT FROM dest.profile_id",
+			"src.time_seconds = dest.time_seconds",
+			"GREATEST(dest.updated_at, src.updated_at)",
+		},
+		"delete duplicate abs bookmarks": {
+			"DELETE FROM abs_bookmarks src",
+			"src.profile_id IS NOT DISTINCT FROM dest.profile_id",
+		},
+		"move remaining abs bookmarks": {
+			"UPDATE abs_bookmarks SET library_item_id = $2",
+		},
+	}
+	assertMergeStepsContain(t, wants)
+}
+
+func TestMergeStepsPreserveLiteraryWorkLinks(t *testing.T) {
+	wants := map[string][]string{
+		"move literary work covers": {
+			"UPDATE literary_works SET primary_cover_content_id = $2",
+		},
+		"delete conflicting literary work link": {
+			"DELETE FROM literary_work_items src",
+			"dest.content_id = $2",
+		},
+		"move literary work link": {
+			"UPDATE literary_work_items SET content_id = $2",
+		},
+		"merge literary work match decisions": {
+			"INSERT INTO literary_work_match_decisions",
+			"WHEN source_content_id = $1 THEN $2",
+			"WHEN target_content_id = $1 THEN $2",
+			"ON CONFLICT (source_content_id, target_content_id) DO UPDATE",
+		},
+		"delete source literary work match decisions": {
+			"DELETE FROM literary_work_match_decisions",
+			"source_content_id = $1 OR target_content_id = $1",
+		},
+	}
+	assertMergeStepsContain(t, wants)
+}
+
+func TestMergeStepsPreserveMediaItemAliases(t *testing.T) {
+	wants := map[string][]string{
+		"delete duplicate media item aliases": {
+			"DELETE FROM media_item_aliases src",
+			"src.normalized_title = dest.normalized_title",
+			"src.snapshot_language IS NOT DISTINCT FROM dest.snapshot_language",
+		},
+		"move media item aliases": {
+			"UPDATE media_item_aliases SET content_id = $2",
+		},
+	}
+	assertMergeStepsContain(t, wants)
+}
+
+func assertMergeStepsContain(t *testing.T, wants map[string][]string) {
+	t.Helper()
+	for name, fragments := range wants {
+		var sql string
+		for _, step := range mediaItemMergeSteps {
+			if step.name == name {
+				sql = normalizeMergeStepSQL(step.sql)
+				break
+			}
+		}
+		if sql == "" {
+			t.Errorf("missing merge step %q", name)
+			continue
+		}
+		for _, fragment := range fragments {
+			if !strings.Contains(sql, fragment) {
+				t.Errorf("merge step %q missing %q: %s", name, fragment, sql)
+			}
+		}
+	}
+}
+
 func normalizeMergeStepSQL(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }

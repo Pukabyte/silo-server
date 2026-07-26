@@ -54,6 +54,11 @@ type parsedEbook struct {
 	Genres      []string
 	PageCount   int
 	Cover       *parsedEbookCover
+
+	// OPF sidecars are explicit library metadata and must not be downgraded by
+	// heuristics intended only for noisy metadata embedded in ebook files.
+	titleFromSidecar   bool
+	authorsFromSidecar bool
 }
 
 type parsedEbookCover struct {
@@ -164,9 +169,11 @@ func applyEbookSidecarMetadata(book *parsedEbook, sidecar parsedEbook) {
 	}
 	if sidecar.Title != "" {
 		book.Title = sidecar.Title
+		book.titleFromSidecar = true
 	}
 	if len(sidecar.Authors) > 0 {
 		book.Authors = append([]string(nil), sidecar.Authors...)
+		book.authorsFromSidecar = true
 	}
 	if sidecar.Description != "" {
 		book.Description = sidecar.Description

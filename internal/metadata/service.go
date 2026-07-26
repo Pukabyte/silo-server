@@ -5495,95 +5495,32 @@ func (s *MetadataService) rebindItemToExistingItem(ctx context.Context, fromCont
 		return fmt.Errorf("begin skeleton rebind transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('silo:book-library-repair'))`); err != nil {
+		return fmt.Errorf("lock book-library merge: %w", err)
+	}
 
-	steps := []struct {
-		name string
-		sql  string
-		args []any
-	}{
-		{
-			name: "dedupe library memberships",
-			sql: `
-				DELETE FROM media_item_libraries src
-				USING media_item_libraries dest
-				WHERE src.content_id = $1
-				  AND dest.content_id = $2
-				  AND src.media_folder_id = dest.media_folder_id
-			`,
-			args: []any{fromContentID, toContentID},
-		},
-		{
-			name: "move library memberships",
-			sql: `
-				UPDATE media_item_libraries
-				SET content_id = $2
-				WHERE content_id = $1
-			`,
-			args: []any{fromContentID, toContentID},
-		},
-		// Legacy claims owned by provisional shells remain quarantined. They are
-		// ignored for reuse elsewhere, and confirmation writes fresh claims
-		// explicitly rather than promoting provisional ones during rebind.
-		{
-			name: "move file links",
-			sql: `
-				UPDATE media_files
-				SET content_id = $2,
-					episode_id = NULL,
-					updated_at = NOW()
-				WHERE content_id = $1
-			`,
-			args: []any{fromContentID, toContentID},
-		},
-		{
-			name: "clear episode library memberships for rebound source series",
-			sql: `
-				DELETE FROM episode_libraries el
-				USING episodes e
-				WHERE e.content_id = el.episode_id
-				  AND e.series_id = $1
-			`,
-			args: []any{fromContentID},
-		},
-		{
-			name: "dedupe provider ids",
-			sql: `
-				DELETE FROM media_item_provider_ids src
-				USING media_item_provider_ids dest
-				WHERE src.content_id = $1
-				  AND dest.content_id = $2
-				  AND src.provider = dest.provider
-			`,
-			args: []any{fromContentID, toContentID},
-		},
-		{
-			name: "move provider ids",
-			sql: `
-				UPDATE media_item_provider_ids src
-				SET content_id = $2,
-					item_type = (SELECT type FROM media_items WHERE content_id = $2),
-					updated_at = NOW()
-				WHERE src.content_id = $1
-				  AND NOT EXISTS (
-					SELECT 1
-					FROM media_item_provider_ids other
-					WHERE other.content_id <> $1
-					  AND other.provider = src.provider
-					  AND other.provider_id = src.provider_id
-					  AND other.item_type = (SELECT type FROM media_items WHERE content_id = $2)
-				  )
-			`,
-			args: []any{fromContentID, toContentID},
-		},
-		{
-			name: "delete orphaned skeleton",
-			sql: `
-				DELETE FROM media_items
-				WHERE content_id = $1
-				  AND lower(trim(status)) = ANY($2::text[])
-			`,
-			args: []any{fromContentID, rebindDeletableStatuses(allowMatchedSource)},
-		},
+	var sourceStatus, sourceType, targetType string
+	if err := tx.QueryRow(ctx, `
+		SELECT src.status, src.type, dest.type
+		FROM media_items src
+		JOIN media_items dest ON dest.content_id = $2
+		WHERE src.content_id = $1
+		FOR UPDATE OF src, dest
+	`, fromContentID, toContentID).Scan(&sourceStatus, &sourceType, &targetType); err != nil {
+		return fmt.Errorf("lock merge source and target: %w", err)
+	}
+	if sourceType != targetType {
+		return fmt.Errorf("cannot merge %s item into %s item", sourceType, targetType)
+	}
+	allowedStatus := false
+	for _, status := range rebindDeletableStatuses(allowMatchedSource) {
+		if strings.EqualFold(strings.TrimSpace(sourceStatus), status) {
+			allowedStatus = true
+			break
+		}
+	}
+	if !allowedStatus {
+		return fmt.Errorf("refusing to merge source %s with status %q", fromContentID, sourceStatus)
 	}
 
 	// Move user state (progress, history, favorites, ...) onto the surviving
@@ -5595,19 +5532,25 @@ func (s *MetadataService) rebindItemToExistingItem(ctx context.Context, fromCont
 	if err != nil {
 		return err
 	}
-	if _, err := reattribute.Run(ctx, tx, reattribute.Options{
-		FromContentID: fromContentID,
-		ToContentID:   toContentID,
-		WholeItem:     true,
-		EpisodePairs:  episodePairs,
-	}); err != nil {
-		return fmt.Errorf("reattributing user state %s -> %s: %w", fromContentID, toContentID, err)
+	// canonicalizeMediaItemReferencesTx owns whole-item conflict policy. Run
+	// reattribution only for episode ID pairs, which that engine cannot infer.
+	// Running both engines for the parent item would delete source conflicts
+	// before richer recency/OR/MAX merge rules can inspect them.
+	for _, pair := range episodePairs {
+		if _, err := reattribute.Run(ctx, tx, reattribute.Options{
+			FromContentID: pair.From,
+			ToContentID:   pair.To,
+			WholeItem:     true,
+		}); err != nil {
+			return fmt.Errorf("reattributing episode state %s -> %s: %w", pair.From, pair.To, err)
+		}
 	}
 
-	for _, step := range steps {
-		if _, err := tx.Exec(ctx, step.sql, step.args...); err != nil {
-			return fmt.Errorf("%s: %w", step.name, err)
-		}
+	if err := canonicalizeMediaItemReferencesTx(ctx, tx, fromContentID, toContentID); err != nil {
+		return fmt.Errorf("merge media item references: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM media_items WHERE content_id = $1`, fromContentID); err != nil {
+		return fmt.Errorf("delete merged source item: %w", err)
 	}
 	if err := catalog.RecomputeSeriesLatestEpisodeAdded(ctx, tx, []string{fromContentID}); err != nil {
 		return err

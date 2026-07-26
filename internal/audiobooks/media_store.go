@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/audiobooks/abs"
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/scanner"
@@ -307,8 +308,8 @@ func appendAudiobookFilterConditions(filter abs.Filter, conditions *[]string, ar
 			*conditions = append(*conditions, `NOT EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id)`)
 		} else {
 			*conditions = append(*conditions, fmt.Sprintf(
-				`EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id AND abs.series_name = $%d)`, *argIdx))
-			*args = append(*args, filter.Value)
+				`EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id AND abs.series_key = $%d)`, *argIdx))
+			*args = append(*args, bookmeta.NormalizeSeriesKey(filter.Value))
 			*argIdx = *argIdx + 1
 		}
 	}
@@ -427,7 +428,7 @@ func (s *ABSMediaStore) hydrateAudiobookSeries(ctx context.Context, items []*mod
 	rows, err := s.Pool.Query(ctx, `
 		SELECT content_id, series_name, COALESCE(series_index::text, '')
 		FROM audiobook_series
-		WHERE content_id = ANY($1)
+		WHERE content_id = ANY($1) AND series_key <> ''
 		ORDER BY content_id, series_index NULLS LAST, series_name
 	`, ids)
 	if err != nil {
@@ -1159,10 +1160,10 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 	// match what the data query returns.
 	var total int
 	countSQL := `SELECT COUNT(*) FROM (
-		SELECT s.series_name
+		SELECT s.series_key
 		FROM audiobook_series s JOIN media_items mi ON mi.content_id = s.content_id
-		WHERE ` + where + `
-		GROUP BY s.series_name HAVING COUNT(*) > 1
+		WHERE ` + where + ` AND s.series_key <> ''
+		GROUP BY s.series_key HAVING COUNT(*) > 1
 	) t`
 	if err := s.Pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("abs_media_store: count series: %w", err)
@@ -1179,28 +1180,29 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 	dataSQL := `
 		WITH ranked AS (
 			SELECT
+				s.series_key,
 				s.series_name,
 				s.content_id,
 				mi.title,
 				mi.updated_at,
 				ROW_NUMBER() OVER (
-					PARTITION BY s.series_name
+					PARTITION BY s.series_key
 					ORDER BY COALESCE(s.series_index, 999999), s.content_id
 				) AS rn,
-				COUNT(*) OVER (PARTITION BY s.series_name) AS series_count
+				COUNT(*) OVER (PARTITION BY s.series_key) AS series_count
 			FROM audiobook_series s
 			JOIN media_items mi
 				ON mi.content_id = s.content_id
-			WHERE ` + where + `
+			WHERE ` + where + ` AND s.series_key <> ''
 		)
 		SELECT
-			series_name,
+			MIN(series_name) AS series_name,
 			MAX(series_count)::int AS num_books,
 			array_agg(content_id ORDER BY rn) FILTER (WHERE rn <= 4) AS book_ids,
 			array_agg(title      ORDER BY rn) FILTER (WHERE rn <= 4) AS titles,
 			array_agg(updated_at ORDER BY rn) FILTER (WHERE rn <= 4) AS updated_ats
 		FROM ranked
-		GROUP BY series_name
+		GROUP BY series_key
 		HAVING MAX(series_count) > 1
 		ORDER BY LOWER(series_name)`
 	dataArgs := append([]any(nil), args...)
@@ -1285,10 +1287,15 @@ func (s *ABSMediaStore) GetSeriesByName(ctx context.Context, seriesName string, 
 		return abs.Series{}, abs.ErrNotFound
 	}
 	var canonicalName string
+	seriesKey := bookmeta.NormalizeSeriesKey(seriesName)
+	if seriesKey == "" {
+		return abs.Series{}, abs.ErrNotFound
+	}
 	row := s.Pool.QueryRow(ctx, `
 		SELECT series_name FROM audiobook_series
-		WHERE LOWER(series_name) = LOWER($1)
-		LIMIT 1`, seriesName,
+		WHERE series_key = $1
+		ORDER BY series_name
+		LIMIT 1`, seriesKey,
 	)
 	if err := row.Scan(&canonicalName); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1297,8 +1304,8 @@ func (s *ABSMediaStore) GetSeriesByName(ctx context.Context, seriesName string, 
 		return abs.Series{}, fmt.Errorf("abs_media_store: get series: %w", err)
 	}
 	series := abs.Series{ID: strings.ToLower(canonicalName), Name: canonicalName}
-	conditions := []string{`LOWER(asx.series_name) = LOWER($1)`, `mi.type = 'audiobook'`}
-	args := []any{seriesName}
+	conditions := []string{`asx.series_key = $1`, `mi.type = 'audiobook'`}
+	args := []any{seriesKey}
 	argIdx := 2
 	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
 	items, err := s.listAudiobookIDs(ctx, `

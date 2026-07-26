@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -220,10 +221,10 @@ func (r *Repository) listMatchCandidateIDs(ctx context.Context, source MatchItem
 			len(args),
 		))
 	}
-	if strings.TrimSpace(source.SeriesName) != "" && source.SeriesIndex != nil {
-		args = append(args, source.SeriesName, *source.SeriesIndex)
+	if seriesKey, seriesIndex, ok := normalizedSeriesMatch(source.SeriesName, source.SeriesIndex); ok {
+		args = append(args, seriesKey, seriesIndex)
 		matchFilters = append(matchFilters, fmt.Sprintf(
-			"EXISTS (SELECT 1 FROM %s bs WHERE bs.content_id = mi.content_id AND LOWER(bs.series_name) = LOWER($%d) AND bs.series_index = $%d)",
+			"EXISTS (SELECT 1 FROM %s bs WHERE bs.content_id = mi.content_id AND bs.series_key = $%d AND bs.series_key <> '' AND bs.series_index = $%d)",
 			seriesTable,
 			len(args)-1,
 			len(args),
@@ -266,6 +267,14 @@ func (r *Repository) listMatchCandidateIDs(ctx context.Context, source MatchItem
 	return ids, rows.Err()
 }
 
+func normalizedSeriesMatch(name string, index *float64) (string, float64, bool) {
+	key := bookmeta.NormalizeSeriesKey(name)
+	if key == "" || index == nil {
+		return "", 0, false
+	}
+	return key, *index, true
+}
+
 func (r *Repository) queryMatchItems(ctx context.Context, suffix string, args ...any) (pgx.Rows, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("literary works repository requires a database pool")
@@ -295,9 +304,9 @@ func (r *Repository) queryMatchItems(ctx context.Context, suffix string, args ..
 		LEFT JOIN LATERAL (
 			SELECT s.series_name, s.series_index
 			FROM (
-				SELECT content_id, series_name, series_index FROM ebook_series WHERE mi.type = 'ebook'
+				SELECT content_id, series_name, series_index FROM ebook_series WHERE mi.type = 'ebook' AND series_key <> ''
 				UNION ALL
-				SELECT content_id, series_name, series_index FROM audiobook_series WHERE mi.type = 'audiobook'
+				SELECT content_id, series_name, series_index FROM audiobook_series WHERE mi.type = 'audiobook' AND series_key <> ''
 			) s
 			WHERE s.content_id = mi.content_id
 			LIMIT 1

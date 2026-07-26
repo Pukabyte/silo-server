@@ -946,7 +946,7 @@ func TestEbookTitleFromPathStripsCompoundFB2Extension(t *testing.T) {
 
 func TestEbookSeriesDesiredParsesIndex(t *testing.T) {
 	name, idx := ebookSeriesDesired(&parsedEbook{
-		Series:      " The Expanse ",
+		Series:      "  The   Expanse ; ",
 		SeriesIndex: "2 of 9",
 	})
 
@@ -955,6 +955,13 @@ func TestEbookSeriesDesiredParsesIndex(t *testing.T) {
 	}
 	if idx == nil || *idx != 2 {
 		t.Fatalf("series index = %v, want 2", idx)
+	}
+}
+
+func TestEbookSeriesDesiredRejectsEmptyNormalizedKey(t *testing.T) {
+	name, idx := ebookSeriesDesired(&parsedEbook{Series: "---", SeriesIndex: "2"})
+	if name != "" || idx != nil {
+		t.Fatalf("ebookSeriesDesired = (%q, %v), want empty", name, idx)
 	}
 }
 
@@ -2201,5 +2208,139 @@ func TestEbookAuthorFromPath(t *testing.T) {
 				t.Fatalf("ebookAuthorFromPath(%q) = %q, want %q", tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPrepareEbookScanMetadataRejectsUntrustedEmbeddedAuthors(t *testing.T) {
+	cases := []struct {
+		name   string
+		author string
+		want   bool
+	}{
+		{name: "punctuation only", author: ".", want: false},
+		{name: "hash number", author: "#233", want: false},
+		{name: "numeric identifier", author: "0012163", want: false},
+		{name: "isbn label", author: "ISBN 978-0-306-40615-7", want: false},
+		{name: "domain artifact", author: "de.downmagaz.com", want: false},
+		{name: "url artifact", author: "https://example.com/books", want: false},
+		{name: "unicode name", author: "李白", want: true},
+		{name: "initials", author: "A. F. Carter", want: true},
+		{name: "single letter", author: "Q", want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			book := parsedEbook{Title: "Real Book", Authors: []string{tc.author}}
+			prepareEbookScanMetadata(&book, "/library/Real Book.epub")
+			if got := len(book.Authors) == 1; got != tc.want {
+				t.Fatalf("Authors = %v, retained = %v, want %v", book.Authors, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPrepareEbookScanMetadataRejectsHardInvalidSidecarAuthors(t *testing.T) {
+	book := parsedEbook{
+		Title:              "Curated Sidecar Title",
+		Authors:            []string{"de.downmagaz.com"},
+		authorsFromSidecar: true,
+	}
+
+	prepareEbookScanMetadata(&book, "/library/Filesystem Title.epub")
+
+	if len(book.Authors) != 0 {
+		t.Fatalf("Authors = %v, want invalid sidecar author rejected", book.Authors)
+	}
+}
+
+func TestPrepareEbookScanMetadataStripsSuffixForExistingTrustedAuthor(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sidecar bool
+	}{
+		{name: "embedded"},
+		{name: "sidecar", sidecar: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			book := parsedEbook{
+				Title:              "The Left Hand of Darkness - Ursula K. Le Guin",
+				Authors:            []string{"Ursula K. Le Guin"},
+				titleFromSidecar:   tc.sidecar,
+				authorsFromSidecar: tc.sidecar,
+			}
+			prepareEbookScanMetadata(&book, "/library/Other Filename.epub")
+			if book.Title != "The Left Hand of Darkness" {
+				t.Fatalf("Title = %q, want author suffix removed", book.Title)
+			}
+		})
+	}
+}
+
+func TestPrepareEbookScanMetadataUsesFilesystemTitleForEmbeddedArtifacts(t *testing.T) {
+	for _, embedded := range []string{
+		"Cover",
+		"Content",
+		"Contents",
+		"Vorwort",
+		"Geleitwort",
+		"Inhalt",
+		"Inhaltsverzeichnis",
+		"Danksagung",
+		"Title Page",
+		"de.downmagaz.com",
+		"Microsoft Word - source.doc",
+	} {
+		t.Run(embedded, func(t *testing.T) {
+			book := parsedEbook{Title: embedded, Authors: []string{"Ada Writer"}}
+			prepareEbookScanMetadata(&book, "/library/The Actual Book.pdf")
+			if book.Title != "The Actual Book" {
+				t.Fatalf("Title = %q, want filesystem fallback", book.Title)
+			}
+		})
+	}
+}
+
+func TestPrepareEbookScanMetadataAvoidsBroadTitleFallbacks(t *testing.T) {
+	cases := []struct {
+		name      string
+		title     string
+		path      string
+		sidecar   bool
+		wantTitle string
+	}{
+		{name: "valid short title", title: "It", path: "/library/Other Name.epub", wantTitle: "It"},
+		{name: "valid title containing cover", title: "Under Cover", path: "/library/Other Name.epub", wantTitle: "Under Cover"},
+		{name: "artifact without better filename", title: "Cover", path: "/library/Cover.pdf", wantTitle: "Cover"},
+		{name: "sidecar title trusted", title: "Vorwort", path: "/library/The Actual Book.epub", sidecar: true, wantTitle: "Vorwort"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			book := parsedEbook{Title: tc.title, titleFromSidecar: tc.sidecar}
+			prepareEbookScanMetadata(&book, tc.path)
+			if book.Title != tc.wantTitle {
+				t.Fatalf("Title = %q, want %q", book.Title, tc.wantTitle)
+			}
+		})
+	}
+}
+
+func TestRejectedEbookAuthorsProducePeopleReplacementThatRemovesStaleCredits(t *testing.T) {
+	book := parsedEbook{Title: "Real Book", Authors: []string{"#233", "de.downmagaz.com"}}
+	prepareEbookScanMetadata(&book, "/library/Real Book.pdf")
+	if len(book.Authors) != 0 {
+		t.Fatalf("Authors = %v, want all rejected", book.Authors)
+	}
+
+	existing := []models.ItemPerson{
+		{Person: models.Person{ID: 10, Name: "#233"}, Kind: models.PersonKindAuthor, SortOrder: 0},
+		{Person: models.Person{ID: 20, Name: "Manual Writer"}, Kind: models.PersonKindWriter, SortOrder: 1},
+	}
+	got, err := ebookPeopleForReplace(existing, nil, nil)
+	if err != nil {
+		t.Fatalf("ebookPeopleForReplace: %v", err)
+	}
+	if len(got) != 1 || got[0].Person.Name != "Manual Writer" || got[0].Kind != models.PersonKindWriter {
+		t.Fatalf("replacement people = %+v, want only preserved non-author credit", got)
 	}
 }

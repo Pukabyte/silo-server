@@ -631,6 +631,10 @@ func mergeStepArgs(sql, sourceID, canonicalID string) []any {
 	}
 }
 
+// Direct conflicts keep the canonical row. Source-only rows move to the
+// canonical content ID. State with meaningful timestamps (progress, ratings,
+// bookmarks, and match decisions) merges by its existing recency policy before
+// the source row is removed.
 var mediaItemMergeSteps = []mediaItemMergeStep{
 	{"merge provider ids", `
 			INSERT INTO media_item_provider_ids (content_id, item_type, provider, provider_id, created_at, updated_at)
@@ -743,6 +747,26 @@ var mediaItemMergeSteps = []mediaItemMergeStep{
 			    progress = CASE WHEN EXCLUDED.updated_at >= ebook_reader_progress.updated_at THEN EXCLUDED.progress ELSE ebook_reader_progress.progress END,
 			    updated_at = GREATEST(ebook_reader_progress.updated_at, EXCLUDED.updated_at)`},
 	{"delete source ebook reader progress", `DELETE FROM ebook_reader_progress WHERE content_id = $1`},
+	{"merge duplicate abs bookmarks", `
+			UPDATE abs_bookmarks dest
+			SET title = CASE WHEN src.updated_at > dest.updated_at THEN src.title ELSE dest.title END,
+			    created_at = LEAST(dest.created_at, src.created_at),
+			    updated_at = GREATEST(dest.updated_at, src.updated_at)
+			FROM abs_bookmarks src
+			WHERE src.library_item_id = $1
+			  AND dest.library_item_id = $2
+			  AND src.user_id = dest.user_id
+			  AND src.profile_id IS NOT DISTINCT FROM dest.profile_id
+			  AND src.time_seconds = dest.time_seconds`},
+	{"delete duplicate abs bookmarks", `
+			DELETE FROM abs_bookmarks src
+			USING abs_bookmarks dest
+			WHERE src.library_item_id = $1
+			  AND dest.library_item_id = $2
+			  AND src.user_id = dest.user_id
+			  AND src.profile_id IS NOT DISTINCT FROM dest.profile_id
+			  AND src.time_seconds = dest.time_seconds`},
+	{"move remaining abs bookmarks", `UPDATE abs_bookmarks SET library_item_id = $2 WHERE library_item_id = $1`},
 	{"move history", `UPDATE user_watch_history SET media_item_id = $2 WHERE media_item_id = $1`},
 	{"merge hidden history", `
 			INSERT INTO user_history_hidden_items (user_id, profile_id, media_item_id, hidden_before, updated_at)
@@ -836,6 +860,61 @@ var mediaItemMergeSteps = []mediaItemMergeStep{
 			WHERE content_id = $1
 			ON CONFLICT (content_id, language) DO NOTHING`},
 	{"delete source localizations", `DELETE FROM media_item_localizations WHERE content_id = $1`},
+	{"delete duplicate media item aliases", `
+			DELETE FROM media_item_aliases src
+			USING media_item_aliases dest
+			WHERE src.content_id = $1
+			  AND dest.content_id = $2
+			  AND src.normalized_title = dest.normalized_title
+			  AND src.language = dest.language
+			  AND src.kind = dest.kind
+			  AND src.provider = dest.provider
+			  AND src.snapshot_language IS NOT DISTINCT FROM dest.snapshot_language`},
+	{"move media item aliases", `UPDATE media_item_aliases SET content_id = $2, updated_at = NOW() WHERE content_id = $1`},
+	{"move literary work covers", `
+			UPDATE literary_works
+			SET primary_cover_content_id = $2, updated_at = NOW()
+			WHERE primary_cover_content_id = $1
+			  AND (
+			      NOT EXISTS (SELECT 1 FROM literary_work_items WHERE content_id = $2)
+			      OR EXISTS (
+			          SELECT 1
+			          FROM literary_work_items src
+			          JOIN literary_work_items dest ON dest.content_id = $2 AND dest.work_id = src.work_id
+			          WHERE src.content_id = $1
+			      )
+			  )`},
+	{"delete conflicting literary work link", `
+			DELETE FROM literary_work_items src
+			USING literary_work_items dest
+			WHERE src.content_id = $1
+			  AND dest.content_id = $2`},
+	{"move literary work link", `UPDATE literary_work_items SET content_id = $2, updated_at = NOW() WHERE content_id = $1`},
+	{"merge literary work match decisions", `
+			INSERT INTO literary_work_match_decisions (
+				source_content_id, target_content_id, decision, created_by, created_at, updated_at
+			)
+			SELECT CASE WHEN source_content_id = $1 THEN $2 ELSE source_content_id END,
+			       CASE WHEN target_content_id = $1 THEN $2 ELSE target_content_id END,
+			       decision, created_by, created_at, updated_at
+			FROM literary_work_match_decisions
+			WHERE (source_content_id = $1 OR target_content_id = $1)
+			  AND CASE WHEN source_content_id = $1 THEN $2 ELSE source_content_id END <>
+			      CASE WHEN target_content_id = $1 THEN $2 ELSE target_content_id END
+			ON CONFLICT (source_content_id, target_content_id) DO UPDATE
+			SET decision = CASE
+			        WHEN EXCLUDED.updated_at > literary_work_match_decisions.updated_at THEN EXCLUDED.decision
+			        ELSE literary_work_match_decisions.decision
+			    END,
+			    created_by = CASE
+			        WHEN EXCLUDED.updated_at > literary_work_match_decisions.updated_at THEN EXCLUDED.created_by
+			        ELSE literary_work_match_decisions.created_by
+			    END,
+			    created_at = LEAST(literary_work_match_decisions.created_at, EXCLUDED.created_at),
+			    updated_at = GREATEST(literary_work_match_decisions.updated_at, EXCLUDED.updated_at)`},
+	{"delete source literary work match decisions", `
+			DELETE FROM literary_work_match_decisions
+			WHERE source_content_id = $1 OR target_content_id = $1`},
 	{"dedupe people", `
 			DELETE FROM item_people src
 			USING item_people dest
@@ -931,10 +1010,27 @@ func canonicalizeMediaItemReferencesTx(ctx context.Context, tx pgx.Tx, sourceID,
 	if err := ensureSeriesCanMove(ctx, tx, sourceID, canonicalID); err != nil {
 		return err
 	}
+	if err := ensureLiteraryWorkCanMove(ctx, tx, sourceID, canonicalID); err != nil {
+		return err
+	}
 	for _, step := range mediaItemMergeSteps {
 		if _, err := tx.Exec(ctx, step.sql, mergeStepArgs(step.sql, sourceID, canonicalID)...); err != nil {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
+	}
+	return nil
+}
+
+func ensureLiteraryWorkCanMove(ctx context.Context, tx pgx.Tx, sourceID, canonicalID string) error {
+	var sourceWorkID, canonicalWorkID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT (SELECT work_id FROM literary_work_items WHERE content_id = $1),
+		       (SELECT work_id FROM literary_work_items WHERE content_id = $2)
+	`, sourceID, canonicalID).Scan(&sourceWorkID, &canonicalWorkID); err != nil {
+		return fmt.Errorf("checking literary work merge conflict: %w", err)
+	}
+	if sourceWorkID != nil && canonicalWorkID != nil && *sourceWorkID != *canonicalWorkID {
+		return fmt.Errorf("refusing to merge items linked to different literary works %s and %s", *sourceWorkID, *canonicalWorkID)
 	}
 	return nil
 }
