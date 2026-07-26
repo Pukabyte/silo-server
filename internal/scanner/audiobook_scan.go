@@ -549,6 +549,9 @@ func (s *Scanner) reconcileAudiobookFolder(ctx context.Context, folder *models.M
 	}
 	parsed, err := parseAudiobookFolder(ctx, s.ffprobePath, folderPath)
 	if err != nil {
+		if errors.Is(err, errFolderHasNoMedia) || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		var conflict *audiobookPartConflictError
 		if errors.As(err, &conflict) {
 			for _, partDir := range conflict.partDirs {
@@ -556,9 +559,6 @@ func (s *Scanner) reconcileAudiobookFolder(ctx context.Context, folder *models.M
 					return fmt.Errorf("reconcile conflicting audiobook part %s: %w", partDir, childErr)
 				}
 			}
-			return nil
-		}
-		if errors.Is(err, errFolderHasNoMedia) || errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("parse audiobook folder %s: %w", folderPath, err)
