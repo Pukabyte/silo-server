@@ -5599,7 +5599,10 @@ func mergeEpisodeIDPairs(ctx context.Context, tx pgx.Tx, fromContentID, toConten
 }
 
 func rebindDeletableStatuses(allowMatchedSource bool) []string {
-	statuses := []string{"pending", "unmatched", "ambiguous"}
+	// Older scanner-created book rows predate status assignment and retain an
+	// empty status. They are automatic rows, not curated records, so a
+	// state-preserving merge may safely retire them.
+	statuses := []string{"", "pending", "unmatched", "ambiguous"}
 	if allowMatchedSource {
 		statuses = append(statuses, "matched")
 	}
