@@ -1108,7 +1108,7 @@ func isLowTrustEmbeddedEbookTitle(value string) bool {
 	if value == "" || looksLikeEbookURLArtifact(value) {
 		return true
 	}
-	if isLongNumericEbookIdentifier(value) {
+	if isIdentifierLikeEbookTitle(value) {
 		return true
 	}
 	normalized := normalizeEbookIdentityPart(value)
@@ -1127,17 +1127,28 @@ func isLowTrustEmbeddedEbookTitle(value string) bool {
 	return false
 }
 
-func isLongNumericEbookIdentifier(value string) bool {
+func isIdentifierLikeEbookTitle(value string) bool {
+	return identifierLikeEbookTitleDigitCount(value) >= 6 && !containsEbookTitleLetter(value)
+}
+
+func identifierLikeEbookTitleDigitCount(value string) int {
 	value = strings.TrimSpace(value)
-	if len(value) < 6 {
-		return false
-	}
+	digits := 0
 	for _, r := range value {
-		if !unicode.IsDigit(r) {
-			return false
+		if unicode.IsDigit(r) {
+			digits++
 		}
 	}
-	return true
+	return digits
+}
+
+func containsEbookTitleLetter(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func isSubstantiveEbookPathTitle(value string) bool {

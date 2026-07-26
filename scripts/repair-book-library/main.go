@@ -275,7 +275,13 @@ func loadTitleRepairs(ctx context.Context, db queryer, limit int) ([]titleRepair
 		LEFT JOIN people p ON p.id = ip.person_id
 		WHERE mi.type = 'ebook'
 		  AND lower(btrim(COALESCE(mi.status, ''))) <> 'curated'
-		  AND (lower(btrim(mi.title)) = ANY($1::text[]) OR btrim(mi.title) ~ '^[0-9]{6,}$')
+		  AND (
+			lower(btrim(mi.title)) = ANY($1::text[])
+			OR (
+				btrim(mi.title) !~ '[[:alpha:]]'
+				AND length(regexp_replace(mi.title, '[^[:digit:]]', '', 'g')) >= 6
+			)
+		  )
 		GROUP BY mi.content_id, mi.title
 		ORDER BY mi.content_id
 	`, suspiciousEbookTitles())
