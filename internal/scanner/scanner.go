@@ -2159,13 +2159,21 @@ func (s *Scanner) syncPresentLibraryState(ctx context.Context, folderID int) err
 	}
 
 	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		WITH present_links AS MATERIALIZED (
+			SELECT DISTINCT mf.content_id, mf.media_folder_id
+			FROM media_files mf
+			WHERE mf.media_folder_id = $1
+			  AND mf.missing_since IS NULL
+			  AND mf.content_id IS NOT NULL
+		), locked_links AS MATERIALIZED (
+			SELECT pl.content_id, pl.media_folder_id
+			FROM present_links pl
+			JOIN media_items mi ON mi.content_id = pl.content_id
+			FOR KEY SHARE OF mi
+		)
 		INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
-		SELECT DISTINCT mf.content_id, mf.media_folder_id, NOW()
-		FROM media_files mf
-		JOIN media_items mi ON mi.content_id = mf.content_id
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.content_id IS NOT NULL
+		SELECT content_id, media_folder_id, NOW()
+		FROM locked_links
 		ON CONFLICT (content_id, media_folder_id) DO NOTHING
 	`, folderID); err != nil {
 		return fmt.Errorf("restoring folder memberships: %w", err)
