@@ -14,12 +14,20 @@ func TrustedAutomaticCredit(value string) bool {
 	if value == "" || looksLikeCreditURL(value) || looksLikeISBNCredit(value) {
 		return false
 	}
+	hasLetter := false
 	for _, r := range value {
+		if isControlRune(r) {
+			return false
+		}
 		if unicode.IsLetter(r) {
-			return true
+			hasLetter = true
 		}
 	}
-	return false
+	return hasLetter
+}
+
+func isControlRune(r rune) bool {
+	return r < 0x20 || r == 0x7f || unicode.IsControl(r)
 }
 
 func looksLikeISBNCredit(value string) bool {

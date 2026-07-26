@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/titleutil"
@@ -281,6 +282,8 @@ func loadTitleRepairs(ctx context.Context, db queryer, limit int) ([]titleRepair
 				btrim(mi.title) !~ '[[:alpha:]]'
 				AND length(regexp_replace(mi.title, '[^[:digit:]]', '', 'g')) >= 6
 			)
+			OR mi.title ~ '[[:cntrl:]]'
+			OR btrim(mi.title) !~ '[[:alnum:]]'
 		  )
 		GROUP BY mi.content_id, mi.title
 		ORDER BY mi.content_id
@@ -295,6 +298,9 @@ func loadTitleRepairs(ctx context.Context, db queryer, limit int) ([]titleRepair
 		var authors []string
 		if err := rows.Scan(&contentID, &oldTitle, &filePath, &authors); err != nil {
 			return nil, err
+		}
+		if !requiresEbookTitleRepair(oldTitle) {
+			continue
 		}
 		newTitle := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)), "_", " ")), " ")
 		pathAuthor := strings.TrimSpace(filepath.Base(filepath.Dir(filepath.Dir(filePath))))
@@ -320,6 +326,26 @@ func loadTitleRepairs(ctx context.Context, db queryer, limit int) ([]titleRepair
 		}
 	}
 	return out, rows.Err()
+}
+
+func requiresEbookTitleRepair(title string) bool {
+	trimmed := strings.TrimSpace(title)
+	if isSuspiciousEbookTitle(trimmed) {
+		return true
+	}
+	hasLetter, digitCount := false, 0
+	for _, r := range trimmed {
+		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f {
+			return true
+		}
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
+		if unicode.IsDigit(r) {
+			digitCount++
+		}
+	}
+	return (!hasLetter && digitCount >= 6) || (!hasLetter && digitCount == 0)
 }
 
 func suspiciousEbookTitles() []string {

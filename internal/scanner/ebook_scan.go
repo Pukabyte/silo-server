@@ -1108,6 +1108,9 @@ func isLowTrustEmbeddedEbookTitle(value string) bool {
 	if value == "" || looksLikeEbookURLArtifact(value) {
 		return true
 	}
+	if isGarbledEbookTitle(value) {
+		return true
+	}
 	if isIdentifierLikeEbookTitle(value) {
 		return true
 	}
@@ -1125,6 +1128,30 @@ func isLowTrustEmbeddedEbookTitle(value string) bool {
 		}
 	}
 	return false
+}
+
+func isGarbledEbookTitle(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	hasLetterOrDigit := false
+	for _, r := range value {
+		if isUnsafeEbookTitleControlRune(r) {
+			return true
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			hasLetterOrDigit = true
+		}
+	}
+	return !hasLetterOrDigit
+}
+
+func isUnsafeEbookTitleControlRune(r rune) bool {
+	if r == '\t' || r == '\n' || r == '\r' {
+		return false
+	}
+	return r < 0x20 || r == 0x7f || unicode.IsControl(r)
 }
 
 func isIdentifierLikeEbookTitle(value string) bool {

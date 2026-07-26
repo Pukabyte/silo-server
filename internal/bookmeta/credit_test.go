@@ -17,6 +17,8 @@ func TestTrustedAutomaticCredit(t *testing.T) {
 		{"https://example.com/books", false},
 		{"www.example.org", false},
 		{"books@example.org", false},
+		{"\uFFFD\u00ad\u00d9", true},
+		{"Ada\x00Writer", false},
 		{"Q", true},
 		{"R.", true},
 		{"A. F. Carter", true},

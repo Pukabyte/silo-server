@@ -2275,6 +2275,29 @@ func TestPrepareEbookScanMetadataReplacesSymbolPaddedNumericIdentifier(t *testin
 	}
 }
 
+func TestPrepareEbookScanMetadataReplacesGarbledTitle(t *testing.T) {
+	book := parsedEbook{Title: "\u00b4"}
+	prepareEbookScanMetadata(&book, "/library/Jonathan D. Harnum/Basic Music Theory_ How to Read, W (34253)/Basic Music Theory_ How to Read - Jonathan D. Harnum.pdf")
+	if book.Title != "Basic Music Theory How to Read" {
+		t.Fatalf("Title = %q", book.Title)
+	}
+	if len(book.Authors) != 1 || book.Authors[0] != "Jonathan D. Harnum" {
+		t.Fatalf("Authors = %v", book.Authors)
+	}
+}
+
+func TestGarbledEbookTitleDoesNotRejectReadableReplacementGlyph(t *testing.T) {
+	if isGarbledEbookTitle("The Time Traveler\uFFFDs Wife") {
+		t.Fatal("readable title classified as garbled")
+	}
+	if !isGarbledEbookTitle("broken\x00metadata") {
+		t.Fatal("control-character title not classified as garbled")
+	}
+	if isGarbledEbookTitle("A title\nwith a subtitle") {
+		t.Fatal("readable multiline title classified as garbled")
+	}
+}
+
 func TestPrepareEbookScanMetadataStripsSuffixForExistingTrustedAuthor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

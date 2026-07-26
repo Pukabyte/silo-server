@@ -36,3 +36,14 @@ func TestSuspiciousEbookTitle(t *testing.T) {
 		t.Fatal("substantive title classified as suspicious")
 	}
 }
+
+func TestRequiresEbookTitleRepair(t *testing.T) {
+	for _, title := range []string{"\u00b4", "275736108", "garbled\x1btitle"} {
+		if !requiresEbookTitleRepair(title) {
+			t.Errorf("requiresEbookTitleRepair(%q) = false", title)
+		}
+	}
+	if requiresEbookTitleRepair("A readable\nsubtitle") {
+		t.Fatal("readable multiline title requires repair")
+	}
+}
