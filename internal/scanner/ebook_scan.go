@@ -999,9 +999,14 @@ func ebookTitleFromPath(filePath string) string {
 	// ".fb2.zip" is a double extension that filepath.Ext (and the
 	// normalized ".fbz" format token) would leave half-stripped.
 	if strings.HasSuffix(strings.ToLower(base), ".fb2.zip") {
-		return base[:len(base)-len(".fb2.zip")]
+		base = base[:len(base)-len(".fb2.zip")]
+	} else {
+		base = strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	// Underscores are library filename separators, not meaningful title
+	// punctuation. Keep real punctuation intact while making display titles and
+	// the trailing " - Author" parser match ordinary human-readable paths.
+	return strings.Join(strings.Fields(strings.ReplaceAll(base, "_", " ")), " ")
 }
 
 // prepareEbookScanMetadata establishes metadata trusted for scanner identity,
@@ -1103,6 +1108,9 @@ func isLowTrustEmbeddedEbookTitle(value string) bool {
 	if value == "" || looksLikeEbookURLArtifact(value) {
 		return true
 	}
+	if isLongNumericEbookIdentifier(value) {
+		return true
+	}
 	normalized := normalizeEbookIdentityPart(value)
 	switch normalized {
 	case "cover", "content", "contents", "title page", "vorwort", "geleitwort",
@@ -1117,6 +1125,19 @@ func isLowTrustEmbeddedEbookTitle(value string) bool {
 		}
 	}
 	return false
+}
+
+func isLongNumericEbookIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 6 {
+		return false
+	}
+	for _, r := range value {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func isSubstantiveEbookPathTitle(value string) bool {

@@ -275,7 +275,7 @@ func loadTitleRepairs(ctx context.Context, db queryer, limit int) ([]titleRepair
 		LEFT JOIN people p ON p.id = ip.person_id
 		WHERE mi.type = 'ebook'
 		  AND lower(btrim(COALESCE(mi.status, ''))) <> 'curated'
-		  AND lower(btrim(mi.title)) = ANY($1::text[])
+		  AND (lower(btrim(mi.title)) = ANY($1::text[]) OR btrim(mi.title) ~ '^[0-9]{6,}$')
 		GROUP BY mi.content_id, mi.title
 		ORDER BY mi.content_id
 	`, suspiciousEbookTitles())
@@ -290,7 +290,14 @@ func loadTitleRepairs(ctx context.Context, db queryer, limit int) ([]titleRepair
 		if err := rows.Scan(&contentID, &oldTitle, &filePath, &authors); err != nil {
 			return nil, err
 		}
-		newTitle := strings.TrimSpace(strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)))
+		newTitle := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)), "_", " ")), " ")
+		pathAuthor := strings.TrimSpace(filepath.Base(filepath.Dir(filepath.Dir(filePath))))
+		if bookmeta.TrustedAutomaticCredit(pathAuthor) {
+			suffix := " - " + pathAuthor
+			if strings.HasSuffix(strings.ToLower(newTitle), strings.ToLower(suffix)) {
+				newTitle = strings.TrimSpace(newTitle[:len(newTitle)-len(suffix)])
+			}
+		}
 		for _, author := range authors {
 			suffix := " - " + strings.TrimSpace(author)
 			if strings.HasSuffix(strings.ToLower(newTitle), strings.ToLower(suffix)) {

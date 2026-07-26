@@ -36,3 +36,5 @@ func TestSuspiciousEbookTitle(t *testing.T) {
 		t.Fatal("substantive title classified as suspicious")
 	}
 }
+
+}

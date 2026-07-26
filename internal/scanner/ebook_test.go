@@ -2253,6 +2253,17 @@ func TestPrepareEbookScanMetadataRejectsHardInvalidSidecarAuthors(t *testing.T) 
 	}
 }
 
+func TestPrepareEbookScanMetadataReplacesLongNumericEmbeddedTitle(t *testing.T) {
+	book := parsedEbook{Title: "275736108"}
+	prepareEbookScanMetadata(&book, "/library/DK Publishing/Eyewitness History_ The 1950s - DK Publishing.pdf")
+	if book.Title != "Eyewitness History The 1950s" {
+		t.Fatalf("Title = %q", book.Title)
+	}
+	if len(book.Authors) != 1 || book.Authors[0] != "DK Publishing" {
+		t.Fatalf("Authors = %v", book.Authors)
+	}
+}
+
 func TestPrepareEbookScanMetadataStripsSuffixForExistingTrustedAuthor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
