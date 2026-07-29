@@ -46,11 +46,11 @@ type Bookmark struct {
 // omitempty), camelCase, with timestamps as JS-epoch milliseconds.
 func bookmarkToABS(b Bookmark) map[string]any {
 	return map[string]any{
-		"id":            b.ID,
-		"libraryItemId": b.LibraryItemID,
-		"time":          b.Time,
-		"title":         b.Title,
-		"createdAt":     b.CreatedAt.UnixMilli(),
-		"updatedAt":     b.UpdatedAt.UnixMilli(),
+		"id":             b.ID,
+		libraryItemIDKey: b.LibraryItemID,
+		"time":           b.Time,
+		titleKey:         b.Title,
+		createdAtKey:     b.CreatedAt.UnixMilli(),
+		updatedAtKey:     b.UpdatedAt.UnixMilli(),
 	}
 }

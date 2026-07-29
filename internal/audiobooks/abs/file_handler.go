@@ -3,6 +3,7 @@ package abs
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -59,7 +60,7 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contentID := chi.URLParam(r, "libraryItemId")
+	contentID := chi.URLParam(r, libraryItemIDKey)
 	inoStr := chi.URLParam(r, "ino")
 
 	access, err := h.accessFilterForAuth(r.Context(), a)
@@ -102,14 +103,17 @@ func (h *Handler) handleFileStream(w http.ResponseWriter, r *http.Request) {
 	// /download variant: hint the client to save rather than stream.
 	if strings.HasSuffix(r.URL.Path, "/download") {
 		filename := filepath.Base(mediaFile.FilePath)
-		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	}
 
 	// Set Content-Type for audio files. ServeDirectPlay uses MimeFromExtension
 	// which covers video containers; we override with audio-specific MIME
 	// types because ABS clients pattern-match on Content-Type.
 	ext := strings.ToLower(filepath.Ext(mediaFile.FilePath))
-	if ct := audioContentType(ext); ct != "" {
+	if ct := ebookContentType(ext); ct != "" {
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+	} else if ct := audioContentType(ext); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
 

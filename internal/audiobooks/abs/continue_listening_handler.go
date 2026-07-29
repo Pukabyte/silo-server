@@ -21,7 +21,7 @@ func (h *Handler) setHideFromContinue(w http.ResponseWriter, r *http.Request, hi
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	itemID := chi.URLParam(r, "itemId")
+	itemID := chi.URLParam(r, itemIDParam)
 	if itemID == "" {
 		http.Error(w, "itemId required", http.StatusBadRequest)
 		return
@@ -41,12 +41,16 @@ func (h *Handler) setHideFromContinue(w http.ResponseWriter, r *http.Request, hi
 		http.Error(w, "item not found", http.StatusNotFound)
 		return
 	}
-	if h.deps.ProgressStore == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-		return
+	var toggleErr error
+	if item.Type == mediaTypeEbook {
+		if h.deps.EbookProgressStore != nil {
+			toggleErr = h.deps.EbookProgressStore.SetEbookHidden(r.Context(), a.UserID, a.ProfileID, itemID, hide)
+		}
+	} else if h.deps.ProgressStore != nil {
+		toggleErr = h.deps.ProgressStore.SetHideFromContinue(r.Context(), a.UserID, a.ProfileID, itemID, hide)
 	}
-	if err := h.deps.ProgressStore.SetHideFromContinue(r.Context(), a.UserID, a.ProfileID, itemID, hide); err != nil {
-		slog.ErrorContext(r.Context(), "abs continue toggle failed", "component", "audiobooks", "err", err, "user", a.UserID, "item", itemID, "hide", hide)
+	if toggleErr != nil {
+		slog.ErrorContext(r.Context(), "abs continue toggle failed", "component", "audiobooks", "err", toggleErr, "user", a.UserID, "item", itemID, "hide", hide)
 		http.Error(w, "continue toggle failed", http.StatusInternalServerError)
 		return
 	}

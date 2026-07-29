@@ -80,11 +80,9 @@ func ParseFilter(raw string) (Filter, bool) {
 	return out, true
 }
 
-// Matches reports whether the given LibraryItem satisfies this filter. genres
-// is best-effort — backend summaries don't carry genres, so a genres filter
-// matches nothing unless the caller pre-populated the field via detail
-// lookups (we currently don't). tags / languages behave the same way and
-// are accepted for forward-compat but always return false.
+// Matches reports whether the given LibraryItem satisfies this filter. Tags
+// remain unsupported because Silo has no item-level tag model; genre and
+// language are present on the mapped summary metadata.
 //
 // Progress filters require the caller to supply an optional `inProgress`
 // and `finished` flag for the book; without them the progress branch
@@ -116,6 +114,15 @@ func (f Filter) Matches(item LibraryItem, inProgress, finished bool, hasProgress
 			}
 		}
 		return false
+	case FilterGenres:
+		for _, genre := range item.Media.Metadata.Genres {
+			if strings.EqualFold(genre, f.Value) {
+				return true
+			}
+		}
+		return false
+	case FilterLanguages:
+		return strings.EqualFold(item.Media.Metadata.Language, f.Value)
 	case FilterProgress:
 		switch f.Value {
 		case "in-progress":
@@ -129,7 +136,7 @@ func (f Filter) Matches(item LibraryItem, inProgress, finished bool, hasProgress
 		}
 		return false
 	default:
-		// genres / tags / languages — not derivable from a summary today.
+		// Tags are not derivable from Silo's catalog today.
 		return false
 	}
 }

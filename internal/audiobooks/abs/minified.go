@@ -120,8 +120,8 @@ func Minify(item LibraryItem) MinifiedLibraryItem {
 	}
 	ebookOnlyFiles := len(item.LibraryFiles) > 0
 	for _, file := range item.LibraryFiles {
-		fileType, _ := file["fileType"].(string)
-		if fileType != "ebook" {
+		fileType, _ := file[fileTypeKey].(string)
+		if fileType != mediaTypeEbook {
 			ebookOnlyFiles = false
 			break
 		}
@@ -166,7 +166,7 @@ func Minify(item LibraryItem) MinifiedLibraryItem {
 				Publisher:         m.Publisher,
 				Description:       m.Description,
 				ISBN:              m.ISBN,
-				Language:          "en",
+				Language:          m.Language,
 				Explicit:          m.Explicit,
 			},
 			CoverPath:     item.Media.CoverPath,

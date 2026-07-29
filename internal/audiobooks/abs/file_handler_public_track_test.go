@@ -2,6 +2,7 @@ package abs
 
 import (
 	"context"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,7 +19,8 @@ import (
 // fakePlaybackSessionStore is an in-memory ABSPlaybackSessionStore for the
 // public-track tests. Only Get is exercised; the other methods are no-ops.
 type fakePlaybackSessionStore struct {
-	sessions map[string]ABSPlaybackSession
+	sessions  map[string]ABSPlaybackSession
+	syncCalls int
 }
 
 func (f *fakePlaybackSessionStore) InsertPlaybackSession(_ context.Context, s ABSPlaybackSession) error {
@@ -36,6 +38,7 @@ func (f *fakePlaybackSessionStore) GetPlaybackSession(_ context.Context, id stri
 	return s, nil
 }
 func (f *fakePlaybackSessionStore) SyncPlaybackSession(context.Context, string, float64, int) error {
+	f.syncCalls++
 	return nil
 }
 func (f *fakePlaybackSessionStore) ClosePlaybackSession(context.Context, string) error { return nil }
@@ -121,7 +124,7 @@ func dispatchTrack(h *Handler, method, sid, idx string) *httptest.ResponseRecord
 }
 
 func TestHandlePublicTrack_ServesBytesForValidSession(t *testing.T) {
-	h, _ := newPublicTrackHandler(t, "sid-1", "book-1", false)
+	h, _ := newPublicTrackHandler(t, "sid-1", testBookID, false)
 	rec := dispatchTrack(h, http.MethodGet, "sid-1", "1")
 	if rec.Code != http.StatusOK && rec.Code != http.StatusPartialContent {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -138,7 +141,7 @@ func TestHandlePublicTrack_ServesBytesForValidSession(t *testing.T) {
 // some players issue before the GET. http.ServeContent returns headers
 // without a body for HEAD; the handler must not 404.
 func TestHandlePublicTrack_HeadProbe(t *testing.T) {
-	h, _ := newPublicTrackHandler(t, "sid-1", "book-1", false)
+	h, _ := newPublicTrackHandler(t, "sid-1", testBookID, false)
 	rec := dispatchTrack(h, http.MethodHead, "sid-1", "1")
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
@@ -149,7 +152,7 @@ func TestHandlePublicTrack_HeadProbe(t *testing.T) {
 }
 
 func TestHandlePublicTrack_UnknownSession404(t *testing.T) {
-	h, _ := newPublicTrackHandler(t, "sid-1", "book-1", false)
+	h, _ := newPublicTrackHandler(t, "sid-1", testBookID, false)
 	rec := dispatchTrack(h, http.MethodGet, "sid-does-not-exist", "1")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -157,7 +160,7 @@ func TestHandlePublicTrack_UnknownSession404(t *testing.T) {
 }
 
 func TestHandlePublicTrack_ClosedSession410(t *testing.T) {
-	h, _ := newPublicTrackHandler(t, "sid-1", "book-1", true)
+	h, _ := newPublicTrackHandler(t, "sid-1", testBookID, true)
 	rec := dispatchTrack(h, http.MethodGet, "sid-1", "1")
 	if rec.Code != http.StatusGone {
 		t.Errorf("status = %d, want 410", rec.Code)
@@ -165,7 +168,7 @@ func TestHandlePublicTrack_ClosedSession410(t *testing.T) {
 }
 
 func TestHandlePublicTrack_IndexOutOfRange404(t *testing.T) {
-	h, _ := newPublicTrackHandler(t, "sid-1", "book-1", false)
+	h, _ := newPublicTrackHandler(t, "sid-1", testBookID, false)
 	rec := dispatchTrack(h, http.MethodGet, "sid-1", "5")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -173,11 +176,43 @@ func TestHandlePublicTrack_IndexOutOfRange404(t *testing.T) {
 }
 
 func TestHandlePublicTrack_BadIndex400(t *testing.T) {
-	h, _ := newPublicTrackHandler(t, "sid-1", "book-1", false)
+	h, _ := newPublicTrackHandler(t, "sid-1", testBookID, false)
 	for _, bad := range []string{"0", "-1", "abc"} {
 		rec := dispatchTrack(h, http.MethodGet, "sid-1", bad)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("idx=%q: status = %d, want 400", bad, rec.Code)
 		}
+	}
+}
+
+func TestHandleFileStreamServesEbookMIMEAndSafeDownloadName(t *testing.T) {
+	filename := `reader "日本語".epub`
+	path := filepath.Join(t.TempDir(), filename)
+	if err := os.WriteFile(path, []byte("ebook-bytes"), 0o600); err != nil {
+		t.Fatalf("write ebook: %v", err)
+	}
+	media := &filesMediaStore{
+		contentID: testEbookID,
+		files:     []*models.MediaFile{{ID: 77, ContentID: testEbookID, FilePath: path}},
+	}
+	h := New(Dependencies{MediaStore: media})
+	rec := dispatchABSWithParams(http.MethodGet, "/api/items/ebook-1/file/77/download",
+		map[string]string{"libraryItemId": testEbookID, "ino": "77"}, nil, "1", testProfileID, h.handleFileStream) //nolint:goconst // External ABS route keys.
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != ebookEPUBMimeType {
+		t.Fatalf("Content-Type = %q, want %q", got, ebookEPUBMimeType)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	disposition, params, err := mime.ParseMediaType(rec.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse Content-Disposition: %v", err)
+	}
+	if disposition != "attachment" || params["filename"] != filename {
+		t.Fatalf("Content-Disposition = %q, want safe filename %q", rec.Header().Get("Content-Disposition"), filename)
 	}
 }

@@ -96,6 +96,29 @@ type MediaStore interface {
 	GetSeriesByName(ctx context.Context, seriesName string, access catalog.AccessFilter) (Series, error)
 }
 
+// EbookPrimarySelection preserves all three primary-file states in a batch:
+// no preference row, an explicit no-primary row, or an explicit file ID.
+type EbookPrimarySelection struct {
+	FileID     int
+	Configured bool
+	HasPrimary bool
+}
+
+// ebookBatchStore is an optional production optimization. Small test doubles
+// can continue implementing MediaStore only; list handlers fall back to the
+// single-item methods when this capability is absent.
+type ebookBatchStore interface {
+	GetMediaFilesByContentIDs(ctx context.Context, contentIDs []string, access catalog.AccessFilter) (map[string][]*models.MediaFile, error)
+	GetPrimaryEbookFileIDs(ctx context.Context, contentIDs []string) (map[string]EbookPrimarySelection, error)
+}
+
+// itemLibraryBatchStore resolves the source library for item-shaped responses
+// without issuing one membership query per item. Production implements this;
+// small test doubles can rely on the type-based fallback.
+type itemLibraryBatchStore interface {
+	GetItemLibraryIDs(ctx context.Context, contentIDs []string, access catalog.AccessFilter) (map[string]int64, error)
+}
+
 // AuthorSummary is an aggregated author entry for /libraries/{id}/authors.
 type AuthorSummary struct {
 	ID       string
@@ -779,7 +802,7 @@ func readPagedQuery(r *http.Request, defaultLimit int) (limit, page int) {
 			limit = n
 		}
 	}
-	if v := r.URL.Query().Get("page"); v != "" {
+	if v := r.URL.Query().Get(pageKey); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			page = n
 		}
@@ -792,14 +815,14 @@ func readPagedQuery(r *http.Request, defaultLimit int) (limit, page int) {
 // their presence (sortBy, filterBy, minified).
 func pagedEnvelope(results any, total, limit, page int, sortBy string, sortDesc bool, filterBy string, minified bool, include string) map[string]any {
 	return map[string]any{
-		"results":  results,
-		"total":    total,
-		"limit":    limit,
-		"page":     page,
-		"sortBy":   sortBy,
-		"sortDesc": sortDesc,
-		"filterBy": filterBy,
-		"minified": minified,
-		"include":  include,
+		resultsKey:  results,
+		totalKey:    total,
+		"limit":     limit,
+		pageKey:     page,
+		"sortBy":    sortBy,
+		"sortDesc":  sortDesc,
+		"filterBy":  filterBy,
+		minifiedKey: minified,
+		"include":   include,
 	}
 }

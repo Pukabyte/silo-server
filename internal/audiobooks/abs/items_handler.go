@@ -13,10 +13,8 @@ import (
 )
 
 // resolveDefaultLibrary returns the first audiobook library (the canonical
-// "default" for response embedding) or a virtual fallback when the store
-// is empty or errors. Centralizes the snippet that handleItem,
-// handleSimilarItems, and handleItemsInProgress all need so the fallback
-// shape stays consistent across all three response paths.
+// default for legacy response surfaces) or a virtual fallback when the store
+// is empty or errors.
 func (h *Handler) resolveDefaultLibrary(ctx context.Context, filters ...catalog.AccessFilter) AudiobookLibrary {
 	access := emptyAccessFilter()
 	if len(filters) > 0 {
@@ -28,24 +26,55 @@ func (h *Handler) resolveDefaultLibrary(ctx context.Context, filters ...catalog.
 	return AudiobookLibrary{ID: 0, Name: VirtualLibraryName, Type: "audiobooks"}
 }
 
-// resolveLibraryForItem keeps item-detail responses attached to the source
-// library that supplied the item.  This matters now that the ABS listener
-// exposes both audiobook and ebook folders under the shared ABS `book` type.
-func (h *Handler) resolveLibraryForItem(ctx context.Context, itemType string, access catalog.AccessFilter) AudiobookLibrary {
-	if libs, err := h.deps.MediaStore.ListAudiobookLibraries(ctx, access); err == nil {
-		for _, lib := range libs {
-			if (itemType == "ebook" && (lib.Type == "ebook" || lib.Type == "ebooks")) ||
-				(itemType == "audiobook" && lib.Type != "ebook" && lib.Type != "ebooks") {
-				return lib
+// resolveLibrariesForItems keeps global item-shaped responses attached to an
+// actual source library. The production batch capability prevents N+1
+// membership lookups; test doubles without it retain a type-based fallback.
+func (h *Handler) resolveLibrariesForItems(ctx context.Context, items []*models.MediaItem, access catalog.AccessFilter) map[string]AudiobookLibrary {
+	resolved := make(map[string]AudiobookLibrary, len(items))
+	libs, err := h.deps.MediaStore.ListAudiobookLibraries(ctx, access)
+	if err != nil {
+		libs = nil
+	}
+	libsByID := make(map[int64]AudiobookLibrary, len(libs))
+	for _, lib := range libs {
+		libsByID[lib.ID] = lib
+	}
+	memberships := map[string]int64{}
+	if store, ok := h.deps.MediaStore.(itemLibraryBatchStore); ok {
+		ids := make([]string, 0, len(items))
+		for _, item := range items {
+			if item != nil {
+				ids = append(ids, item.ContentID)
 			}
 		}
+		if batch, batchErr := store.GetItemLibraryIDs(ctx, ids, access); batchErr == nil {
+			memberships = batch
+		}
 	}
-	return resolveFallbackLibrary(itemType)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if lib, ok := libsByID[memberships[item.ContentID]]; ok {
+			resolved[item.ContentID] = lib
+			continue
+		}
+		lib := resolveFallbackLibrary(item.Type)
+		for _, candidate := range libs {
+			if (item.Type == mediaTypeEbook && (candidate.Type == mediaTypeEbook || candidate.Type == libraryTypeEbooks)) ||
+				(item.Type == mediaTypeAudiobook && candidate.Type != mediaTypeEbook && candidate.Type != libraryTypeEbooks) {
+				lib = candidate
+				break
+			}
+		}
+		resolved[item.ContentID] = lib
+	}
+	return resolved
 }
 
 func resolveFallbackLibrary(itemType string) AudiobookLibrary {
-	if itemType == "ebook" {
-		return AudiobookLibrary{ID: 0, Name: "Books", Type: "ebook"}
+	if itemType == mediaTypeEbook {
+		return AudiobookLibrary{ID: 0, Name: "Books", Type: mediaTypeEbook}
 	}
 	return AudiobookLibrary{ID: 0, Name: VirtualLibraryName, Type: "audiobooks"}
 }
@@ -86,7 +115,7 @@ func (h *Handler) handleItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lib := h.resolveLibraryForItem(r.Context(), item.Type, access)
+	lib := h.resolveLibrariesForItems(r.Context(), []*models.MediaItem{item}, access)[item.ContentID]
 	baseURL := h.absBaseURL(r)
 	result := h.siloItemToLibraryItemDetail(r.Context(), item, files, lib, baseURL)
 	writeJSON(w, http.StatusOK, result)
@@ -94,7 +123,7 @@ func (h *Handler) handleItem(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) siloItemToLibraryItemDetail(ctx context.Context, item *models.MediaItem, files []*models.MediaFile, lib AudiobookLibrary, baseURL string) LibraryItem {
 	base := siloItemToLibraryItem(item, lib, baseURL)
-	if item.Type != "ebook" {
+	if item.Type != mediaTypeEbook {
 		return siloItemToLibraryItemDetail(item, files, lib, baseURL)
 	}
 	primaryID, configured, hasPrimary, err := h.ebookPrimary(ctx, item.ContentID)
@@ -151,20 +180,24 @@ func (h *Handler) handleSimilarItems(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	lib := h.resolveDefaultLibrary(r.Context(), access)
 	baseURL := h.absBaseURL(r)
 	byID, err := h.deps.MediaStore.GetAudiobooksByIDs(r.Context(), ids, access)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	out := make([]LibraryItem, 0, len(ids))
+	ordered := make([]*models.MediaItem, 0, len(ids))
 	for _, id := range ids { // preserve recommender order
 		si := byID[id]
 		if si == nil {
 			continue
 		}
-		out = append(out, siloItemToLibraryItem(si, lib, baseURL))
+		ordered = append(ordered, si)
+	}
+	libraries := h.resolveLibrariesForItems(r.Context(), ordered, access)
+	out := make([]LibraryItem, 0, len(ordered))
+	for _, si := range ordered {
+		out = append(out, siloItemToLibraryItem(si, libraries[si.ContentID], baseURL))
 	}
 	writeJSON(w, http.StatusOK, pagedEnvelope(out, len(out), limit, 0, "relevance", true, "", false, ""))
 }
@@ -226,7 +259,7 @@ func (h *Handler) handleItemsInProgress(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	for _, p := range ebookRows {
-		if p.Progress > 0 && p.Progress < 0.9 {
+		if p.Progress > 0 && p.Progress < models.EbookFinishedProgressThreshold {
 			candidates = append(candidates, candidate{contentID: p.ContentID, updatedAt: p.UpdatedAt.UnixMilli()})
 		}
 	}
@@ -243,32 +276,48 @@ func (h *Handler) handleItemsInProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	items := make([]any, 0, len(candidates))
-	libs, _ := h.deps.MediaStore.ListAudiobookLibraries(r.Context(), access)
+	type candidateItem struct {
+		candidate candidate
+		entry     LibraryItem
+		isEbook   bool
+	}
+	candidateItems := make([]candidateItem, 0, len(candidates))
+	itemsForLibraries := make([]*models.MediaItem, 0, len(candidates))
+	for _, candidate := range candidates {
+		if si := byID[candidate.contentID]; si != nil {
+			itemsForLibraries = append(itemsForLibraries, si)
+		}
+	}
+	libraries := h.resolveLibrariesForItems(r.Context(), itemsForLibraries, access)
 	for _, candidate := range candidates {
 		si := byID[candidate.contentID]
 		if si == nil {
 			continue
 		}
-		lib := resolveFallbackLibrary(si.Type)
-		for _, candidateLib := range libs {
-			if (si.Type == "ebook" && (candidateLib.Type == "ebook" || candidateLib.Type == "ebooks")) || (si.Type == "audiobook" && candidateLib.Type != "ebook" && candidateLib.Type != "ebooks") {
-				lib = candidateLib
-				break
-			}
+		candidateItems = append(candidateItems, candidateItem{
+			candidate: candidate,
+			entry:     siloItemToLibraryItem(si, libraries[si.ContentID], baseURL),
+			isEbook:   si.Type == mediaTypeEbook,
+		})
+	}
+	ebookEntries := make([]LibraryItem, 0, len(candidateItems))
+	for _, item := range candidateItems {
+		if item.isEbook {
+			ebookEntries = append(ebookEntries, item.entry)
 		}
-		entry := siloItemToLibraryItem(si, lib, baseURL)
-		if si.Type == "ebook" {
-			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), si.ContentID, access); err == nil {
-				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(r.Context(), si.ContentID)
-				if primaryErr == nil {
-					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
-				}
-			}
+	}
+	ebookEntries = h.enrichEbookLibraryItems(r.Context(), ebookEntries, access)
+	ebookIndex := 0
+	items := make([]any, 0, len(candidateItems))
+	for _, item := range candidateItems {
+		entry := item.entry
+		if item.isEbook {
+			entry = ebookEntries[ebookIndex]
+			ebookIndex++
 		}
 		mli := Minify(entry)
 		wire := minifiedItemToWireMap(mli)
-		wire["progressLastUpdate"] = candidate.updatedAt
+		wire["progressLastUpdate"] = item.candidate.updatedAt
 		items = append(items, wire)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"libraryItems": items})

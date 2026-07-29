@@ -33,8 +33,8 @@ func (s *authorSeriesStubMediaStore) GetSeriesByName(_ context.Context, name str
 func TestAuthor_Detail_ReturnsBooks(t *testing.T) {
 	media := &authorSeriesStubMediaStore{
 		author: Author{ID: "42", Name: "Brandon Sanderson", PosterPath: "tmdb/people/42/profile", Books: []*models.MediaItem{
-			{ContentID: "book-1", Title: "Mistborn"},
-			{ContentID: "book-2", Title: "Stormlight"},
+			{ContentID: testBookID, Title: testMistborn},
+			{ContentID: testSecondBookID, Title: "Stormlight"},
 		}},
 	}
 	h := New(Dependencies{MediaStore: media})
@@ -181,14 +181,14 @@ func TestAuthor_Detail_Unknown_404(t *testing.T) {
 
 func TestSeries_Detail_ReturnsBooks(t *testing.T) {
 	media := &authorSeriesStubMediaStore{
-		series: Series{ID: "mistborn", Name: "Mistborn", Books: []*models.MediaItem{
+		series: Series{ID: testMistbornID, Name: testMistborn, Books: []*models.MediaItem{
 			{ContentID: "b1", Title: "Final Empire"},
 			{ContentID: "b2", Title: "Well of Ascension"},
 		}},
 	}
 	h := New(Dependencies{MediaStore: media})
 
-	rec := dispatchABSWithParams(http.MethodGet, "/api/series/mistborn", map[string]string{"id": "mistborn"}, nil, "1", "", h.handleSeriesDetail)
+	rec := dispatchABSWithParams(http.MethodGet, "/api/series/mistborn", map[string]string{"id": testMistbornID}, nil, "1", "", h.handleSeriesDetail)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
 	}
@@ -196,7 +196,7 @@ func TestSeries_Detail_ReturnsBooks(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
 	}
-	if got["name"] != "Mistborn" {
+	if got["name"] != testMistborn {
 		t.Errorf("name = %v", got["name"])
 	}
 	// Real ABS Series.toOldJSON key set (+ numBooks/books).
@@ -218,7 +218,7 @@ func TestSeries_Detail_ReturnsBooks(t *testing.T) {
 }
 
 func TestSeries_Detail_Unknown_404(t *testing.T) {
-	media := &authorSeriesStubMediaStore{series: Series{ID: "mistborn", Name: "Mistborn"}}
+	media := &authorSeriesStubMediaStore{series: Series{ID: testMistbornID, Name: testMistborn}}
 	h := New(Dependencies{MediaStore: media})
 
 	rec := dispatchABSWithParams(http.MethodGet, "/api/series/unknown", map[string]string{"id": "unknown"}, nil, "1", "", h.handleSeriesDetail)

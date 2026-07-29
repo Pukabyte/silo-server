@@ -67,23 +67,23 @@ func audiobookLibraryMap(lib AudiobookLibrary) map[string]any {
 	}
 	id := audiobookLibraryID(lib)
 	return map[string]any{
-		"id":   id,
-		"name": name,
+		"id":    id,
+		nameKey: name,
 		// folders mirror real ABS LibraryFolder.toOldJSON {id,fullPath,libraryId,addedAt}.
 		// silo serves a single virtual folder per library.
 		"folders": []map[string]any{
-			{"id": VirtualFolderID, "fullPath": "/" + name, "libraryId": id, "addedAt": 0},
+			{"id": VirtualFolderID, "fullPath": "/" + name, libraryIDKey: id, addedAtKey: 0},
 		},
-		"displayOrder":    1,
-		"icon":            "audiobookshelf",
+		"displayOrder": 1,
+		"icon":         audiobookshelfIcon,
 		// ABS uses `book` for both text ebooks and audiobooks.
-		"mediaType":       LibraryMediaType,
+		mediaTypeKey:      LibraryMediaType,
 		"provider":        "audible",
 		"settings":        audiobookLibrarySettings(),
-		"lastScan":        nil,
+		lastScanKey:       nil,
 		"lastScanVersion": ServerVersion,
-		"createdAt":       0,
-		"lastUpdate":      0,
+		createdAtKey:      0,
+		lastUpdateKey:     0,
 	}
 }
 

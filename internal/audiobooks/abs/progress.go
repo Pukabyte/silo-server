@@ -3,11 +3,15 @@ package abs
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 // ---------------------------------------------------------------------------
@@ -48,8 +52,9 @@ type ProgressStore interface {
 type EbookProgressStore interface {
 	GetEbookProgress(ctx context.Context, userID, profileID, contentID string) (*EbookProgress, error)
 	ListEbookProgress(ctx context.Context, userID, profileID string, limit int) ([]EbookProgress, error)
-	UpsertEbookProgress(ctx context.Context, progress EbookProgress) error
+	UpsertEbookProgress(ctx context.Context, progress EbookProgress) (*EbookProgress, error)
 	DeleteEbookProgress(ctx context.Context, userID, profileID, contentID string) error
+	SetEbookHidden(ctx context.Context, userID, profileID, contentID string, hide bool) error
 }
 
 type EbookProgress struct {
@@ -147,7 +152,7 @@ func (h *Handler) handleGetMyProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.deps.ProgressStore == nil && h.deps.EbookProgressStore == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"mediaProgress": []any{}})
+		writeJSON(w, http.StatusOK, map[string]any{mediaProgressKey: []any{}})
 		return
 	}
 	var rows []ProgressRow
@@ -198,7 +203,7 @@ func (h *Handler) handleGetMyProgress(w http.ResponseWriter, r *http.Request) {
 			out = append(out, ebookProgressToABS(p))
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mediaProgress": out})
+	writeJSON(w, http.StatusOK, map[string]any{mediaProgressKey: out})
 }
 
 // handleGetItemProgress — GET /abs/api/me/progress/{libraryItemId}
@@ -209,7 +214,7 @@ func (h *Handler) handleGetItemProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	contentID := chi.URLParam(r, "libraryItemId")
+	contentID := chi.URLParam(r, libraryItemIDKey)
 	if h.deps.ProgressStore == nil && h.deps.EbookProgressStore == nil {
 		http.Error(w, "progress not found", http.StatusNotFound)
 		return
@@ -224,7 +229,7 @@ func (h *Handler) handleGetItemProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "progress not found", http.StatusNotFound)
 		return
 	}
-	if item.Type == "ebook" {
+	if item.Type == mediaTypeEbook {
 		if h.deps.EbookProgressStore == nil {
 			http.Error(w, "progress not found", http.StatusNotFound)
 			return
@@ -268,6 +273,8 @@ type progressBody struct {
 	EbookLocation *string  `json:"ebookLocation"`
 }
 
+const maxProgressBodyBytes int64 = 16 << 10
+
 // handleSetItemProgress — POST /abs/api/me/progress/{libraryItemId}
 // UPSERTs the progress row. Merges body fields over any existing row so a
 // partial body (only currentTime) doesn't reset duration/isFinished.
@@ -282,9 +289,26 @@ func (h *Handler) handleSetItemProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	contentID := chi.URLParam(r, "libraryItemId")
+	contentID := chi.URLParam(r, libraryItemIDKey)
+	r.Body = http.MaxBytesReader(w, r.Body, maxProgressBodyBytes)
 	var body progressBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decodeErr := decoder.Decode(&body)
+	if decodeErr == nil {
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			if err == nil {
+				err = errors.New("multiple JSON values")
+			}
+			decodeErr = err
+		}
+	}
+	if decodeErr != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(decodeErr, &tooLarge) {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
@@ -302,7 +326,7 @@ func (h *Handler) handleSetItemProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "item not found", http.StatusNotFound)
 		return
 	}
-	if item.Type == "ebook" {
+	if item.Type == mediaTypeEbook {
 		h.handleSetEbookProgress(w, r, a, contentID, body)
 		return
 	}
@@ -347,12 +371,12 @@ func (h *Handler) handleSetItemProgress(w http.ResponseWriter, r *http.Request) 
 	updated, err := h.deps.ProgressStore.GetProgress(r.Context(), a.UserID, a.ProfileID, contentID)
 	if err != nil || updated == nil {
 		// Best-effort: return the in-memory merged row rather than failing.
-		h.publish(a.UserID, "user_item_progress_updated", map[string]any{"data": progressRowToABS(next)})
+		h.publish(a.UserID, "user_item_progress_updated", map[string]any{dataKey: progressRowToABS(next)})
 		writeJSON(w, http.StatusOK, progressRowToABS(next))
 		return
 	}
 	payload := progressRowToABS(*updated)
-	h.publish(a.UserID, "user_item_progress_updated", map[string]any{"data": payload})
+	h.publish(a.UserID, "user_item_progress_updated", map[string]any{dataKey: payload})
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -362,14 +386,22 @@ func (h *Handler) handleSetEbookProgress(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	current := EbookProgress{UserID: a.UserID, ProfileID: a.ProfileID, ContentID: contentID}
+	previousProgress := 0.0
 	if existing, err := h.deps.EbookProgressStore.GetEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	} else if existing != nil {
 		current = *existing
+		previousProgress = existing.Progress
 	}
 	if body.EbookProgress != nil {
 		current.Progress = *body.EbookProgress
+	}
+	if body.IsFinished != nil && *body.IsFinished {
+		current.Progress = 1
+	}
+	if previousProgress >= models.EbookFinishedProgressThreshold && current.Progress < models.EbookFinishedProgressThreshold {
+		current.Progress = previousProgress
 	}
 	if body.EbookLocation != nil {
 		current.Location = *body.EbookLocation
@@ -408,24 +440,28 @@ func (h *Handler) handleSetEbookProgress(w http.ResponseWriter, r *http.Request,
 		}
 		current.FileID = primary.ID
 	}
-	if err := h.deps.EbookProgressStore.UpsertEbookProgress(r.Context(), current); err != nil {
+	committed, err := h.deps.EbookProgressStore.UpsertEbookProgress(r.Context(), current)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, ebookProgressToABS(current))
+	if committed == nil {
+		committed = &current
+	}
+	writeJSON(w, http.StatusOK, ebookProgressToABS(*committed))
 }
 
 func ebookProgressToABS(p EbookProgress) map[string]any {
 	return map[string]any{
-		"id":            p.UserID + "-" + p.ContentID,
-		"libraryItemId": p.ContentID,
-		"episodeId":     nil,
-		"duration":      0,
-		"progress":      p.Progress,
-		"currentTime":   0,
-		"isFinished":    p.Progress >= 0.9,
-		"ebookLocation": p.Location,
-		"ebookProgress": p.Progress,
+		"id":             p.UserID + "-" + p.ContentID,
+		libraryItemIDKey: p.ContentID,
+		episodeIDKey:     nil,
+		durationKey:      0,
+		progressKey:      p.Progress,
+		currentTimeKey:   0,
+		isFinishedKey:    p.Progress >= models.EbookFinishedProgressThreshold,
+		"ebookLocation":  p.Location,
+		"ebookProgress":  p.Progress,
 	}
 }
 
@@ -489,7 +525,7 @@ func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, err := h.deps.MediaStore.GetAudiobookByID(r.Context(), sess.ContentID, access)
-	if err != nil || item == nil {
+	if err != nil || item == nil || item.Type != mediaTypeAudiobook {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -516,17 +552,17 @@ func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 
 	// Realtime push to other connected clients.
 	h.publish(a.UserID, "user_item_progress_updated", map[string]any{
-		"data": map[string]any{
-			"libraryItemId": sess.ContentID,
-			"currentTime":   p.CurrentTime,
-			"sessionId":     sid,
+		dataKey: map[string]any{
+			libraryItemIDKey: sess.ContentID,
+			currentTimeKey:   p.CurrentTime,
+			"sessionId":      sid,
 		},
 	})
 	h.publish(a.UserID, "user_session_updated", map[string]any{
-		"id":            sid,
-		"libraryItemId": sess.ContentID,
-		"currentTime":   p.CurrentTime,
-		"timeListening": p.timeDelta(),
+		"id":             sid,
+		libraryItemIDKey: sess.ContentID,
+		currentTimeKey:   p.CurrentTime,
+		timeListeningKey: p.timeDelta(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -561,8 +597,8 @@ func (h *Handler) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	h.stopNativePlaybackSession(r.Context(), sid)
 
 	h.publish(a.UserID, "user_session_closed", map[string]any{
-		"id":            sid,
-		"libraryItemId": sess.ContentID,
+		"id":             sid,
+		libraryItemIDKey: sess.ContentID,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -576,16 +612,16 @@ func (h *Handler) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 func progressRowToABS(p ProgressRow) map[string]any {
 	lastMs := p.UpdatedAt.UnixMilli()
 	out := map[string]any{
-		"id":            p.UserID + "-" + p.ContentID,
-		"libraryItemId": p.ContentID,
-		"mediaItemId":   p.ContentID,
-		"currentTime":   p.CurrentSeconds,
-		"duration":      p.DurationSeconds,
-		"isFinished":    p.IsFinished,
-		"progress":      p.ProgressPct,
-		"startedAt":     lastMs,
-		"finishedAt":    nil,
-		"lastUpdate":    lastMs,
+		"id":             p.UserID + "-" + p.ContentID,
+		libraryItemIDKey: p.ContentID,
+		"mediaItemId":    p.ContentID,
+		currentTimeKey:   p.CurrentSeconds,
+		durationKey:      p.DurationSeconds,
+		isFinishedKey:    p.IsFinished,
+		progressKey:      p.ProgressPct,
+		startedAtKey:     lastMs,
+		"finishedAt":     nil,
+		lastUpdateKey:    lastMs,
 	}
 	if p.IsFinished {
 		out["finishedAt"] = lastMs

@@ -46,15 +46,15 @@ func TestHandlePlayStartCreatesNativePlaybackSession(t *testing.T) {
 	now := time.Now()
 	media := &playStartMediaStore{
 		item: &models.MediaItem{
-			ContentID: "book-1",
-			Type:      "audiobook",
+			ContentID: testBookID,
+			Type:      mediaTypeAudiobook,
 			Title:     "Native Session Book",
 			UpdatedAt: now,
 			AddedAt:   &now,
 		},
 		files: []*models.MediaFile{{
 			ID:         42,
-			ContentID:  "book-1",
+			ContentID:  testBookID,
 			FilePath:   "/tmp/book.mp3",
 			FileSize:   1024,
 			Duration:   3600,
@@ -67,8 +67,8 @@ func TestHandlePlayStartCreatesNativePlaybackSession(t *testing.T) {
 	syncer := &recordingPlaybackSessionSyncer{}
 	progress := &fakeProgressStore{row: &ProgressRow{
 		UserID:          "1",
-		ProfileID:       "profile-1",
-		ContentID:       "book-1",
+		ProfileID:       testProfileID,
+		ContentID:       testBookID,
 		CurrentSeconds:  123.5,
 		DurationSeconds: 3600,
 		UpdatedAt:       now,
@@ -84,10 +84,10 @@ func TestHandlePlayStartCreatesNativePlaybackSession(t *testing.T) {
 	rec := dispatchABSWithParams(
 		http.MethodPost,
 		"/api/items/book-1/play",
-		map[string]string{"libraryItemId": "book-1"},
+		map[string]string{"libraryItemId": testBookID}, //nolint:goconst // External ABS route key.
 		nil,
 		"1",
-		"profile-1",
+		testProfileID,
 		h.handlePlayStart,
 	)
 	if rec.Code != http.StatusOK {
@@ -135,21 +135,45 @@ func TestHandlePlayStartCreatesNativePlaybackSession(t *testing.T) {
 	}
 }
 
-func TestHandleSessionSyncUpdatesNativePlaybackSession(t *testing.T) {
+func TestHandlePlayStartRejectsEbookWithoutCreatingSessions(t *testing.T) {
 	media := &playStartMediaStore{
-		item: &models.MediaItem{ContentID: "book-1", Type: "audiobook", Title: "Book", UpdatedAt: time.Now()},
+		item:  &models.MediaItem{ContentID: testEbookID, Type: mediaTypeEbook, Title: "Reader Test"}, //nolint:goconst // Stable fixture label.
+		files: []*models.MediaFile{{ID: 42, ContentID: testEbookID, FilePath: "/tmp/book.epub"}},
 	}
 	absSessions := &fakePlaybackSessionStore{}
 	nativeSessions := playback.NewSessionManager(0, 0)
-	native, err := nativeSessions.StartSessionWithFilesContext(context.Background(), 1, "profile-1", 42, 42, playback.PlayDirect, false)
+	h := New(Dependencies{
+		MediaStore:           media,
+		PlaybackSessionStore: absSessions,
+		NativeSessions:       nativeSessions,
+	})
+
+	rec := dispatchABSWithParams(http.MethodPost, "/api/items/ebook-1/play",
+		map[string]string{"libraryItemId": testEbookID}, nil, "1", testProfileID, h.handlePlayStart)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(absSessions.sessions) != 0 || nativeSessions.ActiveCount(1) != 0 {
+		t.Fatalf("ebook play created sessions: abs=%d native=%d", len(absSessions.sessions), nativeSessions.ActiveCount(1))
+	}
+}
+
+func TestHandleSessionSyncUpdatesNativePlaybackSession(t *testing.T) {
+	media := &playStartMediaStore{
+		item: &models.MediaItem{ContentID: testBookID, Type: mediaTypeAudiobook, Title: "Book", UpdatedAt: time.Now()},
+	}
+	absSessions := &fakePlaybackSessionStore{}
+	nativeSessions := playback.NewSessionManager(0, 0)
+	native, err := nativeSessions.StartSessionWithFilesContext(context.Background(), 1, testProfileID, 42, 42, playback.PlayDirect, false)
 	if err != nil {
 		t.Fatalf("start native session: %v", err)
 	}
 	_ = absSessions.InsertPlaybackSession(context.Background(), ABSPlaybackSession{
 		ID:        native.ID,
 		UserID:    "1",
-		ProfileID: "profile-1",
-		ContentID: "book-1",
+		ProfileID: testProfileID,
+		ContentID: testBookID,
 	})
 	syncer := &recordingPlaybackSessionSyncer{}
 	h := New(Dependencies{
@@ -166,7 +190,7 @@ func TestHandleSessionSyncUpdatesNativePlaybackSession(t *testing.T) {
 		map[string]string{"sid": native.ID},
 		[]byte(`{"currentTime":55.25,"timeListening":10}`),
 		"1",
-		"profile-1",
+		testProfileID,
 		h.handleSessionSync,
 	)
 	if rec.Code != http.StatusOK {
@@ -187,18 +211,43 @@ func TestHandleSessionSyncUpdatesNativePlaybackSession(t *testing.T) {
 	}
 }
 
+func TestHandleSessionSyncRejectsEbookWithoutUpdatingAudioProgress(t *testing.T) {
+	media := &playStartMediaStore{
+		item: &models.MediaItem{ContentID: testEbookID, Type: mediaTypeEbook, Title: "Reader Test"},
+	}
+	absSessions := &fakePlaybackSessionStore{}
+	_ = absSessions.InsertPlaybackSession(context.Background(), ABSPlaybackSession{
+		ID: "ebook-session", UserID: "1", ProfileID: testProfileID, ContentID: testEbookID,
+	})
+	progress := &positionRecordingProgressFake{}
+	h := New(Dependencies{MediaStore: media, ProgressStore: progress, PlaybackSessionStore: absSessions})
+
+	rec := dispatchABSWithParams(http.MethodPatch, "/api/session/ebook-session",
+		map[string]string{"sid": "ebook-session"}, []byte(`{"currentTime":55.25}`), "1", testProfileID, h.handleSessionSync)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if absSessions.syncCalls != 0 {
+		t.Fatalf("ebook audio session sync calls = %d, want 0", absSessions.syncCalls)
+	}
+	if _, ok := progress.pos(testEbookID); ok {
+		t.Fatal("ebook audio session sync wrote user_watch_progress")
+	}
+}
+
 func TestHandleSessionCloseStopsNativePlaybackSession(t *testing.T) {
 	absSessions := &fakePlaybackSessionStore{}
 	nativeSessions := playback.NewSessionManager(0, 0)
-	native, err := nativeSessions.StartSessionWithFilesContext(context.Background(), 1, "profile-1", 42, 42, playback.PlayDirect, false)
+	native, err := nativeSessions.StartSessionWithFilesContext(context.Background(), 1, testProfileID, 42, 42, playback.PlayDirect, false)
 	if err != nil {
 		t.Fatalf("start native session: %v", err)
 	}
 	_ = absSessions.InsertPlaybackSession(context.Background(), ABSPlaybackSession{
 		ID:        native.ID,
 		UserID:    "1",
-		ProfileID: "profile-1",
-		ContentID: "book-1",
+		ProfileID: testProfileID,
+		ContentID: testBookID,
 	})
 	syncer := &recordingPlaybackSessionSyncer{}
 	h := New(Dependencies{
@@ -214,7 +263,7 @@ func TestHandleSessionCloseStopsNativePlaybackSession(t *testing.T) {
 		map[string]string{"sid": native.ID},
 		nil,
 		"1",
-		"profile-1",
+		testProfileID,
 		h.handleSessionClose,
 	)
 	if rec.Code != http.StatusNoContent {

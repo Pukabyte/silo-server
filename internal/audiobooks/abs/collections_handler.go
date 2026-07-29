@@ -114,10 +114,10 @@ func (h *Handler) collectionBooks(r *http.Request, collectionID string) []map[st
 			// the placeholder cover instead of crashing on
 			// `media.coverPath`.
 			out = append(out, map[string]any{
-				"id":        it.LibraryItemID,
-				"libraryId": audiobookLibraryID(lib),
-				"mediaType": LibraryMediaType,
-				"media":     map[string]any{"metadata": map[string]any{"title": ""}, "coverPath": ""},
+				"id":         it.LibraryItemID,
+				libraryIDKey: audiobookLibraryID(lib),
+				mediaTypeKey: LibraryMediaType,
+				mediaKey:     map[string]any{metadataKey: map[string]any{titleKey: ""}, coverPathKey: ""},
 			})
 			continue
 		}
@@ -154,7 +154,7 @@ func (h *Handler) handleListLibraryCollections(w http.ResponseWriter, r *http.Re
 	}
 	limit, page := readPagedQuery(r, 25)
 	if h.deps.CollectionStore == nil {
-		writeJSON(w, http.StatusOK, pagedEnvelope([]map[string]any{}, 0, limit, page, "name", false, "", false, ""))
+		writeJSON(w, http.StatusOK, pagedEnvelope([]map[string]any{}, 0, limit, page, nameKey, false, "", false, ""))
 		return
 	}
 	rows, err := h.deps.CollectionStore.ListUserCollections(r.Context(), a.UserID, a.ProfileID)
@@ -182,7 +182,7 @@ func (h *Handler) handleListLibraryCollections(w http.ResponseWriter, r *http.Re
 	for _, c := range pageRows {
 		out = append(out, h.collectionFullShape(r, c))
 	}
-	writeJSON(w, http.StatusOK, pagedEnvelope(out, total, limit, page, "name", false, "", false, ""))
+	writeJSON(w, http.StatusOK, pagedEnvelope(out, total, limit, page, nameKey, false, "", false, ""))
 }
 
 // handleListCollections — GET /collections.
@@ -315,7 +315,7 @@ func (h *Handler) handleAddCollectionBook(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := chiURLID(r)
-	bookID := chi.URLParam(r, "bookId")
+	bookID := chi.URLParam(r, bookIDKey)
 	if bookID == "" {
 		http.Error(w, "bookId required", http.StatusBadRequest)
 		return
@@ -345,7 +345,7 @@ func (h *Handler) handleAddCollectionBook(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := h.deps.CollectionStore.AddCollectionItem(r.Context(), id, bookID); err != nil {
-		slog.ErrorContext(r.Context(), "abs collection add-item failed", "component", "audiobooks", "err", err, "id", id, "book", bookID)
+		slog.ErrorContext(r.Context(), "abs collection add-item failed", "component", "audiobooks", "err", err, "id", id, LibraryMediaType, bookID)
 		http.Error(w, "collection persist failed", http.StatusInternalServerError)
 		return
 	}
@@ -372,7 +372,7 @@ func (h *Handler) handleRemoveCollectionBook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	id := chiURLID(r)
-	bookID := chi.URLParam(r, "bookId")
+	bookID := chi.URLParam(r, bookIDKey)
 	if bookID == "" {
 		http.Error(w, "bookId required", http.StatusBadRequest)
 		return
@@ -390,7 +390,7 @@ func (h *Handler) handleRemoveCollectionBook(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := h.deps.CollectionStore.RemoveCollectionItem(r.Context(), id, bookID); err != nil {
-		slog.ErrorContext(r.Context(), "abs collection remove-item failed", "component", "audiobooks", "err", err, "id", id, "book", bookID)
+		slog.ErrorContext(r.Context(), "abs collection remove-item failed", "component", "audiobooks", "err", err, "id", id, LibraryMediaType, bookID)
 		http.Error(w, "collection delete failed", http.StatusInternalServerError)
 		return
 	}

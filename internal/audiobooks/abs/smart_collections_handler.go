@@ -102,7 +102,7 @@ func (h *Handler) handleListSmartCollections(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if h.deps.SmartCollectionStore == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+		writeJSON(w, http.StatusOK, map[string]any{itemsKey: []any{}})
 		return
 	}
 	rows, err := h.deps.SmartCollectionStore.ListUserSmartCollections(r.Context(), a.UserID, a.ProfileID)
@@ -115,7 +115,7 @@ func (h *Handler) handleListSmartCollections(w http.ResponseWriter, r *http.Requ
 	for _, c := range rows {
 		out = append(out, smartCollectionToABS(c))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{itemsKey: out})
 }
 
 func (h *Handler) handleGetSmartCollection(w http.ResponseWriter, r *http.Request) {
@@ -366,10 +366,10 @@ func (h *Handler) handleSmartCollectionItems(w http.ResponseWriter, r *http.Requ
 	results := make([]map[string]any, 0, len(pageSlice))
 	for _, cand := range pageSlice {
 		entry := map[string]any{
-			"id":        cand.Item.ID,
-			"libraryId": libDefaultID,
-			"media": map[string]any{
-				"metadata": map[string]any{"title": cand.Item.Title},
+			"id":         cand.Item.ID,
+			libraryIDKey: libDefaultID,
+			mediaKey: map[string]any{
+				metadataKey: map[string]any{titleKey: cand.Item.Title},
 			},
 		}
 		results = append(results, entry)

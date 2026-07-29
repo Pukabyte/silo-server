@@ -236,7 +236,7 @@ func TestSmartCollection_Get_Owner_ReturnsFullShape(t *testing.T) {
 	}
 	var got map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["name"] != "mine" {
+	if got["name"] != testMine {
 		t.Errorf("name = %v", got["name"])
 	}
 }
@@ -289,7 +289,7 @@ func TestSmartCollection_Patch_NonOwner_404(t *testing.T) {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
 	c, _ := hb.SC.GetSmartCollection(context.Background(), id)
-	if c.Name != "mine" {
+	if c.Name != testMine {
 		t.Errorf("non-owner leak: %q", c.Name)
 	}
 }

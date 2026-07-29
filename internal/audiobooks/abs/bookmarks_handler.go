@@ -26,10 +26,10 @@ func (h *Handler) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.deps.BookmarkStore == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"bookmarks": []any{}})
+		writeJSON(w, http.StatusOK, map[string]any{bookmarksKey: []any{}})
 		return
 	}
-	itemID := chi.URLParam(r, "itemId")
+	itemID := chi.URLParam(r, itemIDParam)
 	var rows []Bookmark
 	var err error
 	if itemID == "" {
@@ -63,7 +63,7 @@ func (h *Handler) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 			out = append(out, bookmarkToABS(b))
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"bookmarks": out})
+	writeJSON(w, http.StatusOK, map[string]any{bookmarksKey: out})
 }
 
 // handleUpsertBookmark backs both POST (reason="bookmark_created") and
@@ -82,7 +82,7 @@ func (h *Handler) handleUpsertBookmark(reason string) http.HandlerFunc {
 			return
 		}
 
-		itemID := chi.URLParam(r, "itemId")
+		itemID := chi.URLParam(r, itemIDParam)
 		if itemID == "" {
 			http.Error(w, "itemId required", http.StatusBadRequest)
 			return
@@ -155,7 +155,7 @@ func (h *Handler) handleDeleteBookmark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	itemID := chi.URLParam(r, "itemId")
+	itemID := chi.URLParam(r, itemIDParam)
 	if itemID == "" {
 		http.Error(w, "itemId required", http.StatusBadRequest)
 		return

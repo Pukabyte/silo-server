@@ -182,7 +182,7 @@ func (s *stubMediaStore) GetAudiobookByID(_ context.Context, id string, _ catalo
 	}
 	if it, ok := s.known[id]; ok {
 		if it == nil {
-			return &models.MediaItem{ContentID: id}, nil
+			return &models.MediaItem{ContentID: id, Type: mediaTypeAudiobook}, nil
 		}
 		return it, nil
 	}
@@ -196,7 +196,7 @@ func (s *stubMediaStore) GetAudiobooksByIDs(_ context.Context, ids []string, _ c
 	for _, id := range ids {
 		if it, ok := s.known[id]; ok {
 			if it == nil {
-				out[id] = &models.MediaItem{ContentID: id}
+				out[id] = &models.MediaItem{ContentID: id, Type: mediaTypeAudiobook}
 			} else {
 				out[id] = it
 			}
@@ -255,7 +255,7 @@ func dispatchBookmark(h *Handler, method, path, itemID, timeParam string, body [
 	}
 	rctx := chi.NewRouteContext()
 	if itemID != "" {
-		rctx.URLParams.Add("itemId", itemID)
+		rctx.URLParams.Add(itemIDParam, itemID)
 	}
 	if timeParam != "" {
 		rctx.URLParams.Add("time", timeParam)
@@ -273,9 +273,9 @@ func dispatchBookmark(h *Handler, method, path, itemID, timeParam string, body [
 // ---------------------------------------------------------------------------
 
 func TestCreate_NewBookmark_ReturnsListContainingIt(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 	body := []byte(`{"title":"Chapter cliffhanger","time":42.5}`)
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", body, "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", body, "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -288,7 +288,7 @@ func TestCreate_NewBookmark_ReturnsListContainingIt(t *testing.T) {
 		t.Fatalf("list len = %d, want 1; body=%s", len(list), rec.Body.String())
 	}
 	got := list[0]
-	if got["libraryItemId"] != "book-1" {
+	if got["libraryItemId"] != testBookID {
 		t.Errorf("libraryItemId = %v, want book-1", got["libraryItemId"])
 	}
 	if got["time"] != 42.5 {
@@ -305,11 +305,11 @@ func TestCreate_NewBookmark_ReturnsListContainingIt(t *testing.T) {
 }
 
 func TestUpsert_SameTime_UpdatesTitleNoDuplicate(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 
 	// POST first.
 	postBody := []byte(`{"title":"first","time":10}`)
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", postBody, "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", postBody, "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -322,7 +322,7 @@ func TestUpsert_SameTime_UpdatesTitleNoDuplicate(t *testing.T) {
 
 	// PATCH at the same time with a new title.
 	patchBody := []byte(`{"title":"renamed","time":10}`)
-	rec2 := dispatchBookmark(hb.H, http.MethodPatch, "/api/me/item/book-1/bookmark", "book-1", "", patchBody, "1", "", hb.H.handleUpsertBookmark("bookmark_updated"))
+	rec2 := dispatchBookmark(hb.H, http.MethodPatch, "/api/me/item/book-1/bookmark", testBookID, "", patchBody, "1", "", hb.H.handleUpsertBookmark("bookmark_updated"))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, want 200; body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -342,14 +342,14 @@ func TestUpsert_SameTime_UpdatesTitleNoDuplicate(t *testing.T) {
 }
 
 func TestDelete_ExistingBookmark_RemovedFromList(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 
 	// Seed a bookmark via POST.
 	postBody := []byte(`{"title":"to delete","time":99}`)
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", postBody, "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", postBody, "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 
 	// DELETE it.
-	rec := dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/99", "book-1", "99", nil, "1", "", hb.H.handleDeleteBookmark)
+	rec := dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/99", testBookID, "99", nil, "1", "", hb.H.handleDeleteBookmark)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -363,8 +363,8 @@ func TestDelete_ExistingBookmark_RemovedFromList(t *testing.T) {
 }
 
 func TestDelete_NonExistentTime_IdempotentReturnsEmptyList(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
-	rec := dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/123", "book-1", "123", nil, "1", "", hb.H.handleDeleteBookmark)
+	hb := newBookmarksHarness(t, testBookID)
+	rec := dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/123", testBookID, "123", nil, "1", "", hb.H.handleDeleteBookmark)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (idempotent); body=%s", rec.Code, rec.Body.String())
 	}
@@ -376,10 +376,10 @@ func TestDelete_NonExistentTime_IdempotentReturnsEmptyList(t *testing.T) {
 }
 
 func TestCreate_TwoAtDifferentTimes_ListOrderedByTime(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"later","time":100}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"earlier","time":50}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"later","time":100}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"earlier","time":50}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 
 	var list []map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)
@@ -392,14 +392,14 @@ func TestCreate_TwoAtDifferentTimes_ListOrderedByTime(t *testing.T) {
 }
 
 func TestProfileIsolation_BookmarksScopedPerProfile(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 
 	// Profile A inserts.
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"a","time":1}`), "1", "00000000-0000-0000-0000-0000000000aa", hb.H.handleUpsertBookmark("bookmark_created"))
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"a","time":1}`), "1", "00000000-0000-0000-0000-0000000000aa", hb.H.handleUpsertBookmark("bookmark_created"))
 
 	// Profile B (same user) reads via POST at a different time so we get the
 	// list back. Profile B's POST should return only profile B's bookmarks.
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"b","time":2}`), "1", "00000000-0000-0000-0000-0000000000bb", hb.H.handleUpsertBookmark("bookmark_created"))
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"b","time":2}`), "1", "00000000-0000-0000-0000-0000000000bb", hb.H.handleUpsertBookmark("bookmark_created"))
 
 	var list []map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)
@@ -412,13 +412,13 @@ func TestProfileIsolation_BookmarksScopedPerProfile(t *testing.T) {
 }
 
 func TestDelete_OtherUserBookmark_NoOpAndNoExistenceLeak(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 
 	// User B seeds a bookmark.
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"B's bookmark","time":42.5}`), "2", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"B's bookmark","time":42.5}`), "2", "", hb.H.handleUpsertBookmark("bookmark_created"))
 
 	// User A tries to DELETE at the same item+time.
-	rec := dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/42.5", "book-1", "42.5", nil, "1", "", hb.H.handleDeleteBookmark)
+	rec := dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/42.5", testBookID, "42.5", nil, "1", "", hb.H.handleDeleteBookmark)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (no leak); body=%s", rec.Code, rec.Body.String())
 	}
@@ -429,7 +429,7 @@ func TestDelete_OtherUserBookmark_NoOpAndNoExistenceLeak(t *testing.T) {
 	}
 
 	// User B's bookmark must still be there.
-	bList, err := hb.Book.List(context.Background(), "2", "", "book-1")
+	bList, err := hb.Book.List(context.Background(), "2", "", testBookID)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -447,29 +447,29 @@ func TestMissingItem_404(t *testing.T) {
 }
 
 func TestItemLookup_ErrorFromMediaStore_500(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 	hb.H.deps.MediaStore = &stubMediaStore{
-		known:     map[string]*models.MediaItem{"book-1": nil},
+		known:     map[string]*models.MediaItem{testBookID: nil},
 		lookupErr: errors.New("media lookup failed"),
 	}
 
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"x","time":1}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"x","time":1}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestInvalidBody_400(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{not json`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	hb := newBookmarksHarness(t, testBookID)
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{not json`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestMissingTime_400(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
-	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"no time"}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	hb := newBookmarksHarness(t, testBookID)
+	rec := dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"no time"}`), "1", "", hb.H.handleUpsertBookmark("bookmark_created"))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -501,17 +501,17 @@ func assertOneEvent(t *testing.T, pub *recordingPublisher, wantUser, wantReason 
 }
 
 func TestSocketEvent_FiredOnCreate(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"x","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	hb := newBookmarksHarness(t, testBookID)
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"x","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_created"))
 	assertOneEvent(t, hb.Pub, "7", "bookmark_created")
 }
 
 func TestSocketEvent_FiredOnUpdate(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
+	hb := newBookmarksHarness(t, testBookID)
 	// Seed (publishes a create event); then PATCH and only assert the
 	// second event.
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"x","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_created"))
-	_ = dispatchBookmark(hb.H, http.MethodPatch, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"y","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_updated"))
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"x","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	_ = dispatchBookmark(hb.H, http.MethodPatch, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"y","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_updated"))
 	evts := hb.Pub.snapshot()
 	if len(evts) != 2 {
 		t.Fatalf("publisher events = %d, want 2", len(evts))
@@ -523,9 +523,9 @@ func TestSocketEvent_FiredOnUpdate(t *testing.T) {
 }
 
 func TestSocketEvent_FiredOnDelete(t *testing.T) {
-	hb := newBookmarksHarness(t, "book-1")
-	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", "book-1", "", []byte(`{"title":"x","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_created"))
-	_ = dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/1", "book-1", "1", nil, "7", "", hb.H.handleDeleteBookmark)
+	hb := newBookmarksHarness(t, testBookID)
+	_ = dispatchBookmark(hb.H, http.MethodPost, "/api/me/item/book-1/bookmark", testBookID, "", []byte(`{"title":"x","time":1}`), "7", "", hb.H.handleUpsertBookmark("bookmark_created"))
+	_ = dispatchBookmark(hb.H, http.MethodDelete, "/api/me/item/book-1/bookmark/1", testBookID, "1", nil, "7", "", hb.H.handleDeleteBookmark)
 	evts := hb.Pub.snapshot()
 	if len(evts) != 2 {
 		t.Fatalf("publisher events = %d, want 2 (create + delete)", len(evts))

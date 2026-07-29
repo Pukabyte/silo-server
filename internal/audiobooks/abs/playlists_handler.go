@@ -114,7 +114,7 @@ func (h *Handler) handleCreatePlaylist(w http.ResponseWriter, r *http.Request) {
 		persisted = p
 	}
 
-	h.publish(a.UserID, "playlist_added", map[string]any{"id": p.ID, "name": p.Name})
+	h.publish(a.UserID, "playlist_added", map[string]any{"id": p.ID, nameKey: p.Name})
 	writeJSON(w, http.StatusOK, h.playlistFullShape(r, persisted))
 }
 
@@ -149,14 +149,14 @@ func (h *Handler) playlistItems(r *http.Request, playlistID string) []map[string
 	out := make([]map[string]any, 0, len(rows))
 	for _, it := range rows {
 		entry := map[string]any{
-			"libraryItemId": it.LibraryItemID,
-			"position":      it.Position,
+			libraryItemIDKey: it.LibraryItemID,
+			"position":       it.Position,
 		}
 		if it.EpisodeID != "" {
-			entry["episodeId"] = it.EpisodeID
+			entry[episodeIDKey] = it.EpisodeID
 		} else if item, err := h.deps.MediaStore.GetAudiobookByID(r.Context(), it.LibraryItemID, access); err == nil && item != nil {
-			entry["libraryId"] = libID
-			entry["title"] = item.Title
+			entry[libraryIDKey] = libID
+			entry[titleKey] = item.Title
 			entry["libraryItem"] = siloItemToLibraryItem(item, lib, baseURL)
 		}
 		out = append(out, entry)
@@ -192,7 +192,7 @@ func (h *Handler) handleListLibraryPlaylists(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if h.deps.PlaylistStore == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"results": []any{}, "total": 0})
+		writeJSON(w, http.StatusOK, map[string]any{resultsKey: []any{}, totalKey: 0})
 		return
 	}
 	rows, err := h.deps.PlaylistStore.ListUserPlaylists(r.Context(), a.UserID, a.ProfileID)
@@ -209,7 +209,7 @@ func (h *Handler) handleListLibraryPlaylists(w http.ResponseWriter, r *http.Requ
 	}
 	// LazyBookshelf reads payload.total to compute pagination; emit both
 	// for the bookshelf grid AND the create modal (modal ignores total).
-	writeJSON(w, http.StatusOK, map[string]any{"results": out, "total": len(out)})
+	writeJSON(w, http.StatusOK, map[string]any{resultsKey: out, totalKey: len(out)})
 }
 
 // handleListPlaylists — GET /playlists.
@@ -548,7 +548,7 @@ func (h *Handler) handleRemovePlaylistItem(w http.ResponseWriter, r *http.Reques
 // Owner-only. Removes the item keyed on (libraryItemId, episodeId).
 // Idempotent. Fires playlist_updated.
 func (h *Handler) handleRemovePlaylistEpisode(w http.ResponseWriter, r *http.Request) {
-	h.removePlaylistItemImpl(w, r, chi.URLParam(r, "episodeId"))
+	h.removePlaylistItemImpl(w, r, chi.URLParam(r, episodeIDKey))
 }
 
 // removePlaylistItemImpl is the shared body for both remove variants.
@@ -565,7 +565,7 @@ func (h *Handler) removePlaylistItemImpl(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	id := playlistURLID(r)
-	libItem := chi.URLParam(r, "libraryItemId")
+	libItem := chi.URLParam(r, libraryItemIDKey)
 	if libItem == "" {
 		http.Error(w, "libraryItemId required", http.StatusBadRequest)
 		return

@@ -3,6 +3,7 @@ package abs
 import (
 	"context"
 	"log/slog"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -50,10 +51,10 @@ func (h *Handler) handleHealthcheck(w http.ResponseWriter, _ *http.Request) {
 // install wizard); we surface that so clients skip straight to login.
 func (h *Handler) handleInit(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"isInit":         true,
-		"language":       "en-us",
-		"authMethods":    []string{"local"},
-		"authFormData":   map[string]any{},
+		isInitKey:        true,
+		languageKey:      languageEnglishUS,
+		authMethodsKey:   []string{localAuthMethod},
+		authFormDataKey:  map[string]any{},
 		"serverSettings": map[string]any{},
 	})
 }
@@ -67,7 +68,7 @@ func (h *Handler) handleInit(w http.ResponseWriter, _ *http.Request) {
 // is enabled. silo is local-auth-only today.
 func (h *Handler) handleAuthSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"authActiveAuthMethods":      []string{"local"},
+		authActiveMethodsKey:         []string{localAuthMethod},
 		"authOpenIDIssuerURL":        nil,
 		"authOpenIDAuthorizationURL": nil,
 		"authPasswordlessSettings":   map[string]any{},
@@ -136,7 +137,7 @@ func (h *Handler) handleDeleteItemProgress(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	contentID := chi.URLParam(r, "libraryItemId")
+	contentID := chi.URLParam(r, libraryItemIDKey)
 	access, err := h.accessFilterForAuth(r.Context(), a)
 	if err != nil {
 		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
@@ -147,7 +148,7 @@ func (h *Handler) handleDeleteItemProgress(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if item.Type == "ebook" {
+	if item.Type == mediaTypeEbook {
 		if h.deps.EbookProgressStore == nil {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -162,7 +163,7 @@ func (h *Handler) handleDeleteItemProgress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	h.publish(a.UserID, "user_item_progress_updated", map[string]any{
-		"data": map[string]any{"libraryItemId": contentID, "currentTime": 0, "isFinished": false, "progress": 0},
+		dataKey: map[string]any{libraryItemIDKey: contentID, currentTimeKey: 0, isFinishedKey: false, progressKey: 0},
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -177,13 +178,13 @@ func (h *Handler) handleSetEpisodeProgress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"libraryItemId": chi.URLParam(r, "libraryItemId"),
-		"episodeId":     chi.URLParam(r, "episodeId"),
-		"currentTime":   0.0,
-		"duration":      0.0,
-		"isFinished":    false,
-		"progress":      0.0,
-		"lastUpdate":    0,
+		libraryItemIDKey: chi.URLParam(r, libraryItemIDKey),
+		episodeIDKey:     chi.URLParam(r, episodeIDKey),
+		currentTimeKey:   0.0,
+		durationKey:      0.0,
+		isFinishedKey:    false,
+		progressKey:      0.0,
+		lastUpdateKey:    0,
 	})
 }
 
@@ -244,6 +245,7 @@ func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", ebookContentType(filepath.Ext(selected.FilePath)))
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filepath.Base(selected.FilePath)}))
 	_ = playback.ServeDirectPlay(w, r, selected.FilePath)
 }
 
@@ -312,8 +314,10 @@ func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	defaultFile := selectEbookFile(files, 0)
 	if (configured && hasPrimary && primaryID == fileID) || (!configured && defaultFile != nil && defaultFile.ID == fileID) {
-		// The effective primary remains readable. Treat its status toggle as a
-		// no-op rather than persisting a no-primary state that removes Read.
+		if err := store.ClearPrimaryEbookFileID(r.Context(), contentID); err != nil {
+			http.Error(w, "clear primary ebook: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -334,7 +338,7 @@ type ebookPrimaryStore interface {
 func ebookContentType(ext string) string {
 	switch strings.ToLower(ext) {
 	case ".epub":
-		return "application/epub+zip"
+		return ebookEPUBMimeType
 	case ".pdf":
 		return "application/pdf"
 	case ".mobi", ".azw", ".azw3":
@@ -379,9 +383,9 @@ func (h *Handler) handleSendEbookToDevice(w http.ResponseWriter, _ *http.Request
 // return an empty preview object so the client renders an "unknown feed"
 // state and the user can back out without an error toast.
 func (h *Handler) handlePodcastFeed(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"podcast": map[string]any{
-		"metadata": map[string]any{"title": "", "author": "", "description": "", "feedUrl": "", "language": ""},
-		"episodes": []any{},
+	writeJSON(w, http.StatusOK, map[string]any{podcastKey: map[string]any{
+		metadataKey: map[string]any{titleKey: "", "author": "", descriptionKey: "", "feedUrl": "", languageKey: ""},
+		"episodes":  []any{},
 	}})
 }
 
