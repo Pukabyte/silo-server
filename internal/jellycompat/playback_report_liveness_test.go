@@ -307,6 +307,18 @@ func TestHandleVideoStream_StaticRecordsClientPlaySessionAlias(t *testing.T) {
 	}
 }
 
+func TestHandleVideoStream_StaticStripsNULFromClientPlaySessionAlias(t *testing.T) {
+	handler, encodedID, _ := newStaticDirectPlayHandler(t)
+
+	rec := serveStaticStream(handler, encodedID, "Static=true&PlaySessionId=client%00session")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := handler.playbackStore.FindByClientPlaySessionID("token-1", "clientsession"); !ok {
+		t.Fatal("static play session retained a NUL in the client alias")
+	}
+}
+
 // TestHandlePlaybackReport_StopViaAliasTearsDown proves a Stopped report
 // resolved through the recorded alias still tears the play session down —
 // the alias is an exact, caller-owned match.

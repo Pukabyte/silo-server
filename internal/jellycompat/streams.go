@@ -1850,7 +1850,7 @@ func (h *PlaybackHandler) createStaticPlaySession(ctx context.Context, session *
 		CompatToken:         session.Token,
 		ItemID:              detail.ContentID,
 		RouteItemID:         routeID,
-		ClientPlaySessionID: clientPlaySessionID,
+		ClientPlaySessionID: stripCompatNUL(clientPlaySessionID),
 		UserID:              session.PseudoUserID.String(),
 		MediaSources:        sources,
 	}
