@@ -1,6 +1,7 @@
 package abs
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -129,14 +131,34 @@ func (h *Handler) buildFilterData(r *http.Request, lib AudiobookLibrary) map[str
 			seriesObjs = append(seriesObjs, SeriesObj{ID: s.ID, Name: s.Name})
 		}
 	}
+	genres := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryGenres(ctx, lib.ID, access); err == nil && rows != nil {
+		genres = rows
+	}
+	// Narrators describe audio performance. Ebook libraries intentionally leave
+	// this filter empty even if a legacy item happens to carry that credit.
+	narrators := []string{}
+	if lib.Type != "ebook" && lib.Type != "ebooks" {
+		if rows, err := h.deps.MediaStore.ListLibraryNarrators(ctx, lib.ID, access); err == nil && rows != nil {
+			narrators = rows
+		}
+	}
+	publishers := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryPublishers(ctx, lib.ID, access); err == nil && rows != nil {
+		publishers = rows
+	}
+	languages := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryLanguages(ctx, lib.ID, access); err == nil && rows != nil {
+		languages = rows
+	}
 
 	return map[string]any{
 		"authors":    authorObjs,
 		"series":     seriesObjs,
-		"narrators":  []string{},
-		"genres":     []string{},
-		"publishers": []string{},
-		"languages":  []string{},
+		"narrators":  narrators,
+		"genres":     genres,
+		"publishers": publishers,
+		"languages":  languages,
 		"tags":       []string{},
 	}
 }
@@ -255,6 +277,11 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pageSlice := collapsed[pageStart:pageEnd]
+	for i := range pageSlice {
+		if lib.Type == "ebook" || lib.Type == "ebooks" {
+			pageSlice[i] = h.enrichEbookLibraryItem(r.Context(), pageSlice[i], access)
+		}
+	}
 
 	// Serialise.
 	var results any
@@ -591,12 +618,8 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 
 // handlePersonalized — GET /abs/api/libraries/{id}/personalized
 //
-// Emits the canonical six-shelf Home tab payload that ABS mobile clients
-// expect: continue-listening, continue-series, newest, recent-series,
-// discover, listen-again. Shelves we don't yet populate (continue-series,
-// listen-again) ship with empty entities/total — the client iterates the
-// shelf list by id and skips empties cleanly, but it crashes on a missing
-// shelf id. Matches continuum-plugin-audiobooks/handlePersonalized layout.
+// Emits populated Audiobookshelf-compatible Home shelves. Upstream omits a
+// shelf when there is no data; it does not send permanent empty placeholders.
 func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	lib, ok := h.resolveLibrary(w, r)
 	if !ok {
@@ -619,23 +642,21 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	shelves := []map[string]any{
-		{"id": "continue-listening", "label": "Continue Listening", "labelStringKey": "LabelContinueListening", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "continue-series", "label": "Continue Series", "labelStringKey": "LabelContinueSeries", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "newest", "label": "Newest", "labelStringKey": "LabelNewest", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "recent-series", "label": "Recent Series", "labelStringKey": "LabelRecentSeries", "type": "series", "entities": []any{}, "total": 0},
-		{"id": "discover", "label": "Discover", "labelStringKey": "LabelDiscover", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "listen-again", "label": "Listen Again", "labelStringKey": "LabelListenAgain", "type": "book", "entities": []any{}, "total": 0},
+	isEbook := lib.Type == "ebook" || lib.Type == "ebooks"
+	continueID, continueLabel, continueKey := "continue-listening", "Continue Listening", "LabelContinueListening"
+	againID, againLabel, againKey := "listen-again", "Listen Again", "LabelListenAgain"
+	if isEbook {
+		continueID, continueLabel, continueKey = "continue-reading", "Continue Reading", "LabelContinueReading"
+		againID, againLabel, againKey = "read-again", "Read Again", "LabelReadAgain"
 	}
+	shelves := make([]map[string]any, 0, 5)
 
 	if items, err := h.deps.MediaStore.ListContinueListening(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[0]["entities"] = minifiedSlice(items, lib, baseURL)
-		shelves[0]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": continueID, "label": continueLabel, "labelStringKey": continueKey, "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	if items, err := h.deps.MediaStore.ListRecentlyAdded(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[2]["entities"] = minifiedSlice(items, lib, baseURL)
-		shelves[2]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": "recently-added", "label": "Recently Added", "labelStringKey": "LabelRecentlyAdded", "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	libID := audiobookLibraryID(lib)
@@ -657,25 +678,43 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 			obj["books"] = books
 			recent = append(recent, obj)
 		}
-		shelves[3]["entities"] = recent
-		shelves[3]["total"] = len(recent)
+		shelves = append(shelves, map[string]any{"id": "recent-series", "label": "Recent Series", "labelStringKey": "LabelRecentSeries", "type": "series", "entities": recent, "total": len(recent)})
 	}
 
 	if items, err := h.deps.MediaStore.ListDiscover(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[4]["entities"] = minifiedSlice(items, lib, baseURL)
-		shelves[4]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": "discover", "label": "Discover", "labelStringKey": "LabelDiscover", "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
+	}
+
+	if items, err := h.deps.MediaStore.ListFinished(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
+		shelves = append(shelves, map[string]any{"id": againID, "label": againLabel, "labelStringKey": againKey, "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	writeJSON(w, http.StatusOK, shelves)
 }
 
-// minifiedSlice converts a batch of MediaItems into ABS Minified entries.
-func minifiedSlice(items []*models.MediaItem, lib AudiobookLibrary, baseURL string) []MinifiedLibraryItem {
+// minifiedShelfSlice converts a batch of MediaItems into ABS Minified entries.
+func (h *Handler) minifiedShelfSlice(ctx context.Context, items []*models.MediaItem, lib AudiobookLibrary, baseURL string, access catalog.AccessFilter) []MinifiedLibraryItem {
 	out := make([]MinifiedLibraryItem, 0, len(items))
 	for _, it := range items {
-		out = append(out, Minify(siloItemToLibraryItem(it, lib, baseURL)))
+		entry := siloItemToLibraryItem(it, lib, baseURL)
+		if it.Type == "ebook" {
+			entry = h.enrichEbookLibraryItem(ctx, entry, access)
+		}
+		out = append(out, Minify(entry))
 	}
 	return out
+}
+
+func (h *Handler) enrichEbookLibraryItem(ctx context.Context, entry LibraryItem, access catalog.AccessFilter) LibraryItem {
+	files, err := h.deps.MediaStore.GetMediaFiles(ctx, entry.ID, access)
+	if err != nil {
+		return entry
+	}
+	primaryID, configured, hasPrimary, err := h.ebookPrimary(ctx, entry.ID)
+	if err != nil {
+		return siloEbookToLibraryItemDetail(entry, files, 0, false, false)
+	}
+	return siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +918,9 @@ func siloItemToMetadata(item *models.MediaItem) Metadata {
 // handleItem (single-item GET).
 func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFile, lib AudiobookLibrary, baseURL string) LibraryItem {
 	base := siloItemToLibraryItem(item, lib, baseURL)
+	if item.Type == "ebook" {
+		return siloEbookToLibraryItemDetail(base, files, 0, false, false)
+	}
 
 	tracks := siloFilesToAudioTracks(item.ContentID, files, baseURL, "")
 
@@ -939,6 +981,62 @@ func siloItemToLibraryItemDetail(item *models.MediaItem, files []*models.MediaFi
 	base.LibraryFiles = libraryFiles
 	base.Size = totalSize
 	return base
+}
+
+// siloEbookToLibraryItemDetail produces the ABS BookMedia form used by its
+// web/mobile readers.  Ebooks have no audio tracks; each file is exposed as
+// `ebookFile`, with the preferred EPUB first where multiple editions exist.
+func siloEbookToLibraryItemDetail(base LibraryItem, files []*models.MediaFile, primaryID int, primaryConfigured, hasPrimary bool) LibraryItem {
+	selected := selectEbookFile(files, 0)
+	if primaryConfigured {
+		if hasPrimary {
+			selected = selectEbookFile(files, primaryID)
+		} else {
+			selected = nil
+		}
+	}
+	if selected != nil {
+		primary := ebookFileFromMediaFile(selected)
+		base.Media.EbookFile = &primary
+		base.Media.Size = selected.FileSize
+		base.Size = selected.FileSize
+	}
+	base.LibraryFiles = make([]map[string]any, 0, len(files))
+	for _, file := range files {
+		if ebookContentType(filepath.Ext(file.FilePath)) == "" {
+			continue
+		}
+		ebook := ebookFileFromMediaFile(file)
+		base.LibraryFiles = append(base.LibraryFiles, map[string]any{
+			"ino":             ebook.Ino,
+			"metadata":        ebook.Metadata,
+			"isSupplementary": selected == nil || file.ID != selected.ID,
+			"addedAt":         ebook.AddedAt,
+			"updatedAt":       ebook.UpdatedAt,
+			"fileType":        "ebook",
+		})
+	}
+	return base
+}
+
+func ebookFileFromMediaFile(file *models.MediaFile) EbookFile {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(file.FilePath)), ".")
+	ebook := EbookFile{
+		Ino:         strconv.Itoa(file.ID),
+		EbookFormat: ext,
+		AddedAt:     file.CreatedAt.UnixMilli(),
+		UpdatedAt:   file.UpdatedAt.UnixMilli(),
+	}
+	ebook.Metadata.Filename = filepath.Base(file.FilePath)
+	ebook.Metadata.Ext = "." + ext
+	ebook.Metadata.Path = file.FilePath
+	ebook.Metadata.RelPath = filepath.Base(file.FilePath)
+	ebook.Metadata.Size = file.FileSize
+	ebook.Metadata.MtimeMs = file.UpdatedAt.UnixMilli()
+	ebook.Metadata.CtimeMs = file.CreatedAt.UnixMilli()
+	ebook.Metadata.BirthtimeMs = file.CreatedAt.UnixMilli()
+	ebook.Metadata.Format = ext
+	return ebook
 }
 
 // siloFilesToAudioTracks converts silo MediaFile rows into ABS AudioTrack

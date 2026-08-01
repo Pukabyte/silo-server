@@ -15,6 +15,7 @@ import (
 // a password or refresh token, so profile PIN verification is skipped here.
 type ABSAccessResolver struct {
 	resolver scopeResolver
+	stores   userstore.UserStoreProvider
 }
 
 type scopeResolver interface {
@@ -29,13 +30,13 @@ func NewABSAccessResolver(
 	groups ...access.GroupPolicyProvider,
 ) *ABSAccessResolver {
 	if resolver != nil {
-		return &ABSAccessResolver{resolver: resolver}
+		return &ABSAccessResolver{resolver: resolver, stores: stores}
 	}
 	if users == nil || stores == nil {
 		return nil
 	}
 	// Legacy resolver: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
-	return &ABSAccessResolver{resolver: access.NewResolver(users, stores, nil, groups...)}
+	return &ABSAccessResolver{resolver: access.NewResolver(users, stores, nil, groups...), stores: stores}
 }
 
 func (r *ABSAccessResolver) ResolveABSAccess(ctx context.Context, userID, profileID string) (catalog.AccessFilter, error) {
@@ -46,9 +47,29 @@ func (r *ABSAccessResolver) ResolveABSAccess(ctx context.Context, userID, profil
 	if err != nil {
 		return catalog.AccessFilter{}, fmt.Errorf("invalid ABS user id %q: %w", userID, err)
 	}
+	// Audiobookshelf has account users, not Silo household profiles. A normal
+	// ABS login selects Silo's primary profile, which represents that account
+	// rather than an additional access boundary. Resolve it at the account
+	// scope, matching upstream's req.user.checkCanAccessLibrary behavior.
+	// Explicit non-primary profile logins (username#profile) remain scoped to
+	// the selected profile and keep their Silo restrictions.
+	effectiveProfileID := profileID
+	if profileID != "" && r.stores != nil {
+		store, storeErr := r.stores.ForUser(ctx, uid)
+		if storeErr != nil {
+			return catalog.AccessFilter{}, fmt.Errorf("open ABS profile store for %d: %w", uid, storeErr)
+		}
+		profile, profileErr := store.GetProfile(ctx, profileID)
+		if profileErr != nil {
+			return catalog.AccessFilter{}, fmt.Errorf("load ABS profile %s: %w", profileID, profileErr)
+		}
+		if profile != nil && profile.IsPrimary {
+			effectiveProfileID = ""
+		}
+	}
 	scope, err := r.resolver.Resolve(ctx, access.ResolveInput{
 		UserID:              uid,
-		ProfileID:           profileID,
+		ProfileID:           effectiveProfileID,
 		SkipPINVerification: true,
 	})
 	if err != nil {

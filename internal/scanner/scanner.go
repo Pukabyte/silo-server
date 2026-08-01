@@ -168,6 +168,7 @@ type Scanner struct {
 	movieQueueSyncer     MovieQueueSyncer
 	seriesQueueSyncer    SeriesQueueSyncer
 	literaryWorkLinker   LiteraryWorkLinker
+	mediaItemMerger      MediaItemMerger
 }
 
 // SetImageCacher installs the imagecache.Cacher used by book scanners to push
@@ -209,6 +210,19 @@ type EbookEnrichmentQueue interface {
 
 type LiteraryWorkLinker interface {
 	AutoLinkContent(ctx context.Context, contentID string) (workID string, linked bool, err error)
+}
+
+// MediaItemMerger moves every user-visible reference from one catalog item to
+// another before deleting the source item.
+type MediaItemMerger interface {
+	MergeItems(ctx context.Context, fromContentID, toContentID string) error
+}
+
+func (s *Scanner) SetMediaItemMerger(merger MediaItemMerger) {
+	if s == nil {
+		return
+	}
+	s.mediaItemMerger = merger
 }
 
 func (s *Scanner) SetLiteraryWorkLinker(linker LiteraryWorkLinker) {
@@ -2145,13 +2159,21 @@ func (s *Scanner) syncPresentLibraryState(ctx context.Context, folderID int) err
 	}
 
 	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		WITH present_links AS MATERIALIZED (
+			SELECT DISTINCT mf.content_id, mf.media_folder_id
+			FROM media_files mf
+			WHERE mf.media_folder_id = $1
+			  AND mf.missing_since IS NULL
+			  AND mf.content_id IS NOT NULL
+		), locked_links AS MATERIALIZED (
+			SELECT pl.content_id, pl.media_folder_id
+			FROM present_links pl
+			JOIN media_items mi ON mi.content_id = pl.content_id
+			FOR KEY SHARE OF mi
+		)
 		INSERT INTO media_item_libraries (content_id, media_folder_id, first_seen_at)
-		SELECT DISTINCT mf.content_id, mf.media_folder_id, NOW()
-		FROM media_files mf
-		JOIN media_items mi ON mi.content_id = mf.content_id
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.content_id IS NOT NULL
+		SELECT content_id, media_folder_id, NOW()
+		FROM locked_links
 		ON CONFLICT (content_id, media_folder_id) DO NOTHING
 	`, folderID); err != nil {
 		return fmt.Errorf("restoring folder memberships: %w", err)
@@ -2195,16 +2217,26 @@ func (s *Scanner) syncFolderScopedAudioLibraryState(ctx context.Context, folderI
 	}
 
 	if _, err := s.fileRepo.Pool().Exec(ctx, `
+		WITH chosen_roots AS MATERIALIZED (
+			SELECT DISTINCT ON (mf.media_folder_id, mf.canonical_root_path)
+				mf.media_folder_id, mf.canonical_root_path, mf.content_id
+			FROM media_files mf
+			JOIN media_items mi ON mi.content_id = mf.content_id
+			WHERE mf.media_folder_id = $1
+			  AND mf.missing_since IS NULL
+			  AND mf.content_id IS NOT NULL
+			  AND COALESCE(mf.canonical_root_path, '') <> ''
+			  AND mi.type IN ('audiobook', 'podcast')
+			ORDER BY mf.media_folder_id, mf.canonical_root_path, mf.content_id
+		), locked_roots AS MATERIALIZED (
+			SELECT cr.media_folder_id, cr.canonical_root_path, cr.content_id
+			FROM chosen_roots cr
+			JOIN media_items mi ON mi.content_id = cr.content_id
+			FOR KEY SHARE OF mi
+		)
 		INSERT INTO media_item_roots (media_folder_id, canonical_root_path, content_id)
-		SELECT DISTINCT ON (mf.media_folder_id, mf.canonical_root_path)
-			mf.media_folder_id, mf.canonical_root_path, mf.content_id
-		FROM media_files mf
-		JOIN media_items mi ON mi.content_id = mf.content_id
-		WHERE mf.media_folder_id = $1
-		  AND mf.missing_since IS NULL
-		  AND mf.content_id IS NOT NULL
-		  AND COALESCE(mf.canonical_root_path, '') <> ''
-		  AND mi.type IN ('audiobook', 'podcast')
+		SELECT media_folder_id, canonical_root_path, content_id
+		FROM locked_roots
 		ON CONFLICT (media_folder_id, canonical_root_path)
 		DO UPDATE SET content_id = EXCLUDED.content_id,
 			last_seen_at = NOW()

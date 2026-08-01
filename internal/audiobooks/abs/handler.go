@@ -33,7 +33,10 @@ import (
 type AudiobookLibrary struct {
 	ID   int64
 	Name string
-	Type string // always "audiobooks" for this surface
+	// Type is Silo's persisted folder type (audiobook or ebook).  ABS calls
+	// both of these a "book" library, but the adapter needs the source type
+	// to keep each catalog isolated.
+	Type string
 }
 
 // MediaStore is the slice of silo's catalog the ABS handler reads.
@@ -63,12 +66,17 @@ type MediaStore interface {
 	// ListContinueListening returns books that the given user has progress
 	// on but hasn't finished — feeds the Home tab's continue shelf.
 	ListContinueListening(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
+	ListFinished(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
 	// ListRecentlyAdded returns the most recently added audiobooks for the
 	// Home tab's recently-added shelf.
 	ListRecentlyAdded(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
 	// ListDiscover returns a randomized sampling of audiobooks for the
 	// Home tab's discover shelf (helps new users browse the library).
 	ListDiscover(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error)
+	ListLibraryGenres(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
+	ListLibraryNarrators(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
+	ListLibraryPublishers(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
+	ListLibraryLanguages(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error)
 	// ListLibraryAuthors returns one page of distinct audiobook authors (from a
 	// precomputed materialized view) plus the total author count. sortBy is one
 	// of "name" (default), "addedAt", or "numBooks"; limit<=0 returns all.
@@ -247,6 +255,9 @@ type Dependencies struct {
 	// ProgressStore provides access to user_watch_progress for ABS
 	// progress endpoints. May be nil; handlers degrade gracefully.
 	ProgressStore ProgressStore
+	// EbookProgressStore backs ABS ebook read/unread state and shares progress
+	// with Silo's native reader.
+	EbookProgressStore EbookProgressStore
 	// PlaybackSessionStore persists abs_playback_sessions rows
 	// (migration 143) for /session/{sid}/sync and /session/{sid}/close.
 	// May be nil; handlers degrade gracefully.
@@ -446,6 +457,8 @@ func (h *Handler) mountRoutes(r chi.Router) {
 			// POST  /session/local-all      — batch-sync offline-recorded sessions
 			r.Post(prefix+"/session/local-all", h.handleSyncLocalSessions)
 			// Bookmarks — POST/PATCH both upsert; DELETE is idempotent.
+			r.Get(prefix+"/me/bookmarks", h.handleListBookmarks)
+			r.Get(prefix+"/me/item/{itemId}/bookmarks", h.handleListBookmarks)
 			r.Post(prefix+"/me/item/{itemId}/bookmark", h.handleUpsertBookmark("bookmark_created"))
 			r.Patch(prefix+"/me/item/{itemId}/bookmark", h.handleUpsertBookmark("bookmark_updated"))
 			r.Delete(prefix+"/me/item/{itemId}/bookmark/{time}", h.handleDeleteBookmark)
@@ -498,8 +511,9 @@ func (h *Handler) mountRoutes(r chi.Router) {
 			// Year-in-review stats — AudioBooth's "Year Stats" widget on the
 			// profile screen. Synthesized from AggregateStats today.
 			r.Get(prefix+"/me/stats/year/{year}", h.handleYearStats)
-			// Ebook surface — stubs until the ebook scanner lands.
-			// Mobile clients call these but degrade cleanly on empty/404.
+			// Ebook surface. The no-file-ID form serves the selected primary
+			// ebook; a file ID selects a supplementary ebook.
+			r.Get(prefix+"/items/{id}/ebook", h.handleEbookFile)
 			r.Get(prefix+"/items/{id}/ebook/{fileid}", h.handleEbookFile)
 			r.Patch(prefix+"/items/{id}/ebook/{fileid}/status", h.handleEbookStatus)
 			// E-reader devices + ebook email delivery — empty list / 503
@@ -595,6 +609,9 @@ func (h *Handler) accessFilterFromRequest(r *http.Request) (catalog.AccessFilter
 		return catalog.AccessFilter{}, false, nil
 	}
 	filter, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		slog.WarnContext(r.Context(), "abs access resolution failed", "component", "audiobooks", "user_id", a.UserID, "profile_id", a.ProfileID, "path", r.URL.Path, "err", err)
+	}
 	return filter, true, err
 }
 

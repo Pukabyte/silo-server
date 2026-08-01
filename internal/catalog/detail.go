@@ -2421,7 +2421,7 @@ func (s *DetailService) fetchBookSeries(ctx context.Context, contentID string, m
 			s.series_name,
 			s.series_index
 		FROM %s root
-		JOIN %s s ON LOWER(s.series_name) = LOWER(root.series_name)
+		JOIN %s s ON s.series_key = root.series_key
 		JOIN media_items m ON m.content_id = s.content_id
 		WHERE %s
 		ORDER BY s.series_index NULLS LAST, LOWER(m.sort_title)

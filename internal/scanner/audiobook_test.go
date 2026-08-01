@@ -210,6 +210,13 @@ func TestPopulateFromTags_SeriesFallsBackToMovementName(t *testing.T) {
 	}
 }
 
+func TestAudiobookSeriesDesiredRejectsEmptyNormalizedKey(t *testing.T) {
+	name, key, idx := audiobookSeriesDesired(&parsedAudiobook{Series: "---", SeriesPosition: "2"})
+	if name != "" || key != "" || idx != nil {
+		t.Fatalf("audiobookSeriesDesired = (%q, %q, %v), want empty", name, key, idx)
+	}
+}
+
 func TestParseAudiobookFolderSingleM4B(t *testing.T) {
 	ffprobePath := FFprobePathFromFFmpeg("ffmpeg")
 	if _, err := exec.LookPath(ffprobePath); err != nil {
@@ -393,6 +400,147 @@ func TestScanAudiobookFolderReturnsErrorWhenEveryReconcileFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "folder_id=42") {
 		t.Fatalf("error = %q, want folder id", err)
+	}
+}
+
+func TestCollectAudiobookRootScansPromotesNumberedDiscSiblings(t *testing.T) {
+	root := t.TempDir()
+	book := filepath.Join(root, "Author", "Book")
+	for _, part := range []string{"Disc 1", "Disc 2"} {
+		dir := filepath.Join(book, part)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "track01.mp3"), []byte("audio"), 0o644); err != nil {
+			t.Fatalf("write track: %v", err)
+		}
+	}
+
+	scans, err := collectAudiobookRootScans(context.Background(), 1, []string{root})
+	if err != nil {
+		t.Fatalf("collectAudiobookRootScans: %v", err)
+	}
+	if len(scans) != 1 || len(scans[0].candidates) != 1 {
+		t.Fatalf("candidates = %#v, want one promoted book root", scans)
+	}
+	if scans[0].candidates[0] != book {
+		t.Fatalf("candidate = %q, want %q", scans[0].candidates[0], book)
+	}
+	if len(scans[0].seenPaths) != 2 {
+		t.Fatalf("seen paths = %d, want 2", len(scans[0].seenPaths))
+	}
+}
+
+func TestCollectAudiobookRootScansKeepsIncoherentPartLayoutsSeparate(t *testing.T) {
+	root := t.TempDir()
+	book := filepath.Join(root, "Author", "Book")
+	for _, part := range []string{"CD1", "Disc 2"} {
+		dir := filepath.Join(book, part)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "track01.mp3"), []byte("audio"), 0o644); err != nil {
+			t.Fatalf("write track: %v", err)
+		}
+	}
+
+	scans, err := collectAudiobookRootScans(context.Background(), 1, []string{root})
+	if err != nil {
+		t.Fatalf("collectAudiobookRootScans: %v", err)
+	}
+	if len(scans) != 1 || len(scans[0].candidates) != 2 {
+		t.Fatalf("candidates = %#v, want separate part roots", scans)
+	}
+}
+
+func TestAudiobookPartMetadataAgreement(t *testing.T) {
+	base := map[string]string{
+		"album":        "The Book",
+		"album_artist": "Author Name",
+		"narrator":     "Narrator Name",
+		"asin":         "B012345678",
+	}
+	trackTitleDiffers := map[string]string{
+		"title":        "Chapter 19",
+		"album":        "The Book",
+		"album_artist": "Author Name",
+		"narrator":     "Narrator Name",
+		"asin":         "B012345678",
+	}
+	if !audiobookPartMetadataAgree(base, trackTitleDiffers) {
+		t.Fatal("same album identity with different track title should agree")
+	}
+	conflict := map[string]string{
+		"album":        "Another Book",
+		"album_artist": "Other Author",
+	}
+	if audiobookPartMetadataAgree(base, conflict) {
+		t.Fatal("conflicting book metadata should fail closed")
+	}
+	trackOnlyBase := map[string]string{
+		"title":        "Track 01",
+		"album_artist": "Author Name",
+	}
+	trackOnlyNext := map[string]string{
+		"title":        "Track 02",
+		"album_artist": "Author Name",
+	}
+	if !audiobookPartMetadataAgree(trackOnlyBase, trackOnlyNext) {
+		t.Fatal("track titles must not become promoted-part book identity")
+	}
+	sameTrackDifferentAlbums := map[string]string{
+		"title": "Track 01",
+		"album": "Another Book",
+	}
+	if audiobookPartMetadataAgree(base, sameTrackDifferentAlbums) {
+		t.Fatal("album conflict must fail even when track title matches")
+	}
+}
+
+func TestNaturalAudiobookPathOrdering(t *testing.T) {
+	paths := []string{
+		"/books/Book/Disc 10/track1.mp3",
+		"/books/Book/Disc 2/track10.mp3",
+		"/books/Book/Disc 2/track2.mp3",
+		"/books/Book/Disc 1/track1.mp3",
+	}
+	sortAudiobookPathsNatural(paths)
+	want := []string{
+		"/books/Book/Disc 1/track1.mp3",
+		"/books/Book/Disc 2/track2.mp3",
+		"/books/Book/Disc 2/track10.mp3",
+		"/books/Book/Disc 10/track1.mp3",
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths[%d] = %q, want %q; all=%#v", i, paths[i], want[i], paths)
+		}
+	}
+}
+
+func TestPopulateFromTagsRejectsNonLetterCredits(t *testing.T) {
+	tests := []struct {
+		name     string
+		author   string
+		narrator string
+		wantA    string
+		wantN    string
+	}{
+		{name: "punctuation", author: ".", narrator: "---"},
+		{name: "numeric", author: "9780719824029", narrator: "0012163"},
+		{name: "artifacts", author: "de.downmagaz.com", narrator: "ISBN 978-0-306-40615-7"},
+		{name: "urls", author: "https://example.com/books", narrator: "www.example.org"},
+		{name: "single letters", author: "J", narrator: "R.", wantA: "J", wantN: "R."},
+		{name: "unicode", author: "李白", narrator: "Élodie", wantA: "李白", wantN: "Élodie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			book := &parsedAudiobook{}
+			book.populateFromTags(map[string]string{"artist": tt.author, "narrator": tt.narrator})
+			if book.Author != tt.wantA || book.Narrator != tt.wantN {
+				t.Fatalf("credits = (%q, %q), want (%q, %q)", book.Author, book.Narrator, tt.wantA, tt.wantN)
+			}
+		})
 	}
 }
 

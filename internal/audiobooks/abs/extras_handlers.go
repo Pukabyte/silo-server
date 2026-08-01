@@ -1,11 +1,17 @@
 package abs
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 // extras_handlers.go bundles the ABS endpoints that don't fit naturally
@@ -130,12 +136,27 @@ func (h *Handler) handleDeleteItemProgress(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if h.deps.ProgressStore == nil {
+	contentID := chi.URLParam(r, "libraryItemId")
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	item, err := h.deps.MediaStore.GetAudiobookByID(r.Context(), contentID, access)
+	if err != nil || item == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	contentID := chi.URLParam(r, "libraryItemId")
-	if err := h.deps.ProgressStore.DeleteProgress(r.Context(), a.UserID, a.ProfileID, contentID); err != nil {
+	if item.Type == "ebook" {
+		if h.deps.EbookProgressStore == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		err = h.deps.EbookProgressStore.DeleteEbookProgress(r.Context(), a.UserID, a.ProfileID, contentID)
+	} else if h.deps.ProgressStore != nil {
+		err = h.deps.ProgressStore.DeleteProgress(r.Context(), a.UserID, a.ProfileID, contentID)
+	}
+	if err != nil {
 		slog.WarnContext(r.Context(), "abs delete progress failed", "component", "audiobooks", "err", err, "content", contentID)
 		http.Error(w, "delete progress failed", http.StatusInternalServerError)
 		return
@@ -167,29 +188,165 @@ func (h *Handler) handleSetEpisodeProgress(w http.ResponseWriter, r *http.Reques
 }
 
 // ---------------------------------------------------------------------------
-// Ebooks — stub surface until ebook scanner lands
+// Ebooks
 // ---------------------------------------------------------------------------
 
-// handleEbookFile — GET /items/{id}/ebook/{fileid}
-// Streams an ebook file (epub / pdf / mobi / cbz). silo's audiobook
-// scanner does not yet enumerate ebook files; until it does this returns
-// 404. The shape was intentionally chosen over 501 because the ABS web
-// reader treats 404 as "no ebook available for this item" and degrades
-// cleanly; 501 surfaces an alarming error banner.
-func (h *Handler) handleEbookFile(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "ebook not available", http.StatusNotFound)
+// handleEbookFile — GET /items/{id}/ebook[/{fileid}]
+// Streams the primary ebook when fileid is omitted, or a selected
+// supplementary ebook when it is present.
+func (h *Handler) handleEbookFile(w http.ResponseWriter, r *http.Request) {
+	a, ok := absAuthFrom(r)
+	if !ok || a.UserID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	contentID := chi.URLParam(r, "id")
+	fileID := 0
+	if rawFileID := chi.URLParam(r, "fileid"); rawFileID != "" {
+		var err error
+		fileID, err = strconv.Atoi(rawFileID)
+		if err != nil || fileID <= 0 {
+			http.Error(w, "invalid ebook file", http.StatusBadRequest)
+			return
+		}
+	}
+	if contentID == "" {
+		http.Error(w, "item required", http.StatusBadRequest)
+		return
+	}
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), contentID, access)
+	if err != nil {
+		http.Error(w, "load files: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if fileID == 0 {
+		if store, ok := h.deps.MediaStore.(ebookPrimaryStore); ok {
+			if primaryID, configured, hasPrimary, err := store.GetPrimaryEbookFileID(r.Context(), contentID); err != nil {
+				http.Error(w, "load primary ebook: "+err.Error(), http.StatusInternalServerError)
+				return
+			} else if configured {
+				if !hasPrimary {
+					http.Error(w, "ebook not found", http.StatusNotFound)
+					return
+				}
+				fileID = primaryID
+			}
+		}
+	}
+	selected := selectEbookFile(files, fileID)
+	if selected == nil {
+		http.Error(w, "ebook not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", ebookContentType(filepath.Ext(selected.FilePath)))
+	_ = playback.ServeDirectPlay(w, r, selected.FilePath)
+}
+
+// selectEbookFile follows ABS primary-file behavior: use an explicitly
+// requested supported ebook, otherwise prefer EPUB and fall back to the first
+// supported ebook in stable media-file order.
+func selectEbookFile(files []*models.MediaFile, fileID int) *models.MediaFile {
+	var first *models.MediaFile
+	for _, file := range files {
+		contentType := ebookContentType(filepath.Ext(file.FilePath))
+		if contentType == "" {
+			continue
+		}
+		if fileID != 0 {
+			if file.ID == fileID {
+				return file
+			}
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(file.FilePath), ".epub") {
+			return file
+		}
+		if first == nil {
+			first = file
+		}
+	}
+	return first
 }
 
 // handleEbookStatus — PATCH /items/{id}/ebook/{fileid}/status
-// Marks an ebook file as read/unread. silo has no ebook catalog yet;
-// accept the request and return the empty status object so the client
-// optimistic update succeeds.
 func (h *Handler) handleEbookStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"libraryItemId":   chi.URLParam(r, "id"),
-		"fileId":          chi.URLParam(r, "fileid"),
-		"isSupplementary": false,
-	})
+	a, ok := absAuthFrom(r)
+	if !ok || a.UserID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	contentID := chi.URLParam(r, "id")
+	fileID, err := strconv.Atoi(chi.URLParam(r, "fileid"))
+	if contentID == "" || err != nil || fileID <= 0 {
+		http.Error(w, "item and file required", http.StatusBadRequest)
+		return
+	}
+	access, err := h.accessFilterForAuth(r.Context(), a)
+	if err != nil {
+		http.Error(w, "resolve access: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), contentID, access)
+	if err != nil {
+		http.Error(w, "load ebook files: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if selectEbookFile(files, fileID) == nil {
+		http.Error(w, "invalid ebook file id", http.StatusBadRequest)
+		return
+	}
+	store, ok := h.deps.MediaStore.(ebookPrimaryStore)
+	if !ok {
+		http.Error(w, "ebook primary selection unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	primaryID, configured, hasPrimary, err := store.GetPrimaryEbookFileID(r.Context(), contentID)
+	if err != nil {
+		http.Error(w, "load primary ebook: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defaultFile := selectEbookFile(files, 0)
+	if (configured && hasPrimary && primaryID == fileID) || (!configured && defaultFile != nil && defaultFile.ID == fileID) {
+		// The effective primary remains readable. Treat its status toggle as a
+		// no-op rather than persisting a no-primary state that removes Read.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	err = store.SetPrimaryEbookFileID(r.Context(), contentID, fileID)
+	if err != nil {
+		http.Error(w, "set primary ebook: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+type ebookPrimaryStore interface {
+	GetPrimaryEbookFileID(ctx context.Context, contentID string) (fileID int, configured bool, hasPrimary bool, err error)
+	SetPrimaryEbookFileID(ctx context.Context, contentID string, fileID int) error
+	ClearPrimaryEbookFileID(ctx context.Context, contentID string) error
+}
+
+func ebookContentType(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".epub":
+		return "application/epub+zip"
+	case ".pdf":
+		return "application/pdf"
+	case ".mobi", ".azw", ".azw3":
+		return "application/x-mobipocket-ebook"
+	case ".cbz":
+		return "application/vnd.comicbook+zip"
+	case ".cbr":
+		return "application/vnd.comicbook-rar"
+	case ".fb2":
+		return "application/x-fictionbook+xml"
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

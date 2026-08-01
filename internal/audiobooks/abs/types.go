@@ -182,9 +182,15 @@ type EbookFile struct {
 	UpdatedAt    int64  `json:"updatedAt"`
 	MetadataPath string `json:"metadataPath,omitempty"`
 	Metadata     struct {
-		Filename string `json:"filename"`
-		Ext      string `json:"ext"`
-		Size     int64  `json:"size"`
+		Filename    string `json:"filename"`
+		Ext         string `json:"ext"`
+		Path        string `json:"path"`
+		RelPath     string `json:"relPath"`
+		Size        int64  `json:"size"`
+		MtimeMs     int64  `json:"mtimeMs"`
+		CtimeMs     int64  `json:"ctimeMs"`
+		BirthtimeMs int64  `json:"birthtimeMs"`
+		Format      string `json:"format"`
 	} `json:"metadata"`
 }
 

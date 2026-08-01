@@ -61,7 +61,7 @@ func TestBuildAudiobookGroupsSQL_SearchAppliesNormalizedPrefixFilter(t *testing.
 	}{
 		{name: "author", groupBy: AudiobookGroupByAuthor, want: "LOWER(BTRIM(p.name)) LIKE $"},
 		{name: "narrator", groupBy: AudiobookGroupByNarrator, want: "LOWER(BTRIM(p.name)) LIKE $"},
-		{name: "series", groupBy: AudiobookGroupBySeries, want: "LOWER(BTRIM(s.series_name)) LIKE $"},
+		{name: "series", groupBy: AudiobookGroupBySeries, want: "s.series_key LIKE $"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plan, err := buildAudiobookGroupsSQL(AudiobookGroupsQuery{
@@ -83,6 +83,22 @@ func TestBuildAudiobookGroupsSQL_SearchAppliesNormalizedPrefixFilter(t *testing.
 				t.Fatalf("search args = %#v, want neil%%", plan.Args)
 			}
 		})
+	}
+}
+
+func TestBuildAudiobookGroupsSQL_ExcludesEmptySeriesKeys(t *testing.T) {
+	t.Parallel()
+	plan, err := buildAudiobookGroupsSQL(AudiobookGroupsQuery{
+		LibraryID: 10,
+		GroupBy:   AudiobookGroupBySeries,
+		Sort:      "name",
+		Limit:     60,
+	}, AccessFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.SQL, "WHERE s.series_key <> ''") {
+		t.Fatalf("series group query must quarantine empty keys:\n%s", plan.SQL)
 	}
 }
 

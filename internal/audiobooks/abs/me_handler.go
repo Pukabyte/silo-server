@@ -76,6 +76,7 @@ func audiobookLibraryMap(lib AudiobookLibrary) map[string]any {
 		},
 		"displayOrder":    1,
 		"icon":            "audiobookshelf",
+		// ABS uses `book` for both text ebooks and audiobooks.
 		"mediaType":       LibraryMediaType,
 		"provider":        "audible",
 		"settings":        audiobookLibrarySettings(),

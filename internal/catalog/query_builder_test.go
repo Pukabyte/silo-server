@@ -806,16 +806,14 @@ func TestBuild_SeriesClauseJoinsAudiobookSeries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
 	}
-	if len(args) != 1 || args[0] != "Mistborn" {
+	if len(args) != 1 || args[0] != "mistborn" {
 		t.Fatalf("expected series arg, got %v", args)
 	}
 	if !strings.Contains(clause, "FROM audiobook_series s") {
 		t.Fatalf("expected audiobook_series join in series clause, got %q", clause)
 	}
-	// Both sides trimmed + case-folded so user-typed input matches stored
-	// values written by the scanner regardless of incidental whitespace.
-	if !strings.Contains(clause, "LOWER(BTRIM(s.series_name))") || !strings.Contains(clause, "LOWER(BTRIM($1))") {
-		t.Fatalf("expected case+whitespace-insensitive series match, got %q", clause)
+	if !strings.Contains(clause, "s.series_key = $1") {
+		t.Fatalf("expected normalized series-key match, got %q", clause)
 	}
 }
 
@@ -831,7 +829,7 @@ func TestBuild_SeriesClauseJoinsEbookSeriesForEbookScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
 	}
-	if len(args) != 1 || args[0] != "Wayfarers" {
+	if len(args) != 1 || args[0] != "wayfarers" {
 		t.Fatalf("expected series arg, got %v", args)
 	}
 	if !strings.Contains(clause, "FROM ebook_series s") {

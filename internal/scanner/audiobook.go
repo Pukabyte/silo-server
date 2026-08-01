@@ -8,7 +8,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 )
 
 // narratorSuffixRE matches a trailing "read by X" / "(Read by X)" /
@@ -37,6 +41,15 @@ var audiobookDedupeTitleTokenRE = regexp.MustCompile(`[^A-Za-z0-9]+`)
 
 var audiobookFilesystemTitleNumericIDRE = regexp.MustCompile(`\s*[\[(]\d+[\])]\s*$`)
 var audiobookFilesystemTitleNoiseSuffixRE = regexp.MustCompile(`(?i)(?:\s*[-_. ]+\s*)?(?:nmr|audio\s*book|audiobook|unabridged|abridged)\s*$`)
+var audiobookPartDirectoryRE = regexp.MustCompile(`(?i)^\s*(cd|disc|disk|part)[ ._-]*(\d+)\s*$`)
+
+type audiobookPartConflictError struct {
+	partDirs []string
+}
+
+func (e *audiobookPartConflictError) Error() string {
+	return "numbered audiobook parts contain conflicting metadata"
+}
 
 // stripNarratorSuffix removes the narrator-suffix noise and "(unabridged)"
 // markers from a title. Returns the input unchanged when no match.
@@ -135,10 +148,27 @@ func parseAudiobookFolder(ctx context.Context, ffprobePath string, folderPath st
 			audioFiles = append(audioFiles, filepath.Join(folderPath, entry.Name()))
 		}
 	}
+	var partDirs []string
+	var promoted bool
+	if len(audioFiles) == 0 {
+		partDirs, promoted, err = audiobookPromotedPartDirs(folderPath, entries)
+		if err != nil {
+			return nil, fmt.Errorf("inspect audiobook parts %s: %w", folderPath, err)
+		}
+	}
+	if promoted {
+		for _, partDir := range partDirs {
+			partFiles, collectErr := collectAudiobookFilesRecursive(partDir)
+			if collectErr != nil {
+				return nil, fmt.Errorf("collect audiobook part %s: %w", partDir, collectErr)
+			}
+			audioFiles = append(audioFiles, partFiles...)
+		}
+	}
 	if len(audioFiles) == 0 {
 		return nil, fmt.Errorf("audiobook folder %s: %w", folderPath, errFolderHasNoMedia)
 	}
-	sort.Strings(audioFiles)
+	sortAudiobookPathsNatural(audioFiles)
 
 	book := &parsedAudiobook{}
 
@@ -170,13 +200,20 @@ func parseAudiobookFolder(ctx context.Context, ffprobePath string, folderPath st
 	}
 	book.populateFromTags(probedFirst.FormatTags)
 	book.applyFilesystemFallbacks(folderPath, audioFiles)
+	partIdentity := audiobookPartMetadataIdentity(probedFirst.FormatTags)
 
 	book.Files = make([]parsedAudiobookFile, 0, len(audioFiles))
 	for i, path := range audioFiles {
 		stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		probed, err := ProbeFile(ctx, ffprobePath, path)
-		if err != nil {
-			return nil, fmt.Errorf("probe audiobook file %s: %w", path, err)
+		probed := probedFirst
+		if i > 0 {
+			probed, err = ProbeFile(ctx, ffprobePath, path)
+			if err != nil {
+				return nil, fmt.Errorf("probe audiobook file %s: %w", path, err)
+			}
+		}
+		if promoted && !mergeAudiobookPartMetadataIdentity(&partIdentity, audiobookPartMetadataIdentity(probed.FormatTags)) {
+			return nil, &audiobookPartConflictError{partDirs: partDirs}
 		}
 		book.Files = append(book.Files, parsedAudiobookFile{
 			Path: path,
@@ -201,8 +238,8 @@ func parseAudiobookFolder(ctx context.Context, ffprobePath string, folderPath st
 // lower-cased by normalizeFormatTags upstream.
 func (b *parsedAudiobook) populateFromTags(tags map[string]string) {
 	b.Title = firstNonEmpty(tags["title"], tags["album"])
-	b.Author = firstNonEmpty(tags["album_artist"], tags["artist"], tags["composer"])
-	b.Narrator = firstNonEmpty(tags["narrator"], tags["performer"], tags["composer"])
+	b.Author = validAudiobookCredit(firstNonEmpty(tags["album_artist"], tags["artist"], tags["composer"]))
+	b.Narrator = validAudiobookCredit(firstNonEmpty(tags["narrator"], tags["performer"], tags["composer"]))
 	// Note: do NOT fall back to tags["album"] for Series. In audiobook
 	// tagging, `album` is the book title, not the series name — using it
 	// as the fallback writes series_name = title for every book without
@@ -221,6 +258,185 @@ func (b *parsedAudiobook) populateFromTags(tags map[string]string) {
 		}
 	}
 	b.Genres = parseGenresFromTags(tags)
+}
+
+func validAudiobookCredit(value string) string {
+	value = strings.TrimSpace(value)
+	if bookmeta.TrustedAutomaticCredit(value) {
+		return value
+	}
+	return ""
+}
+
+func audiobookPartMetadataAgree(left, right map[string]string) bool {
+	identity := audiobookPartMetadataIdentity(left)
+	return mergeAudiobookPartMetadataIdentity(&identity, audiobookPartMetadataIdentity(right))
+}
+
+func audiobookPartMetadataIdentity(tags map[string]string) [4]string {
+	return [4]string{
+		normalizeAudiobookPartMetadata(tags["album"]),
+		normalizeAudiobookPartMetadata(firstNonEmpty(tags["album_artist"], tags["artist"], tags["composer"])),
+		normalizeAudiobookPartMetadata(firstNonEmpty(tags["narrator"], tags["performer"])),
+		normalizeAudiobookPartMetadata(firstNonEmpty(tags["asin"], tags["audible_asin"], tags["com.audible.asin"])),
+	}
+}
+
+func mergeAudiobookPartMetadataIdentity(base *[4]string, candidate [4]string) bool {
+	for i := range base {
+		if base[i] != "" && candidate[i] != "" && base[i] != candidate[i] {
+			return false
+		}
+		if base[i] == "" {
+			base[i] = candidate[i]
+		}
+	}
+	return true
+}
+
+func normalizeAudiobookPartMetadata(value string) string {
+	var out strings.Builder
+	space := false
+	for _, r := range strings.TrimSpace(value) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if space && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			out.WriteRune(unicode.ToLower(r))
+			space = false
+		} else {
+			space = true
+		}
+	}
+	return out.String()
+}
+
+func audiobookPromotedPartDirs(folderPath string, entries []os.DirEntry) ([]string, bool, error) {
+	type numberedPart struct {
+		path   string
+		family string
+		number int
+	}
+	var parts []numberedPart
+	var family string
+	seenNumbers := make(map[int]struct{})
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(folderPath, entry.Name())
+		hasAudio, err := directoryContainsAudiobookFile(path)
+		if err != nil {
+			return nil, false, err
+		}
+		if !hasAudio {
+			continue
+		}
+		match := audiobookPartDirectoryRE.FindStringSubmatch(entry.Name())
+		if match == nil {
+			return nil, false, nil
+		}
+		partFamily := strings.ToLower(match[1])
+		if partFamily == "disk" {
+			partFamily = "disc"
+		}
+		if family != "" && family != partFamily {
+			return nil, false, nil
+		}
+		family = partFamily
+		number, err := strconv.Atoi(match[2])
+		if err != nil || number < 1 {
+			return nil, false, nil
+		}
+		if _, exists := seenNumbers[number]; exists {
+			return nil, false, nil
+		}
+		seenNumbers[number] = struct{}{}
+		parts = append(parts, numberedPart{path: path, family: partFamily, number: number})
+	}
+	if len(parts) < 2 {
+		return nil, false, nil
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].number < parts[j].number })
+	for i, part := range parts {
+		if part.number != i+1 {
+			return nil, false, nil
+		}
+	}
+	dirs := make([]string, len(parts))
+	for i := range parts {
+		dirs[i] = parts[i].path
+	}
+	return dirs, true, nil
+}
+
+func directoryContainsAudiobookFile(root string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && SupportsAudioFile(entry.Name()) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found, err
+}
+
+func collectAudiobookFilesRecursive(root string) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && SupportsAudioFile(entry.Name()) {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortAudiobookPathsNatural(paths)
+	return paths, nil
+}
+
+func sortAudiobookPathsNatural(paths []string) {
+	sort.SliceStable(paths, func(i, j int) bool {
+		return naturalAudiobookPathLess(strings.ToLower(paths[i]), strings.ToLower(paths[j]))
+	})
+}
+
+func naturalAudiobookPathLess(a, b string) bool {
+	for ai, bi := 0, 0; ai < len(a) && bi < len(b); {
+		if a[ai] >= '0' && a[ai] <= '9' && b[bi] >= '0' && b[bi] <= '9' {
+			aEnd, bEnd := ai, bi
+			for aEnd < len(a) && a[aEnd] >= '0' && a[aEnd] <= '9' {
+				aEnd++
+			}
+			for bEnd < len(b) && b[bEnd] >= '0' && b[bEnd] <= '9' {
+				bEnd++
+			}
+			aNum, _ := strconv.ParseUint(a[ai:aEnd], 10, 64)
+			bNum, _ := strconv.ParseUint(b[bi:bEnd], 10, 64)
+			if aNum != bNum {
+				return aNum < bNum
+			}
+			if aEnd-ai != bEnd-bi {
+				return aEnd-ai < bEnd-bi
+			}
+			ai, bi = aEnd, bEnd
+			continue
+		}
+		if a[ai] != b[bi] {
+			return a[ai] < b[bi]
+		}
+		ai++
+		bi++
+	}
+	return len(a) < len(b)
 }
 
 // parseGenresFromTags pulls genres from the `genre` tag (which is often

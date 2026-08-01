@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/titleutil"
@@ -121,12 +122,30 @@ func (s *Scanner) audiobookFolderShouldSkip(ctx context.Context, folder *models.
 	if err != nil {
 		return "", false, fmt.Errorf("read folder: %w", err)
 	}
-	var onDisk []audiobookDiskFile
+	var diskPaths []string
 	for _, e := range entries {
 		if e.IsDir() || !SupportsAudioFile(e.Name()) {
 			continue
 		}
-		full := filepath.Join(folderPath, e.Name())
+		diskPaths = append(diskPaths, filepath.Join(folderPath, e.Name()))
+	}
+	if len(diskPaths) == 0 {
+		partDirs, promoted, partErr := audiobookPromotedPartDirs(folderPath, entries)
+		if partErr != nil {
+			return "", false, fmt.Errorf("inspect audiobook parts: %w", partErr)
+		}
+		if promoted {
+			for _, partDir := range partDirs {
+				partPaths, collectErr := collectAudiobookFilesRecursive(partDir)
+				if collectErr != nil {
+					return "", false, fmt.Errorf("collect audiobook part files: %w", collectErr)
+				}
+				diskPaths = append(diskPaths, partPaths...)
+			}
+		}
+	}
+	var onDisk []audiobookDiskFile
+	for _, full := range diskPaths {
 		info, statErr := os.Stat(full)
 		if statErr != nil {
 			return "", false, fmt.Errorf("stat %s: %w", full, statErr)
@@ -248,6 +267,27 @@ func collectAudiobookRootScans(ctx context.Context, folderID int, roots []string
 					}
 				}
 				if hadAudio {
+					scan.candidates = append(scan.candidates, path)
+					return filepath.SkipDir
+				}
+				partDirs, promoted, partErr := audiobookPromotedPartDirs(path, entries)
+				if partErr != nil {
+					scan.walkFailures++
+					slog.WarnContext(ctx, "audiobook scan: inspect part layout failed", "component", "scanner", "path", path, "error", partErr)
+					return filepath.SkipDir
+				}
+				if promoted {
+					for _, partDir := range partDirs {
+						partFiles, collectErr := collectAudiobookFilesRecursive(partDir)
+						if collectErr != nil {
+							scan.walkFailures++
+							slog.WarnContext(ctx, "audiobook scan: collect part files failed", "component", "scanner", "path", partDir, "error", collectErr)
+							return filepath.SkipDir
+						}
+						for _, filePath := range partFiles {
+							scan.seenPaths[filePath] = true
+						}
+					}
 					scan.candidates = append(scan.candidates, path)
 					return filepath.SkipDir
 				}
@@ -509,7 +549,16 @@ func (s *Scanner) reconcileAudiobookFolder(ctx context.Context, folder *models.M
 	}
 	parsed, err := parseAudiobookFolder(ctx, s.ffprobePath, folderPath)
 	if err != nil {
-		if errors.Is(err, errFolderHasNoMedia) {
+		if errors.Is(err, errFolderHasNoMedia) || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		var conflict *audiobookPartConflictError
+		if errors.As(err, &conflict) {
+			for _, partDir := range conflict.partDirs {
+				if childErr := s.reconcileAudiobookFolder(ctx, folder, partDir, skipped); childErr != nil {
+					return fmt.Errorf("reconcile conflicting audiobook part %s: %w", partDir, childErr)
+				}
+			}
 			return nil
 		}
 		return fmt.Errorf("parse audiobook folder %s: %w", folderPath, err)
@@ -624,6 +673,9 @@ func (s *Scanner) upsertAudiobookMediaItem(ctx context.Context, folderID int, fo
 	if s.fileRepo == nil {
 		return "", fmt.Errorf("fileRepo not configured on Scanner")
 	}
+	if err := s.mergePromotedAudiobookItems(ctx, book); err != nil {
+		return "", err
+	}
 
 	existingID, err := s.fileRepo.FindContentIDByRootPath(ctx, folderID, folderPath, "audiobook")
 	if err != nil {
@@ -670,6 +722,61 @@ func (s *Scanner) upsertAudiobookMediaItem(ctx context.Context, folderID int, fo
 	}
 
 	return createAudiobookMediaItem(ctx, s.itemRepo, book, cleanTitle)
+}
+
+// mergePromotedAudiobookItems consolidates pre-existing CD/Disc child items
+// before their files are rebound to a promoted parent root. MergeItems owns the
+// transaction and preserves progress, bookmarks, collections, aliases, and
+// other user state. A missing merger fails closed: file reassignment must never
+// orphan state.
+func (s *Scanner) mergePromotedAudiobookItems(ctx context.Context, book *parsedAudiobook) error {
+	if book == nil || len(book.Files) < 2 || s.fileRepo == nil {
+		return nil
+	}
+	paths := make([]string, 0, len(book.Files))
+	for _, file := range book.Files {
+		paths = append(paths, file.Path)
+	}
+	rows, err := s.fileRepo.Pool().Query(ctx, `
+		SELECT mi.content_id
+		FROM media_items mi
+		JOIN media_files mf ON mf.content_id = mi.content_id
+		WHERE mi.type = 'audiobook'
+		  AND mf.file_path = ANY($1::text[])
+		GROUP BY mi.content_id, mi.status, mi.created_at
+		ORDER BY CASE WHEN lower(btrim(COALESCE(mi.status, ''))) = 'curated' THEN 0 ELSE 1 END,
+		         COUNT(*) DESC,
+		         mi.created_at,
+		         mi.content_id
+	`, paths)
+	if err != nil {
+		return fmt.Errorf("find promoted audiobook items: %w", err)
+	}
+	defer rows.Close()
+	var contentIDs []string
+	for rows.Next() {
+		var contentID string
+		if err := rows.Scan(&contentID); err != nil {
+			return fmt.Errorf("scan promoted audiobook item: %w", err)
+		}
+		contentIDs = append(contentIDs, contentID)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate promoted audiobook items: %w", err)
+	}
+	if len(contentIDs) < 2 {
+		return nil
+	}
+	if s.mediaItemMerger == nil {
+		return fmt.Errorf("refusing promoted audiobook merge: media item merger unavailable")
+	}
+	canonicalID := contentIDs[0]
+	for _, sourceID := range contentIDs[1:] {
+		if err := s.mediaItemMerger.MergeItems(ctx, sourceID, canonicalID); err != nil {
+			return fmt.Errorf("merge promoted audiobook item %s into %s: %w", sourceID, canonicalID, err)
+		}
+	}
+	return nil
 }
 
 func (s *Scanner) updateExistingAudiobookMediaItem(ctx context.Context, contentID string, book *parsedAudiobook) error {
@@ -1056,16 +1163,12 @@ func (s *Scanner) upsertAudiobookPeople(ctx context.Context, contentID string, b
 	}
 
 	var desired []audiobookCredit
-	if book.Author != "" {
-		desired = append(desired, audiobookCredit{Name: book.Author, Kind: models.PersonKindAuthor})
+	if author := validAudiobookCredit(book.Author); author != "" {
+		desired = append(desired, audiobookCredit{Name: author, Kind: models.PersonKindAuthor})
 	}
-	if book.Narrator != "" {
-		desired = append(desired, audiobookCredit{Name: book.Narrator, Kind: models.PersonKindNarrator})
+	if narrator := validAudiobookCredit(book.Narrator); narrator != "" {
+		desired = append(desired, audiobookCredit{Name: narrator, Kind: models.PersonKindNarrator})
 	}
-	if len(desired) == 0 {
-		return nil
-	}
-
 	existing, err := s.itemRepo.GetPeople(ctx, contentID)
 	if err == nil && audiobookPeopleCreditsEqual(existing, desired) {
 		return nil
@@ -1096,20 +1199,20 @@ func (s *Scanner) upsertAudiobookSeries(ctx context.Context, contentID string, b
 	if s.fileRepo == nil {
 		return fmt.Errorf("fileRepo not configured on Scanner")
 	}
-	desiredName := strings.TrimSpace(book.Series)
-	desiredIdx := parseSeriesIndex(book.SeriesPosition)
+	desiredName, desiredKey, desiredIdx := audiobookSeriesDesired(book)
 
 	// Read current row.
 	var currentName *string
+	var currentKey string
 	var currentIdx *float64
 	err := s.fileRepo.Pool().QueryRow(ctx, `
-		SELECT series_name, series_index FROM audiobook_series WHERE content_id = $1
-	`, contentID).Scan(&currentName, &currentIdx)
+		SELECT series_name, series_key, series_index FROM audiobook_series WHERE content_id = $1
+	`, contentID).Scan(&currentName, &currentKey, &currentIdx)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("query audiobook_series: %w", err)
 	}
 
-	if desiredName == "" {
+	if desiredKey == "" {
 		if currentName == nil {
 			return nil // already absent
 		}
@@ -1120,7 +1223,7 @@ func (s *Scanner) upsertAudiobookSeries(ctx context.Context, contentID string, b
 		return nil
 	}
 
-	if currentName != nil && *currentName == desiredName && floatPtrEqual(currentIdx, desiredIdx) {
+	if currentName != nil && *currentName == desiredName && currentKey == desiredKey && floatPtrEqual(currentIdx, desiredIdx) {
 		return nil // identical row, skip the write
 	}
 
@@ -1129,16 +1232,29 @@ func (s *Scanner) upsertAudiobookSeries(ctx context.Context, contentID string, b
 		idx = *desiredIdx
 	}
 	if _, err := s.fileRepo.Pool().Exec(ctx, `
-		INSERT INTO audiobook_series (content_id, series_name, series_index, updated_at)
-		VALUES ($1, $2, $3, NOW())
+		INSERT INTO audiobook_series (content_id, series_name, series_key, series_index, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
 		ON CONFLICT (content_id) DO UPDATE SET
 			series_name  = EXCLUDED.series_name,
+			series_key   = EXCLUDED.series_key,
 			series_index = EXCLUDED.series_index,
 			updated_at   = NOW()
-	`, contentID, desiredName, idx); err != nil {
+	`, contentID, desiredName, desiredKey, idx); err != nil {
 		return fmt.Errorf("upsert audiobook_series row: %w", err)
 	}
 	return nil
+}
+
+func audiobookSeriesDesired(book *parsedAudiobook) (string, string, *float64) {
+	if book == nil {
+		return "", "", nil
+	}
+	name := bookmeta.CleanSeriesDisplay(book.Series)
+	key := bookmeta.NormalizeSeriesKey(name)
+	if key == "" {
+		return "", "", nil
+	}
+	return name, key, parseSeriesIndex(book.SeriesPosition)
 }
 
 func audiobookIdentityConfidence(book *parsedAudiobook, file parsedAudiobookFile) string {

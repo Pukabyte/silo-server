@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/audiobooks/abs"
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/scanner"
@@ -81,9 +82,9 @@ func (s *ABSMediaStore) cachedAudiobookCount(ctx context.Context, countSQL strin
 
 var _ abs.MediaStore = (*ABSMediaStore)(nil)
 
-// GetAudiobookByID returns the media_item with the given content_id, provided
-// it is of type 'audiobook'. Returns nil and a wrapped error for any other
-// outcome; the caller interprets a nil result as not-found.
+// GetAudiobookByID returns an ABS-supported book: either an audiobook or an
+// ebook.  The historical method name is retained to avoid widening the ABS
+// adapter interface for every consumer.
 func (s *ABSMediaStore) GetAudiobookByID(ctx context.Context, contentID string, access catalog.AccessFilter) (*models.MediaItem, error) {
 	items, err := s.Items.GetByIDsWithAccess(ctx, []string{contentID}, access)
 	if err != nil {
@@ -93,7 +94,7 @@ func (s *ABSMediaStore) GetAudiobookByID(ctx context.Context, contentID string, 
 		return nil, nil
 	}
 	item := items[0]
-	if item == nil || item.Type != "audiobook" {
+	if item == nil || (item.Type != "audiobook" && item.Type != "ebook") {
 		return nil, nil
 	}
 	// Hydrate authors + narrators so the ABS metadata mapper can fill
@@ -102,8 +103,10 @@ func (s *ABSMediaStore) GetAudiobookByID(ctx context.Context, contentID string, 
 		// Non-fatal: caller can still render the item without people data.
 		_ = err
 	}
-	if err := s.hydrateAudiobookSeries(ctx, []*models.MediaItem{item}); err != nil {
-		_ = err
+	if item.Type == "audiobook" {
+		if err := s.hydrateAudiobookSeries(ctx, []*models.MediaItem{item}); err != nil {
+			_ = err
+		}
 	}
 	return item, nil
 }
@@ -123,7 +126,7 @@ func (s *ABSMediaStore) GetAudiobooksByIDs(ctx context.Context, contentIDs []str
 	}
 	books := make([]*models.MediaItem, 0, len(items))
 	for _, item := range items {
-		if item != nil && item.Type == "audiobook" {
+		if item != nil && (item.Type == "audiobook" || item.Type == "ebook") {
 			books = append(books, item)
 		}
 	}
@@ -161,7 +164,11 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 	}
 
 	var total int
-	conditions := []string{"mi.type = 'audiobook'"}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	args := []any{}
 	argIdx := 1
 	if libraryID != 0 {
@@ -179,7 +186,7 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 	appendAudiobookFilterConditions(filter, &conditions, &args, &argIdx)
 	where := strings.Join(conditions, " AND ")
 
-	total, err := s.cachedAudiobookCount(ctx, `SELECT COUNT(*) FROM media_items mi WHERE `+where, args)
+	total, err = s.cachedAudiobookCount(ctx, `SELECT COUNT(*) FROM media_items mi WHERE `+where, args)
 	if err != nil {
 		return nil, 0, fmt.Errorf("abs_media_store: count audiobooks: %w", err)
 	}
@@ -244,10 +251,28 @@ func (s *ABSMediaStore) ListAudiobooks(ctx context.Context, libraryID int64, lim
 		// just stay empty in the ABS payload). Log via the caller if needed.
 		_ = err
 	}
-	if err := s.hydrateAudiobookSeries(ctx, ordered); err != nil {
-		_ = err
+	if itemType == "audiobook" {
+		if err := s.hydrateAudiobookSeries(ctx, ordered); err != nil {
+			_ = err
+		}
 	}
 	return ordered, total, nil
+}
+
+// libraryItemType maps a Silo media_folder type to its media_items type.
+// Unknown/virtual folders preserve the long-standing audiobook default.
+func (s *ABSMediaStore) libraryItemType(ctx context.Context, libraryID int64) (string, error) {
+	if libraryID == 0 || s.Pool == nil {
+		return "audiobook", nil
+	}
+	var folderType string
+	if err := s.Pool.QueryRow(ctx, `SELECT type FROM media_folders WHERE id = $1`, libraryID).Scan(&folderType); err != nil {
+		return "", fmt.Errorf("abs_media_store: resolve library %d: %w", libraryID, err)
+	}
+	if folderType == "ebook" || folderType == "ebooks" {
+		return "ebook", nil
+	}
+	return "audiobook", nil
 }
 
 // appendAudiobookFilterConditions pushes an ABS authors/series/narrators
@@ -283,8 +308,8 @@ func appendAudiobookFilterConditions(filter abs.Filter, conditions *[]string, ar
 			*conditions = append(*conditions, `NOT EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id)`)
 		} else {
 			*conditions = append(*conditions, fmt.Sprintf(
-				`EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id AND abs.series_name = $%d)`, *argIdx))
-			*args = append(*args, filter.Value)
+				`EXISTS (SELECT 1 FROM audiobook_series abs WHERE abs.content_id = mi.content_id AND abs.series_key = $%d)`, *argIdx))
+			*args = append(*args, bookmeta.NormalizeSeriesKey(filter.Value))
 			*argIdx = *argIdx + 1
 		}
 	}
@@ -403,7 +428,7 @@ func (s *ABSMediaStore) hydrateAudiobookSeries(ctx context.Context, items []*mod
 	rows, err := s.Pool.Query(ctx, `
 		SELECT content_id, series_name, COALESCE(series_index::text, '')
 		FROM audiobook_series
-		WHERE content_id = ANY($1)
+		WHERE content_id = ANY($1) AND series_key <> ''
 		ORDER BY content_id, series_index NULLS LAST, series_name
 	`, ids)
 	if err != nil {
@@ -459,13 +484,64 @@ func (s *ABSMediaStore) GetMediaFileByID(ctx context.Context, fileID int) (*mode
 	return file, nil
 }
 
-// ListAudiobookLibraries returns media_folder rows where type='audiobooks'
-// (the canonical silo type for the audiobooks sub-plan).
+// GetPrimaryEbookFileID returns the explicit ABS primary ebook selection.
+// A missing row means callers should apply ABS's EPUB-first default. A row
+// with a NULL file_id is an explicit ABS "no primary" selection.
+func (s *ABSMediaStore) GetPrimaryEbookFileID(ctx context.Context, contentID string) (int, bool, bool, error) {
+	if s.Pool == nil {
+		return 0, false, false, nil
+	}
+	var fileID *int
+	err := s.Pool.QueryRow(ctx, `SELECT file_id FROM abs_ebook_primary_files WHERE content_id = $1`, contentID).Scan(&fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, false, nil
+	}
+	if err != nil {
+		return 0, false, false, fmt.Errorf("abs_media_store: get primary ebook: %w", err)
+	}
+	if fileID == nil {
+		return 0, true, false, nil
+	}
+	return *fileID, true, true, nil
+}
+
+// ClearPrimaryEbookFileID records ABS's explicit "all files supplementary"
+// state, reached by toggling the currently primary file's status.
+func (s *ABSMediaStore) ClearPrimaryEbookFileID(ctx context.Context, contentID string) error {
+	if s.Pool == nil {
+		return fmt.Errorf("abs_media_store: no pgx pool")
+	}
+	_, err := s.Pool.Exec(ctx, `INSERT INTO abs_ebook_primary_files (content_id, file_id, updated_at)
+		VALUES ($1, NULL, now())
+		ON CONFLICT (content_id) DO UPDATE SET file_id = NULL, updated_at = now()`, contentID)
+	if err != nil {
+		return fmt.Errorf("abs_media_store: clear primary ebook: %w", err)
+	}
+	return nil
+}
+
+// SetPrimaryEbookFileID persists a primary ebook selection made through ABS.
+func (s *ABSMediaStore) SetPrimaryEbookFileID(ctx context.Context, contentID string, fileID int) error {
+	if s.Pool == nil {
+		return fmt.Errorf("abs_media_store: no pgx pool")
+	}
+	_, err := s.Pool.Exec(ctx, `INSERT INTO abs_ebook_primary_files (content_id, file_id, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (content_id) DO UPDATE SET file_id = EXCLUDED.file_id, updated_at = now()`, contentID, fileID)
+	if err != nil {
+		return fmt.Errorf("abs_media_store: set primary ebook: %w", err)
+	}
+	return nil
+}
+
+// ListAudiobookLibraries returns every Silo folder ABS can render as a book
+// library: audiobooks and ebooks.  ABS uses the same `book` media type for
+// both; Type remains the Silo source type for query isolation.
 func (s *ABSMediaStore) ListAudiobookLibraries(ctx context.Context, access catalog.AccessFilter) ([]abs.AudiobookLibrary, error) {
 	if s.Pool == nil {
 		return nil, nil
 	}
-	conditions := []string{"type IN ('audiobooks', 'audiobook')", "enabled = TRUE"}
+	conditions := []string{"type IN ('audiobooks', 'audiobook', 'ebooks', 'ebook')", "enabled = TRUE"}
 	args := []any{}
 	argIdx := 1
 	appendLibraryAccessConditions("media_folders", access, &conditions, &args, &argIdx)
@@ -609,9 +685,9 @@ func (s *ABSMediaStore) SearchAudiobooks(ctx context.Context, libraryID int64, q
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListContinueListening returns audiobooks the user has in-progress (and
-// hasn't finished). userID is the silo integer-id-as-string from the ABS
-// JWT; we filter by user_watch_progress for that user + this audiobook.
+// ListContinueListening returns in-progress audiobooks or ebooks. Ebook
+// progress is stored separately by Silo's native reader, so it needs its own
+// query while keeping the same ABS shelf contract.
 func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if userID == "" {
 		return []*models.MediaItem{}, nil
@@ -619,7 +695,38 @@ func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profi
 	if limit <= 0 {
 		limit = 10
 	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
 	args := []any{userID, profileID, limit}
+	if itemType == "ebook" {
+		conditions := []string{
+			`mi.type = 'ebook'`,
+			`erp.user_id::text = $1`,
+			`($2 = '' OR erp.profile_id = $2)`,
+			`erp.progress > 0`,
+			`erp.progress < 0.9`,
+		}
+		argIdx := 4
+		if libraryID != 0 {
+			conditions = append(conditions, fmt.Sprintf(`EXISTS (
+				SELECT 1 FROM media_item_libraries mil
+				WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d
+			)`, argIdx))
+			args = append(args, int(libraryID))
+			argIdx++
+		}
+		appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+		return s.listAudiobookIDs(ctx, `
+			SELECT mi.content_id FROM media_items mi
+			JOIN ebook_reader_progress erp ON erp.content_id = mi.content_id
+			WHERE `+strings.Join(conditions, " AND ")+`
+			ORDER BY erp.updated_at DESC
+			LIMIT $3
+		`, args)
+	}
+
 	conditions := []string{
 		`mi.type = 'audiobook'`,
 		`wp.user_id::text = $1`,
@@ -648,14 +755,55 @@ func (s *ABSMediaStore) ListContinueListening(ctx context.Context, userID, profi
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListRecentlyAdded returns the most recently added audiobooks. Added-at
-// for audiobooks comes from MIN(first_seen_at) in media_item_libraries.
+// ListFinished returns books completed by the active ABS profile. It feeds
+// Audiobookshelf's Listen Again or Read Again shelf.
+func (s *ABSMediaStore) ListFinished(ctx context.Context, userID, profileID string, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
+	if userID == "" {
+		return []*models.MediaItem{}, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	args := []any{userID, profileID, limit}
+	if itemType == "ebook" {
+		conditions := []string{`mi.type = 'ebook'`, `erp.user_id::text = $1`, `($2 = '' OR erp.profile_id = $2)`, `erp.progress >= 0.9`}
+		argIdx := 4
+		if libraryID != 0 {
+			conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+			args = append(args, int(libraryID))
+			argIdx++
+		}
+		appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+		return s.listAudiobookIDs(ctx, `SELECT mi.content_id FROM media_items mi JOIN ebook_reader_progress erp ON erp.content_id = mi.content_id WHERE `+strings.Join(conditions, " AND ")+` ORDER BY erp.updated_at DESC LIMIT $3`, args)
+	}
+	conditions := []string{`mi.type = 'audiobook'`, `wp.user_id::text = $1`, `($2 = '' OR wp.profile_id = $2)`, `COALESCE(wp.completed, FALSE) = TRUE`}
+	argIdx := 4
+	if libraryID != 0 {
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+		args = append(args, int(libraryID))
+		argIdx++
+	}
+	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	return s.listAudiobookIDs(ctx, `SELECT mi.content_id FROM media_items mi JOIN user_watch_progress wp ON wp.media_item_id = mi.content_id WHERE `+strings.Join(conditions, " AND ")+` ORDER BY wp.updated_at DESC LIMIT $3`, args)
+}
+
+// ListRecentlyAdded returns the most recently added items in the requested
+// audiobook or ebook library. Added-at comes from MIN(first_seen_at) in
+// media_item_libraries.
 func (s *ABSMediaStore) ListRecentlyAdded(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
 	args := []any{limit}
-	conditions := []string{`mi.type = 'audiobook'`}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	argIdx := 2
 	libFilter := ""
 	if libraryID != 0 {
@@ -678,15 +826,19 @@ func (s *ABSMediaStore) ListRecentlyAdded(ctx context.Context, libraryID int64, 
 	return s.listAudiobookIDs(ctx, sql, args)
 }
 
-// ListDiscover returns a random sampling of audiobooks for the home
+// ListDiscover returns a random sampling of library items for the home
 // Discover shelf. Uses TABLESAMPLE for cheap random sampling on large
 // libraries (38k+ books); falls back to ORDER BY random() for tiny libs.
 func (s *ABSMediaStore) ListDiscover(ctx context.Context, libraryID int64, limit int, access catalog.AccessFilter) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
 	args := []any{limit}
-	conditions := []string{`mi.type = 'audiobook'`, `COALESCE(mi.poster_path, '') <> ''`}
+	conditions := []string{"mi.type = '" + itemType + "'", `COALESCE(mi.poster_path, '') <> ''`}
 	argIdx := 2
 	if libraryID != 0 {
 		conditions = append(conditions, fmt.Sprintf(`EXISTS (
@@ -705,6 +857,82 @@ func (s *ABSMediaStore) ListDiscover(ctx context.Context, libraryID int64, limit
 		LIMIT $1
 	`
 	return s.listAudiobookIDs(ctx, sql, args)
+}
+
+// ListLibraryGenres returns the distinct catalog genres used by a library.
+func (s *ABSMediaStore) ListLibraryGenres(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	if s.Pool == nil {
+		return []string{}, nil
+	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'", `genre <> ''`}
+	args := []any{}
+	argIdx := 1
+	if libraryID != 0 {
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+		args = append(args, int(libraryID))
+		argIdx++
+	}
+	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT genre FROM media_items mi CROSS JOIN LATERAL unnest(COALESCE(mi.genres, ARRAY[]::text[])) AS genre WHERE `+strings.Join(conditions, " AND ")+` ORDER BY LOWER(genre)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("abs_media_store: list genres: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var genre string
+		if err := rows.Scan(&genre); err != nil {
+			return nil, err
+		}
+		out = append(out, genre)
+	}
+	return out, rows.Err()
+}
+
+func (s *ABSMediaStore) listLibraryStringValues(ctx context.Context, libraryID int64, access catalog.AccessFilter, from, value string) ([]string, error) {
+	if s.Pool == nil {
+		return []string{}, nil
+	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'", value + " <> ''"}
+	args := []any{}
+	argIdx := 1
+	if libraryID != 0 {
+		conditions = append(conditions, fmt.Sprintf(`EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)`, argIdx))
+		args = append(args, int(libraryID))
+		argIdx++
+	}
+	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT `+value+` FROM media_items mi `+from+` WHERE `+strings.Join(conditions, " AND ")+` ORDER BY LOWER(`+value+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (s *ABSMediaStore) ListLibraryNarrators(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	return s.listLibraryStringValues(ctx, libraryID, access, `JOIN item_people ip ON ip.content_id = mi.content_id AND ip.kind = 8 JOIN people p ON p.id = ip.person_id`, `p.name`)
+}
+func (s *ABSMediaStore) ListLibraryPublishers(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	return s.listLibraryStringValues(ctx, libraryID, access, `CROSS JOIN LATERAL unnest(COALESCE(mi.studios, ARRAY[]::text[])) AS publisher`, `publisher`)
+}
+func (s *ABSMediaStore) ListLibraryLanguages(ctx context.Context, libraryID int64, access catalog.AccessFilter) ([]string, error) {
+	return s.listLibraryStringValues(ctx, libraryID, access, ``, `mi.original_language`)
 }
 
 // RefreshAuthorCounts rebuilds the abs_audiobook_author_counts materialized
@@ -741,6 +969,15 @@ func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64,
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	// The materialized view deliberately contains audiobooks only. Ebooks use
+	// the indexed live aggregation until they receive their own aggregate.
+	if itemType == "ebook" {
+		return s.listLibraryAuthorsLive(ctx, libraryID, limit, offset, sortBy, sortDesc, access)
 	}
 	if access.MaxContentRating != "" || len(access.ExcludedMediaTypes) > 0 {
 		return s.listLibraryAuthorsLive(ctx, libraryID, limit, offset, sortBy, sortDesc, access)
@@ -808,7 +1045,11 @@ func (s *ABSMediaStore) ListLibraryAuthors(ctx context.Context, libraryID int64,
 // listLibraryAuthorsLive is the pre-materialized-view live aggregation, kept as
 // a fallback for ListLibraryAuthors when the MV has no rows for the library.
 func (s *ABSMediaStore) listLibraryAuthorsLive(ctx context.Context, libraryID int64, limit, offset int, sortBy string, sortDesc bool, access catalog.AccessFilter) ([]abs.AuthorSummary, int, error) {
-	conditions := []string{`mi.type = 'audiobook'`}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	args := []any{}
 	argIdx := 1
 	if libraryID != 0 {
@@ -897,7 +1138,11 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 	if offset < 0 {
 		offset = 0
 	}
-	conditions := []string{`mi.type = 'audiobook'`}
+	itemType, err := s.libraryItemType(ctx, libraryID)
+	if err != nil {
+		return nil, 0, err
+	}
+	conditions := []string{"mi.type = '" + itemType + "'"}
 	args := []any{}
 	argIdx := 1
 	if libraryID != 0 {
@@ -915,10 +1160,10 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 	// match what the data query returns.
 	var total int
 	countSQL := `SELECT COUNT(*) FROM (
-		SELECT s.series_name
+		SELECT s.series_key
 		FROM audiobook_series s JOIN media_items mi ON mi.content_id = s.content_id
-		WHERE ` + where + `
-		GROUP BY s.series_name HAVING COUNT(*) > 1
+		WHERE ` + where + ` AND s.series_key <> ''
+		GROUP BY s.series_key HAVING COUNT(*) > 1
 	) t`
 	if err := s.Pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("abs_media_store: count series: %w", err)
@@ -935,28 +1180,29 @@ func (s *ABSMediaStore) ListLibrarySeries(ctx context.Context, libraryID int64, 
 	dataSQL := `
 		WITH ranked AS (
 			SELECT
+				s.series_key,
 				s.series_name,
 				s.content_id,
 				mi.title,
 				mi.updated_at,
 				ROW_NUMBER() OVER (
-					PARTITION BY s.series_name
+					PARTITION BY s.series_key
 					ORDER BY COALESCE(s.series_index, 999999), s.content_id
 				) AS rn,
-				COUNT(*) OVER (PARTITION BY s.series_name) AS series_count
+				COUNT(*) OVER (PARTITION BY s.series_key) AS series_count
 			FROM audiobook_series s
 			JOIN media_items mi
 				ON mi.content_id = s.content_id
-			WHERE ` + where + `
+			WHERE ` + where + ` AND s.series_key <> ''
 		)
 		SELECT
-			series_name,
+			MIN(series_name) AS series_name,
 			MAX(series_count)::int AS num_books,
 			array_agg(content_id ORDER BY rn) FILTER (WHERE rn <= 4) AS book_ids,
 			array_agg(title      ORDER BY rn) FILTER (WHERE rn <= 4) AS titles,
 			array_agg(updated_at ORDER BY rn) FILTER (WHERE rn <= 4) AS updated_ats
 		FROM ranked
-		GROUP BY series_name
+		GROUP BY series_key
 		HAVING MAX(series_count) > 1
 		ORDER BY LOWER(series_name)`
 	dataArgs := append([]any(nil), args...)
@@ -1041,10 +1287,15 @@ func (s *ABSMediaStore) GetSeriesByName(ctx context.Context, seriesName string, 
 		return abs.Series{}, abs.ErrNotFound
 	}
 	var canonicalName string
+	seriesKey := bookmeta.NormalizeSeriesKey(seriesName)
+	if seriesKey == "" {
+		return abs.Series{}, abs.ErrNotFound
+	}
 	row := s.Pool.QueryRow(ctx, `
 		SELECT series_name FROM audiobook_series
-		WHERE LOWER(series_name) = LOWER($1)
-		LIMIT 1`, seriesName,
+		WHERE series_key = $1
+		ORDER BY series_name
+		LIMIT 1`, seriesKey,
 	)
 	if err := row.Scan(&canonicalName); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1053,8 +1304,8 @@ func (s *ABSMediaStore) GetSeriesByName(ctx context.Context, seriesName string, 
 		return abs.Series{}, fmt.Errorf("abs_media_store: get series: %w", err)
 	}
 	series := abs.Series{ID: strings.ToLower(canonicalName), Name: canonicalName}
-	conditions := []string{`LOWER(asx.series_name) = LOWER($1)`, `mi.type = 'audiobook'`}
-	args := []any{seriesName}
+	conditions := []string{`asx.series_key = $1`, `mi.type = 'audiobook'`}
+	args := []any{seriesKey}
 	argIdx := 2
 	appendAudiobookAccessConditions("mi", access, &conditions, &args, &argIdx)
 	items, err := s.listAudiobookIDs(ctx, `

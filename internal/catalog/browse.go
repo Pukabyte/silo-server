@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -951,12 +952,14 @@ func listDistinctAudiobookSeriesWithSource(
 	}
 	query := fmt.Sprintf(`
 		SELECT name FROM (
-			SELECT DISTINCT BTRIM(s.series_name) AS name
+			SELECT MIN(BTRIM(s.series_name)) AS name
 			FROM %s
 			JOIN %s s ON s.content_id = mi.content_id
 			%s
 			  AND s.series_name IS NOT NULL
 			  AND BTRIM(s.series_name) <> ''
+			  AND s.series_key <> ''
+			GROUP BY s.series_key
 		) names
 		ORDER BY LOWER(name) ASC
 		LIMIT %d
@@ -1102,8 +1105,11 @@ func searchDistinctAudiobookSeriesWithSource(
 	prefix string,
 	limit int,
 ) ([]string, bool, error) {
-	prefix = strings.TrimSpace(prefix)
+	prefix = bookmeta.NormalizeSeriesKey(prefix)
 	if limit <= 0 {
+		return []string{}, false, nil
+	}
+	if prefix == "" {
 		return []string{}, false, nil
 	}
 	fromClause, whereClause, args, empty := filterWhereClauseForSource(filters, baseRelation, mediaScope)
@@ -1112,20 +1118,32 @@ func searchDistinctAudiobookSeriesWithSource(
 	}
 	args = append(args, prefix+"%")
 	prefixIdx := len(args)
-	query := fmt.Sprintf(`
+	query := buildBookSeriesFacetSearchSQL(
+		fromClause,
+		bookSeriesTableForMediaScope(mediaScope),
+		browseFilterPrefix(whereClause),
+		prefixIdx,
+		limit,
+	)
+	return queryFacetSearchResults(ctx, pool, query, args, limit)
+}
+
+func buildBookSeriesFacetSearchSQL(fromClause, seriesTable, whereClause string, prefixArgIdx, limit int) string {
+	return fmt.Sprintf(`
 		SELECT name FROM (
-			SELECT DISTINCT BTRIM(s.series_name) AS name
+			SELECT MIN(BTRIM(s.series_name)) AS name
 			FROM %s
 			JOIN %s s ON s.content_id = mi.content_id
 			%s
 			  AND s.series_name IS NOT NULL
 			  AND BTRIM(s.series_name) <> ''
-			  AND LOWER(BTRIM(s.series_name)) LIKE LOWER($%d)
+			  AND s.series_key LIKE $%d
+			  AND s.series_key <> ''
+			GROUP BY s.series_key
 		) names
 		ORDER BY LOWER(name) ASC
 		LIMIT %d
-	`, fromClause, bookSeriesTableForMediaScope(mediaScope), browseFilterPrefix(whereClause), prefixIdx, limit+1)
-	return queryFacetSearchResults(ctx, pool, query, args, limit)
+	`, fromClause, seriesTable, whereClause, prefixArgIdx, limit+1)
 }
 
 func bookSeriesTableForMediaScope(mediaScope string) string {

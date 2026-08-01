@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/bookmeta"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -210,6 +211,7 @@ func buildAudiobookGroupsSQLWithLimit(q AudiobookGroupsQuery, filter AccessFilte
 	}
 
 	var joinClause, nameExpr, groupExpr, posterOrder string
+	groupFilters := make([]string, 0, 2)
 	switch q.GroupBy {
 	case AudiobookGroupByAuthor, AudiobookGroupByNarrator:
 		kind := models.PersonKindAuthor
@@ -226,14 +228,18 @@ func buildAudiobookGroupsSQLWithLimit(q AudiobookGroupsQuery, filter AccessFilte
 	case AudiobookGroupBySeries:
 		joinClause = "JOIN audiobook_series s ON s.content_id = b.content_id"
 		nameExpr = "MIN(BTRIM(s.series_name))"
-		groupExpr = "LOWER(BTRIM(s.series_name))"
+		groupExpr = "s.series_key"
 		posterOrder = "s.series_index NULLS LAST, b.sort_title"
+		groupFilters = append(groupFilters, "s.series_key <> ''")
 	default:
 		return audiobookGroupsSQLPlan{}, fmt.Errorf("audiobook groups: unsupported group_by %q", q.GroupBy)
 	}
 
-	groupFilters := make([]string, 0, 1)
-	if search := audiobookGroupSearchPattern(q.SearchPrefix); search != "" {
+	searchPrefix := q.SearchPrefix
+	if q.GroupBy == AudiobookGroupBySeries {
+		searchPrefix = bookmeta.NormalizeSeriesKey(searchPrefix)
+	}
+	if search := audiobookGroupSearchPattern(searchPrefix); search != "" {
 		groupFilters = append(groupFilters, fmt.Sprintf(`%s LIKE $%d ESCAPE '\'`, groupExpr, argIdx))
 		args = append(args, search)
 		argIdx++
