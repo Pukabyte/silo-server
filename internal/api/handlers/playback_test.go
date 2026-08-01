@@ -28,6 +28,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/settingskeys"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 	"github.com/Silo-Server/silo-server/internal/userdb"
@@ -693,6 +695,86 @@ func TestHandleStartPlayback_DoesNotPersistSeriesPlaybackPreferenceOnFailure(t *
 	}
 }
 
+func TestHandleStartPlayback_AudioLanguageResolvesCanonically(t *testing.T) {
+	// The default audio track comes from the canonical playback.audio_language
+	// value resolved through the settings contract, not from the legacy
+	// user_profiles.language column. The column always carries the language of
+	// a different track than the canonical answer, so a regression to reading
+	// it flips the selected index.
+	newFile := func(t *testing.T) *models.MediaFile {
+		return &models.MediaFile{
+			ID:        42,
+			ContentID: "movie-1",
+			FilePath:  writePlaybackTestMediaFile(t, "movie.mkv"),
+			Duration:  3600,
+			AudioTracks: []models.AudioTrack{
+				{Language: "eng", Codec: "aac", Default: true},
+				{Language: "jpn", Codec: "aac"},
+			},
+		}
+	}
+
+	setLegacyLanguage := func(t *testing.T, store userstore.UserStore, language string) {
+		t.Helper()
+		if err := store.UpdateProfile(context.Background(), "profile-1", userstore.UpdateProfileInput{
+			Language: &language,
+		}); err != nil {
+			t.Fatalf("seed legacy language column: %v", err)
+		}
+	}
+
+	startPlayback := func(t *testing.T, store userstore.UserStore, file *models.MediaFile) playbackSessionResponse {
+		t.Helper()
+		handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), testPlaybackFileResolver{file: file})
+		handler.StoreProvider = testUserStoreProvider{store: store}
+		handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+		req := httptest.NewRequest("POST", "/api/v1/playback/start",
+			strings.NewReader(`{"file_id":42,"profile_id":"profile-1","play_method":"direct"}`))
+		req = req.WithContext(newAuthorizedPlaybackContext())
+
+		rr := httptest.NewRecorder()
+		handler.HandleStartPlayback(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+		}
+		var resp playbackSessionResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return resp
+	}
+
+	t.Run("canonical value wins over legacy column", func(t *testing.T) {
+		store := newPlaybackTestStore(t)
+		setLegacyLanguage(t, store, "eng")
+		if _, err := store.UpsertSettingValue(context.Background(), userstore.SettingIdentity{
+			Key:       settingskeys.PlaybackAudioLanguage,
+			Scope:     settingscontract.ScopeProfile,
+			ProfileID: "profile-1",
+		}, json.RawMessage(`"ja"`)); err != nil {
+			t.Fatalf("seed canonical audio language: %v", err)
+		}
+
+		resp := startPlayback(t, store, newFile(t))
+		if resp.AudioTrackIndex != 1 {
+			t.Fatalf("AudioTrackIndex = %d, want 1 (canonical \"ja\" track)", resp.AudioTrackIndex)
+		}
+	})
+
+	t.Run("legacy column alone no longer selects a track", func(t *testing.T) {
+		store := newPlaybackTestStore(t)
+		setLegacyLanguage(t, store, "jpn")
+
+		resp := startPlayback(t, store, newFile(t))
+		// No canonical value stored: the contract default is "no preference",
+		// so selection falls to the file's default track, not the column's.
+		if resp.AudioTrackIndex != 0 {
+			t.Fatalf("AudioTrackIndex = %d, want 0 (file default track)", resp.AudioTrackIndex)
+		}
+	})
+}
+
 func TestHandleChangeAudioTrack_PersistsSeriesAudioPreferenceSignature(t *testing.T) {
 	store := newPlaybackTestStore(t)
 	file := &models.MediaFile{
@@ -1343,7 +1425,7 @@ func TestHandleStartTranscode_PreservesRecomputedBaseMethodAfterFallback(t *test
 	transcodeReq := httptest.NewRequest(
 		"POST",
 		"/api/v1/playback/transcode/start",
-		strings.NewReader(`{"session_id":"`+startResp.SessionID+`","seek_seconds":0,"target_resolution":"720p","target_codec_video":"h264","target_codec_audio":"aac","target_bitrate_kbps":2000,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
+		strings.NewReader(`{"session_id":"`+startResp.SessionID+`","seek_seconds":0,"target_resolution":"2160p","target_codec_video":"h264","target_codec_audio":"aac","target_bitrate_kbps":10000,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
 	)
 	transcodeReq = transcodeReq.WithContext(newAuthorizedPlaybackContext())
 
@@ -1359,6 +1441,12 @@ func TestHandleStartTranscode_PreservesRecomputedBaseMethodAfterFallback(t *test
 	if remoteStartReq.AudioTrackIndex != 1 {
 		t.Fatalf("remote audio_track_index = %d, want 1", remoteStartReq.AudioTrackIndex)
 	}
+	if remoteStartReq.TargetResolution != transcodeResolution1080p {
+		t.Fatalf("remote target resolution = %q, want 1080p", remoteStartReq.TargetResolution)
+	}
+	if remoteStartReq.TargetBitrateKbps != 10000 {
+		t.Fatalf("remote target bitrate = %d, want unchanged 10000", remoteStartReq.TargetBitrateKbps)
+	}
 
 	session, err := sessionMgr.GetSession(startResp.SessionID)
 	if err != nil {
@@ -1369,6 +1457,12 @@ func TestHandleStartTranscode_PreservesRecomputedBaseMethodAfterFallback(t *test
 	}
 	if session.BasePlayMethod != playback.PlayRemux {
 		t.Fatalf("session.BasePlayMethod = %q, want %q", session.BasePlayMethod, playback.PlayRemux)
+	}
+	if session.TargetResolution != transcodeResolution1080p {
+		t.Fatalf("session target resolution = %q, want 1080p", session.TargetResolution)
+	}
+	if session.TargetBitrateKbps != 10000 {
+		t.Fatalf("session target bitrate = %d, want unchanged 10000", session.TargetBitrateKbps)
 	}
 }
 
@@ -2010,7 +2104,7 @@ func TestHandleStartTranscode_LocalPathPropagatesSelectedAudioTrack(t *testing.T
 	transcodeReq := httptest.NewRequest(
 		"POST",
 		"/api/v1/playback/transcode/start",
-		strings.NewReader(`{"session_id":"`+startResp.SessionID+`","seek_seconds":0,"target_resolution":"720p","target_codec_video":"h264","target_codec_audio":"aac","target_bitrate_kbps":2000,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
+		strings.NewReader(`{"session_id":"`+startResp.SessionID+`","seek_seconds":0,"target_resolution":"2160p","target_codec_video":"h264","target_codec_audio":"aac","target_bitrate_kbps":10000,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
 	)
 	transcodeReq = transcodeReq.WithContext(newAuthorizedPlaybackContext())
 
@@ -2029,6 +2123,22 @@ func TestHandleStartTranscode_LocalPathPropagatesSelectedAudioTrack(t *testing.T
 	})
 	if got := transcodeSession.Opts().AudioTrackIndex; got != 1 {
 		t.Fatalf("local transcode audio track index = %d, want 1", got)
+	}
+	if got := transcodeSession.Opts().TargetResolution; got != transcodeResolution1080p {
+		t.Fatalf("local target resolution = %q, want 1080p", got)
+	}
+	if got := transcodeSession.Opts().TargetBitrateKbps; got != 10000 {
+		t.Fatalf("local target bitrate = %d, want unchanged 10000", got)
+	}
+	session, err := sessionMgr.GetSession(startResp.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if session.TargetResolution != transcodeResolution1080p {
+		t.Fatalf("session target resolution = %q, want 1080p", session.TargetResolution)
+	}
+	if session.TargetBitrateKbps != 10000 {
+		t.Fatalf("session target bitrate = %d, want unchanged 10000", session.TargetBitrateKbps)
 	}
 }
 
@@ -2400,7 +2510,7 @@ func TestHandleStartTranscode_SeekedCopyPreservedOnRemoteNode(t *testing.T) {
 	transcodeReq := httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/playback/transcode/start",
-		strings.NewReader(`{"session_id":"`+session.ID+`","seek_seconds":18.261,"target_resolution":"","target_codec_video":"copy","target_codec_audio":"aac","target_bitrate_kbps":0,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
+		strings.NewReader(`{"session_id":"`+session.ID+`","seek_seconds":18.261,"target_resolution":"2160p","target_codec_video":"copy","target_codec_audio":"aac","target_bitrate_kbps":0,"segment_duration":2,"subtitle_track_index":-1,"subtitle_burn_in":false}`),
 	).WithContext(newAuthorizedPlaybackContext())
 	transcodeRR := httptest.NewRecorder()
 	handler.HandleStartTranscode(transcodeRR, transcodeReq)
@@ -2410,6 +2520,9 @@ func TestHandleStartTranscode_SeekedCopyPreservedOnRemoteNode(t *testing.T) {
 	if remoteStartReq.TargetCodecVideo != "copy" || remoteStartReq.SeekSeconds != 18.261 ||
 		remoteStartReq.StreamOriginSeconds != 16 || !remoteStartReq.CopySeekAnchorResolved || remoteStartReq.StartSegmentNumber != 8 {
 		t.Fatalf("remote copy recipe = codec %q seek %v origin %v segment %d", remoteStartReq.TargetCodecVideo, remoteStartReq.SeekSeconds, remoteStartReq.StreamOriginSeconds, remoteStartReq.StartSegmentNumber)
+	}
+	if remoteStartReq.TargetResolution != transcodeResolution2160p {
+		t.Fatalf("remote copy target resolution = %q, want unchanged 2160p", remoteStartReq.TargetResolution)
 	}
 	if !strings.HasPrefix(remoteStartReq.SessionID, session.ID+legacyTransportMarker) {
 		t.Fatalf("remote SessionID = %q, want legacy transport for %q", remoteStartReq.SessionID, session.ID)
@@ -2904,6 +3017,9 @@ func TestHandleStartTranscode_SeekedCopyAllowedWhenVideoTranscodingDisabled(t *t
 	if got := transcodeSession.Opts().TargetCodecVideo; got != "copy" {
 		t.Fatalf("target video codec = %q, want copy", got)
 	}
+	if got := transcodeSession.Opts().TargetResolution; got != "" {
+		t.Fatalf("copy-video target resolution = %q, want existing empty recipe", got)
+	}
 }
 
 func TestHandleStartTranscode_SubtitleBurnInRechecksVideoTranscodePermission(t *testing.T) {
@@ -3366,6 +3482,127 @@ func TestFindAlternateFile_DoesNotCrossEdition(t *testing.T) {
 	}
 	if alternate.ID != 3 {
 		t.Fatalf("alternate.ID = %d, want 3", alternate.ID)
+	}
+}
+
+func TestClampEncodedTargetResolution(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested string
+		source    string
+		want      string
+	}{
+		{
+			name:      "clamps 2160p to 1080p",
+			requested: transcodeResolution2160p,
+			source:    transcodeResolution1080p,
+			want:      transcodeResolution1080p,
+		},
+		{
+			name:      "keeps lower target",
+			requested: transcodeResolution720p,
+			source:    transcodeResolution1080p,
+			want:      transcodeResolution720p,
+		},
+		{
+			name:      "keeps equal target",
+			requested: transcodeResolution1080p,
+			source:    transcodeResolution1080p,
+			want:      transcodeResolution1080p,
+		},
+		{
+			name:      "keeps empty target",
+			requested: "",
+			source:    transcodeResolution1080p,
+			want:      "",
+		},
+		{
+			name:      "keeps unknown target",
+			requested: "unrecognized-target",
+			source:    transcodeResolution1080p,
+			want:      "unrecognized-target",
+		},
+		{
+			name:      "keeps target for unknown source",
+			requested: transcodeResolution2160p,
+			source:    "native",
+			want:      transcodeResolution2160p,
+		},
+		{
+			name:      "supports low tiers",
+			requested: transcodeResolution480p,
+			source:    transcodeResolution420p,
+			want:      transcodeResolution420p,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampEncodedTargetResolution(tt.requested, tt.source); got != tt.want {
+				t.Fatalf(
+					"clampEncodedTargetResolution(%q, %q) = %q, want %q",
+					tt.requested,
+					tt.source,
+					got,
+					tt.want,
+				)
+			}
+		})
+	}
+}
+
+func TestTranscodeResolutionHeight(t *testing.T) {
+	tests := []struct {
+		resolution string
+		wantHeight int
+		wantKnown  bool
+	}{
+		{resolution: transcodeResolution2160p, wantHeight: 2160, wantKnown: true},
+		{resolution: transcodeResolution1080p, wantHeight: 1080, wantKnown: true},
+		{resolution: transcodeResolution720p, wantHeight: 720, wantKnown: true},
+		{resolution: transcodeResolution480p, wantHeight: 480, wantKnown: true},
+		{resolution: transcodeResolution420p, wantHeight: 420, wantKnown: true},
+		{resolution: transcodeResolution328p, wantHeight: 328, wantKnown: true},
+		{resolution: "unrecognized-tier", wantHeight: 0, wantKnown: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.resolution, func(t *testing.T) {
+			gotHeight, gotKnown := transcodeResolutionHeight(tt.resolution)
+			if gotHeight != tt.wantHeight || gotKnown != tt.wantKnown {
+				t.Fatalf(
+					"transcodeResolutionHeight(%q) = (%d, %t), want (%d, %t)",
+					tt.resolution,
+					gotHeight,
+					gotKnown,
+					tt.wantHeight,
+					tt.wantKnown,
+				)
+			}
+		})
+	}
+}
+
+func TestResolutionRank(t *testing.T) {
+	tests := []struct {
+		resolution string
+		want       int
+	}{
+		{resolution: transcodeResolution2160p, want: 4},
+		{resolution: transcodeResolution1080p, want: 3},
+		{resolution: transcodeResolution720p, want: 2},
+		{resolution: transcodeResolution480p, want: 1},
+		{resolution: transcodeResolution420p, want: 0},
+		{resolution: transcodeResolution328p, want: 0},
+		{resolution: "unrecognized-tier", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.resolution, func(t *testing.T) {
+			if got := resolutionRank(tt.resolution); got != tt.want {
+				t.Fatalf("resolutionRank(%q) = %d, want %d", tt.resolution, got, tt.want)
+			}
+		})
 	}
 }
 
