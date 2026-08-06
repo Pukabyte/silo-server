@@ -53,9 +53,9 @@ func (s *Scanner) ScanEbookFolder(ctx context.Context, folder *models.MediaFolde
 type ebookRootScan struct {
 	root         string
 	files        []string
-	fileOnly     bool  // explicit single-file scan; index it but never reconcile a subtree
-	rootErr      error // root stat failed, or the root is not a directory
-	walkFailures int   // entries within the subtree the walk could not read or resolve
+	fileOnly     bool     // explicit single-file scan; index it but never reconcile a subtree
+	rootErr      error    // root stat failed, or the root is not a directory
+	walkFailures []string // logical paths within the subtree the walk could not read or resolve
 }
 
 // failed reports whether the walk under this root is known to be incomplete.
@@ -64,7 +64,7 @@ type ebookRootScan struct {
 // a mid-walk subtree error) must not cascade into marking — and, with
 // empty_trash_after_scan, deleting — everything under it.
 func (r *ebookRootScan) failed() bool {
-	return r.rootErr != nil || r.walkFailures > 0
+	return r.rootErr != nil || len(r.walkFailures) > 0
 }
 
 // collectEbookRootScans walks every configured root with the shared
@@ -104,7 +104,7 @@ func collectEbookRootScans(ctx context.Context, folderID int, roots []string) ([
 			slog.WarnContext(ctx, "ebook scan: root walk incomplete; root excluded from missing-file reconciliation", "component", "scanner",
 				"folder_id", folderID,
 				"root", cleanRoot,
-				"walk_failures", scan.walkFailures,
+				"walk_failures", len(scan.walkFailures),
 				"error", scan.rootErr,
 			)
 		}
@@ -166,8 +166,8 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 		processed int64
 		failed    int64
 		skipped   int64
-		failMu    sync.Mutex
-		failures  []error
+		cancelMu  sync.Mutex
+		failures  scanFailures
 		cancelErr error
 	)
 	start := time.Now()
@@ -181,17 +181,15 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 				}
 				if err := s.reconcileEbookFile(ctx, folder, path, &skipped, groupLocks); err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						failMu.Lock()
+						cancelMu.Lock()
 						if cancelErr == nil {
 							cancelErr = err
 						}
-						failMu.Unlock()
+						cancelMu.Unlock()
 						return
 					}
 					atomic.AddInt64(&failed, 1)
-					failMu.Lock()
-					failures = append(failures, fmt.Errorf("%s: %w", path, err))
-					failMu.Unlock()
+					failures.addf("%s: %w", path, err)
 					slog.WarnContext(ctx, "ebook scan: file failed", "component", "scanner",
 						"folder_id", folder.ID,
 						"path", path,
@@ -245,7 +243,7 @@ func (s *Scanner) scanEbookPaths(ctx context.Context, folder *models.MediaFolder
 		failedCount := atomic.LoadInt64(&failed)
 		skippedCount := atomic.LoadInt64(&skipped)
 		if failedCount > 0 && skippedCount == 0 && failedCount == processedCount {
-			return fmt.Errorf("ebook scan failed for every attempted folder_id=%d: %w", folder.ID, errors.Join(failures...))
+			return fmt.Errorf("ebook scan failed for every attempted folder_id=%d: %w", folder.ID, failures.join())
 		}
 	}
 

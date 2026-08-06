@@ -56,7 +56,7 @@ import type {
   SeriesContext,
   SubtitleMode,
 } from "../types";
-import { toMediaTime, toPlayerTime } from "../utils/mediaTimeline";
+import { mediaDurationSeconds, toMediaTime, toPlayerTime } from "../utils/mediaTimeline";
 import {
   copyWatchTogetherInvite,
   endWatchTogetherRoom,
@@ -105,6 +105,8 @@ interface VideoPlayerProps {
   seriesContext?: SeriesContext;
   onNavigateEpisode?: (contentId: string) => void;
   qualityPreference?: string | null;
+  /** Bandwidth cap in kbps from playback.max_bitrate_kbps; null/undefined is uncapped. */
+  maxBitrateKbps?: number | null;
   onRefreshSubtitles?: () => void;
   audioTracks?: PlayerAudioTrack[];
   activeAudioIndex?: number;
@@ -195,6 +197,7 @@ export function VideoPlayer({
   seriesContext,
   onNavigateEpisode,
   qualityPreference,
+  maxBitrateKbps,
   onRefreshSubtitles,
   audioTracks = [],
   activeAudioIndex = 0,
@@ -340,6 +343,7 @@ export function VideoPlayer({
     playMethod,
     initialPosition,
     qualityPreference,
+    maxBitrateKbps,
     transportRestart,
   });
   const { cancelPendingTranscodeStart, startupGeneration } = transcodeQuality;
@@ -744,12 +748,8 @@ export function VideoPlayer({
   const buildExitState = useCallback((): PlaybackExitState => {
     const video = videoRef.current;
     const positionSeconds = toMediaTime(video?.currentTime ?? currentTime, streamOriginRef.current);
-    const durationSeconds =
-      duration > 0
-        ? duration
-        : backendDurationRef.current > 0
-          ? backendDurationRef.current
-          : undefined;
+    // positionSeconds is media time, so the runtime paired with it must be too.
+    const durationSeconds = mediaDurationSeconds(backendDurationRef.current, duration);
 
     return {
       positionSeconds,

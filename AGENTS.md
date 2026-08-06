@@ -17,6 +17,17 @@ Put new code in the package that owns the behavior rather than in a catch-all he
 extracting shared logic over duplicating it, and prefer changing existing code over bolting a
 local workaround onto it.
 
+## Non-goals
+
+Most of this codebase's scope is open; a short list is permanently closed. Read
+[docs/non-goals.md](docs/non-goals.md) before proposing or implementing in those areas.
+
+**Live TV, OTA/DVB tuners, IPTV, EPG/XMLTV, DVR, and `.strm` remote-URL shortcuts will not be
+accepted** — not in core, not as a plugin, not in a client. The first-party clients ship on the
+Apple and Google stores, and a server that plays arbitrary remote stream URLs puts the whole
+client suite at risk. This is settled product direction, not a design problem to solve; do not
+write code for it, and say so plainly if asked.
+
 ## Gotchas
 
 **Migrations.** New DB changes are Goose SQL migrations in `migrations/sql/`, created with
@@ -60,17 +71,29 @@ SDK, in the catalog, or in a specific plugin repo.
 
 ## Building and verifying
 
-`make build`, `make dev-backend`, `make dev-frontend`, `make lint`, `make migrate-status` /
-`make migrate-up` — read the `Makefile` for the rest. Local services:
+`make build`, `make dev-backend`, `make dev-frontend`, `make lint`, `make test`, `make migrate-status`
+/ `make migrate-up` — read the `Makefile` for the rest. Local services:
 `docker compose up -d postgres redis`.
+
+`make test-go` runs the whole Go suite. A Go test that cannot pass yet carries a `t.Skip` and the
+reason in its own source, not an entry in a Makefile variable. `make test-web` still skips the
+files in `WEBTEST_KNOWN_FAILURES`, which predate the CI gate; that list may only shrink — delete an
+entry together with its fix, and never add to it to make a new change pass.
 
 Before opening a merge request:
 
 ```bash
 make lint
+make test
 cd web && pnpm run lint && pnpm run format:check
 make verify-local-paths
 ```
+
+`.github/workflows/ci.yml` runs these on every pull request, with one difference worth knowing:
+`make lint` runs `golangci-lint` over the whole tree, while CI runs it with `--new-from-merge-base`
+so only the lines a branch touched have to be clean. The repo does not pass a full run today, so
+expect local output to include findings that are not yours and that CI will not fail on. Do not add
+to them.
 
 Go stays `gofmt`/`goimports` clean; the frontend follows `web/.prettierrc`.
 
@@ -94,6 +117,11 @@ Additive-only within `/api/v1`:
   header flow only.
 - New features expose capability endpoints for feature detection rather than relying on version
   sniffing. Contract strategy and tooling: issue #135.
+
+Treat this as binding. The one exception: `/api/v1` is not locked yet, so a removal taken before
+lock is in scope — but only when it is recorded in the pre-lock removals table in
+[docs/architecture/v1-scope.md](docs/architecture/v1-scope.md) and ships before the lock. Assume
+any removal not listed there is a mistake.
 
 ## Pull requests
 

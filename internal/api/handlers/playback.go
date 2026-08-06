@@ -30,6 +30,9 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/settingscontract"
+	"github.com/Silo-Server/silo-server/internal/settingskeys"
+	"github.com/Silo-Server/silo-server/internal/settingsresolve"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/subtitles"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
@@ -459,7 +462,7 @@ type changeAudioResponse struct {
 	PlaybackInfo          *playbackInfoResult `json:"playback_info,omitempty"`
 }
 
-func (resp *changeAudioResponse) setCopyTimeline(position, origin float64) {
+func (resp *changeAudioResponse) setWindowedTimeline(position, origin float64) {
 	playerStart := max(0, position-origin)
 	canSeekAnywhere := false
 	resp.PlayerStartSeconds = &playerStart
@@ -530,10 +533,20 @@ func canSeekAnywhere(req transcodeStartRequest, file *models.MediaFile) bool {
 	if file == nil || file.Duration <= 0 {
 		return false
 	}
-	// Copy-video HLS sessions use FFmpeg's real manifest so the player only
-	// seeks within the currently exposed window. Out-of-window seeks should
-	// restart explicitly instead of relying on segment 404s to move FFmpeg.
-	return !strings.EqualFold(req.TargetCodecVideo, "copy")
+	return !usesRealTranscodeManifest(req, file)
+}
+
+func usesRealTranscodeManifest(req transcodeStartRequest, file *models.MediaFile) bool {
+	durationSeconds := 0.0
+	if file != nil {
+		durationSeconds = float64(file.Duration)
+	}
+	// Copy-video, unknown-duration, and oversized HLS sessions use FFmpeg's
+	// real manifest so the player only seeks within the currently exposed
+	// window. Out-of-window seeks should restart explicitly instead of relying
+	// on segment 404s to move FFmpeg.
+	return strings.EqualFold(req.TargetCodecVideo, "copy") ||
+		!playback.CanGenerateSyntheticManifest(durationSeconds, req.SegmentDuration)
 }
 
 func buildTranscodeStartResponse(
@@ -1211,6 +1224,34 @@ func (h *PlaybackHandler) resolveOriginalLanguage(ctx context.Context, file *mod
 	return lang
 }
 
+// resolvedProfileAudioLanguage returns the effective playback.audio_language
+// for the profile with no content context, resolved through the settings
+// contract — the canonical replacement for reading the legacy
+// user_profiles.language column, matching catalog's detail resolution. It may
+// return playback.OriginalLanguageSentinel, which the caller resolves to a
+// concrete language. Returns "" when nothing is stored: the contract default
+// is null, "no preference".
+func resolvedProfileAudioLanguage(ctx context.Context, store userstore.UserStore, profileID string) string {
+	if store == nil || profileID == "" {
+		return ""
+	}
+	contract, err := settingscontract.Load()
+	if err != nil {
+		return ""
+	}
+	resolved, err := settingsresolve.New(contract).Resolve(ctx, store,
+		settingsresolve.Context{ProfileID: profileID},
+		[]string{settingskeys.PlaybackAudioLanguage}, nil)
+	if err != nil || len(resolved) == 0 {
+		return ""
+	}
+	var language string
+	if json.Unmarshal(resolved[0].Value, &language) != nil {
+		return ""
+	}
+	return strings.TrimSpace(language)
+}
+
 func (h *PlaybackHandler) restoreSessionProgress(
 	ctx context.Context,
 	session *playback.Session,
@@ -1715,9 +1756,7 @@ func (h *PlaybackHandler) handleStartPlaybackLegacy(w http.ResponseWriter, r *ht
 			if seriesPref != nil && seriesPref.AudioLanguage == playback.OriginalLanguageSentinel {
 				seriesPref.AudioLanguage = h.resolveOriginalLanguage(r.Context(), file)
 			}
-			if profile, profErr := store.GetProfile(r.Context(), profileID); profErr == nil && profile != nil {
-				preferredLang = profile.Language
-			}
+			preferredLang = resolvedProfileAudioLanguage(r.Context(), store, profileID)
 
 			// Resolve library override (if no series sticky pref exists).
 			var libraryAudioLang string
@@ -2340,8 +2379,16 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 	restartStartSegment := computeStartSegment(restartSeekSeconds, restartSegmentDuration)
 	restartStreamOriginSeconds := 0.0
 	restartCopyAnchorResolved := false
-	legacyCopyRestart := session.PlayMethod == playback.PlayTranscode &&
-		strings.EqualFold(targetVideoCodec, "copy") && isLegacyTransportSession(session)
+	restartManifestRequest := transcodeStartRequest{
+		TargetCodecVideo: targetVideoCodec,
+		SegmentDuration:  restartSegmentDuration,
+	}
+	legacyWindowedRestart := session.PlayMethod == playback.PlayTranscode &&
+		isLegacyTransportSession(session) && usesRealTranscodeManifest(restartManifestRequest, file)
+	if legacyWindowedRestart {
+		restartStreamOriginSeconds = restartSeekSeconds
+	}
+	legacyCopyRestart := legacyWindowedRestart && strings.EqualFold(targetVideoCodec, "copy")
 	if legacyCopyRestart {
 		restartCopyAnchorResolved = true
 		if req.Position > 0 {
@@ -2609,8 +2656,12 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 				}
 				// A v3 DV strip remux carries its bitstream filter in the
 				// durable session route; dropping it here would hand the node
-				// a DV7 copy recipe that leaves dangling RPUs.
-				if updatedSession.RemuxDVMode == playback.RemuxDVStripToHDR10V3 && strings.EqualFold(nodeReq.TargetCodecVideo, "copy") {
+				// a DV7 copy recipe that leaves dangling RPUs. Sources that
+				// fail the RPU probe are the exception — for them the filter
+				// rejects every packet, so re-adding it on an audio switch
+				// would hang a session that was playing a moment ago.
+				if updatedSession.RemuxDVMode == playback.RemuxDVStripToHDR10V3 && strings.EqualFold(nodeReq.TargetCodecVideo, "copy") &&
+					playback.DVRPUStrippable(r.Context(), h.playbackConfig().FFmpegPath, file.FilePath) {
 					nodeReq.VideoBitstreamFilter = playback.DV7ToHDR10BitstreamFilter
 				}
 
@@ -2746,8 +2797,8 @@ func (h *PlaybackHandler) HandleChangeAudioTrack(w http.ResponseWriter, r *http.
 		}
 		h.persistAudioPreference(r.Context(), userID, session.ProfileID, file, req.AudioTrackIndex)
 	}
-	if legacyCopyRestart {
-		resp.setCopyTimeline(req.Position, restartStreamOriginSeconds)
+	if legacyWindowedRestart {
+		resp.setWindowedTimeline(req.Position, restartStreamOriginSeconds)
 	}
 
 	h.syncSessionsNow(r.Context(), "audio_change")
@@ -3100,10 +3151,21 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 	// for "copy" has no way to know the source needs the strip. Derived after
 	// the burn-in guard above so a copy request it rewrites to h264 never carries
 	// a copy-only bitstream filter.
+	//
+	// Gated on the per-source probe for the same reason the planner is: a
+	// source whose RPU ffmpeg cannot parse turns the filter into a per-packet
+	// rejection that never produces a segment, and this endpoint would
+	// otherwise put it back on every quality change, seek and burn-in restart
+	// of a session the planner had already routed away from it.
 	videoBitstreamFilter := ""
 	if strings.EqualFold(req.TargetCodecVideo, "copy") &&
 		(session.RemuxDVMode == playback.RemuxDVStripToHDR10V3 || file.PrimaryDVProfile() == 7) {
-		videoBitstreamFilter = playback.DV7ToHDR10BitstreamFilter
+		if playback.DVRPUStrippable(r.Context(), h.playbackConfig().FFmpegPath, file.FilePath) {
+			videoBitstreamFilter = playback.DV7ToHDR10BitstreamFilter
+		} else {
+			slog.WarnContext(r.Context(), "restart dropped the dolby vision rpu strip: source cannot be stripped",
+				"component", "api", "playback_session_id", req.SessionID, "file_id", file.ID)
+		}
 	}
 
 	// The request-level permission check above intentionally runs before the
@@ -3133,6 +3195,9 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 			file = h.ensurePlaybackProbe(r.Context(), file)
 			switchedFileID = &alt.ID
 		}
+	}
+	if !videoCopy {
+		req.TargetResolution = clampEncodedTargetResolution(req.TargetResolution, file.Resolution)
 	}
 	if requestedFile != nil && file != nil && requestedFile.ID != file.ID {
 		if err := preflightPlaybackFile(r.Context(), requestedFile, h.MissingMarker, h.EventsHub); err != nil && !isPlaybackFileMissing(err) {
@@ -3184,6 +3249,9 @@ func (h *PlaybackHandler) HandleStartTranscode(w http.ResponseWriter, r *http.Re
 	transportSeekSeconds := alignedSeekSeconds(req.SeekSeconds, req.SegmentDuration, req.TargetCodecVideo)
 	startSegmentNumber := computeStartSegment(transportSeekSeconds, req.SegmentDuration)
 	streamOriginSeconds := 0.0
+	if usesRealTranscodeManifest(req, file) {
+		streamOriginSeconds = transportSeekSeconds
+	}
 	if videoCopy {
 		streamOriginSeconds = req.SeekSeconds
 		if req.SeekSeconds > 0 {
@@ -3921,20 +3989,60 @@ func (h *PlaybackHandler) findAlternateFile(ctx context.Context, source *models.
 	return candidates[0], nil
 }
 
+const (
+	transcodeResolution2160p = "2160p"
+	transcodeResolution1080p = "1080p"
+	transcodeResolution720p  = "720p"
+	transcodeResolution480p  = "480p"
+	transcodeResolution420p  = "420p"
+	transcodeResolution328p  = "328p"
+)
+
 // resolutionRank returns a numeric rank for resolution sorting.
 func resolutionRank(res string) int {
-	switch res {
-	case "2160p":
-		return 4
-	case "1080p":
-		return 3
-	case "720p":
-		return 2
-	case "480p":
-		return 1
-	case "328p":
+	height, known := transcodeResolutionHeight(res)
+	if !known {
 		return 0
+	}
+
+	switch {
+	case height >= 2160:
+		return 4
+	case height >= 1080:
+		return 3
+	case height >= 720:
+		return 2
+	case height >= 480:
+		return 1
 	default:
 		return 0
+	}
+}
+
+func clampEncodedTargetResolution(requestedResolution, sourceResolution string) string {
+	requestedHeight, requestedKnown := transcodeResolutionHeight(requestedResolution)
+	sourceHeight, sourceKnown := transcodeResolutionHeight(sourceResolution)
+	if !requestedKnown || !sourceKnown || requestedHeight <= sourceHeight {
+		return requestedResolution
+	}
+	return sourceResolution
+}
+
+func transcodeResolutionHeight(resolution string) (int, bool) {
+	switch resolution {
+	case transcodeResolution2160p:
+		return 2160, true
+	case transcodeResolution1080p:
+		return 1080, true
+	case transcodeResolution720p:
+		return 720, true
+	case transcodeResolution480p:
+		return 480, true
+	case transcodeResolution420p:
+		return 420, true
+	case transcodeResolution328p:
+		return 328, true
+	default:
+		return 0, false
 	}
 }
