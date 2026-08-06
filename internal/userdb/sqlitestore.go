@@ -346,6 +346,14 @@ func (s *SQLiteUserStore) ListDevices(_ context.Context) ([]userstore.DeviceEntr
 	return ListDevices(s.db)
 }
 
+func (s *SQLiteUserStore) DeviceExists(_ context.Context, profileID, deviceID string) (bool, error) {
+	return DeviceExists(s.db, profileID, deviceID)
+}
+
+func (s *SQLiteUserStore) ForgetDevice(_ context.Context, profileID, deviceID string) error {
+	return ForgetDevice(s.db, profileID, deviceID)
+}
+
 func (s *SQLiteUserStore) SetDeviceSetting(_ context.Context, entry userstore.DeviceSettingEntry) error {
 	return SetDeviceSetting(s.db, entry)
 }
@@ -456,6 +464,10 @@ func (s *SQLiteUserStore) ListAllSettingValues(_ context.Context) ([]userstore.S
 
 func (s *SQLiteUserStore) UpsertSettingValue(_ context.Context, id userstore.SettingIdentity, value json.RawMessage) (*userstore.SettingValue, error) {
 	return UpsertSettingValue(s.db, id, value)
+}
+
+func (s *SQLiteUserStore) CompareAndSetSettingValue(ctx context.Context, id userstore.SettingIdentity, value json.RawMessage, expectedRevision int64) (*userstore.SettingValue, error) {
+	return CompareAndSetSettingValue(ctx, s.db, id, value, expectedRevision)
 }
 
 func (s *SQLiteUserStore) DeleteSettingValue(_ context.Context, id userstore.SettingIdentity) (bool, error) {
