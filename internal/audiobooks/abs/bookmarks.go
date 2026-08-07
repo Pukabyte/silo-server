@@ -9,6 +9,8 @@ import (
 // bookmarks handlers need. Implemented by ABSBookmarkStore in
 // internal/audiobooks/abs_bookmark_store.go.
 type BookmarkStore interface {
+	// ListByUser returns every bookmark for a profile, newest first.
+	ListByUser(ctx context.Context, userID, profileID string) ([]Bookmark, error)
 	// List returns all bookmarks for (user, profile, item) ordered by
 	// time ASC. Returns an empty slice (never nil) when none exist.
 	List(ctx context.Context, userID, profileID, itemID string) ([]Bookmark, error)

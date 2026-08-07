@@ -244,12 +244,19 @@ func (h *Handler) handleItemsInProgress(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	items := make([]any, 0, len(candidates))
+	libs, _ := h.deps.MediaStore.ListAudiobookLibraries(r.Context(), access)
 	for _, candidate := range candidates {
 		si := byID[candidate.contentID]
 		if si == nil {
 			continue
 		}
-		lib := h.resolveLibraryForItem(r.Context(), si.Type, access)
+		lib := resolveFallbackLibrary(si.Type)
+		for _, candidateLib := range libs {
+			if (si.Type == "ebook" && (candidateLib.Type == "ebook" || candidateLib.Type == "ebooks")) || (si.Type == "audiobook" && candidateLib.Type != "ebook" && candidateLib.Type != "ebooks") {
+				lib = candidateLib
+				break
+			}
+		}
 		entry := siloItemToLibraryItem(si, lib, baseURL)
 		if si.Type == "ebook" {
 			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), si.ContentID, access); err == nil {

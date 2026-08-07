@@ -131,14 +131,34 @@ func (h *Handler) buildFilterData(r *http.Request, lib AudiobookLibrary) map[str
 			seriesObjs = append(seriesObjs, SeriesObj{ID: s.ID, Name: s.Name})
 		}
 	}
+	genres := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryGenres(ctx, lib.ID, access); err == nil && rows != nil {
+		genres = rows
+	}
+	// Narrators describe audio performance. Ebook libraries intentionally leave
+	// this filter empty even if a legacy item happens to carry that credit.
+	narrators := []string{}
+	if lib.Type != "ebook" && lib.Type != "ebooks" {
+		if rows, err := h.deps.MediaStore.ListLibraryNarrators(ctx, lib.ID, access); err == nil && rows != nil {
+			narrators = rows
+		}
+	}
+	publishers := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryPublishers(ctx, lib.ID, access); err == nil && rows != nil {
+		publishers = rows
+	}
+	languages := []string{}
+	if rows, err := h.deps.MediaStore.ListLibraryLanguages(ctx, lib.ID, access); err == nil && rows != nil {
+		languages = rows
+	}
 
 	return map[string]any{
 		"authors":    authorObjs,
 		"series":     seriesObjs,
-		"narrators":  []string{},
-		"genres":     []string{},
-		"publishers": []string{},
-		"languages":  []string{},
+		"narrators":  narrators,
+		"genres":     genres,
+		"publishers": publishers,
+		"languages":  languages,
 		"tags":       []string{},
 	}
 }
@@ -222,21 +242,7 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 	baseURL := h.absBaseURL(r)
 	all := make([]LibraryItem, 0, len(items))
 	for _, item := range items {
-		entry := siloItemToLibraryItem(item, lib, baseURL)
-		if item.Type == "ebook" {
-			// ABS includes ebookFormat in minified browse results. Still uses
-			// that field (not just the detail-only ebookFile) to select its
-			// reader and label the primary action “Read”.
-			if files, err := h.deps.MediaStore.GetMediaFiles(r.Context(), item.ContentID, access); err == nil {
-				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(r.Context(), item.ContentID)
-				if primaryErr == nil {
-					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
-				} else {
-					entry = siloEbookToLibraryItemDetail(entry, files, 0, false, false)
-				}
-			}
-		}
-		all = append(all, entry)
+		all = append(all, siloItemToLibraryItem(item, lib, baseURL))
 	}
 
 	// Local filter (post-fetch) — only for filters not pushed into SQL.
@@ -271,6 +277,11 @@ func (h *Handler) handleLibraryItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pageSlice := collapsed[pageStart:pageEnd]
+	for i := range pageSlice {
+		if lib.Type == "ebook" || lib.Type == "ebooks" {
+			pageSlice[i] = h.enrichEbookLibraryItem(r.Context(), pageSlice[i], access)
+		}
+	}
 
 	// Serialise.
 	var results any
@@ -607,12 +618,8 @@ func (h *Handler) handleLibrarySearch(w http.ResponseWriter, r *http.Request) {
 
 // handlePersonalized — GET /abs/api/libraries/{id}/personalized
 //
-// Emits the canonical six-shelf Home tab payload that ABS mobile clients
-// expect: continue-listening, continue-series, newest, recent-series,
-// discover, listen-again. Shelves we don't yet populate (continue-series,
-// listen-again) ship with empty entities/total — the client iterates the
-// shelf list by id and skips empties cleanly, but it crashes on a missing
-// shelf id. Matches continuum-plugin-audiobooks/handlePersonalized layout.
+// Emits populated Audiobookshelf-compatible Home shelves. Upstream omits a
+// shelf when there is no data; it does not send permanent empty placeholders.
 func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 	lib, ok := h.resolveLibrary(w, r)
 	if !ok {
@@ -635,23 +642,21 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	shelves := []map[string]any{
-		{"id": "continue-listening", "label": "Continue Listening", "labelStringKey": "LabelContinueListening", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "continue-series", "label": "Continue Series", "labelStringKey": "LabelContinueSeries", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "newest", "label": "Newest", "labelStringKey": "LabelNewest", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "recent-series", "label": "Recent Series", "labelStringKey": "LabelRecentSeries", "type": "series", "entities": []any{}, "total": 0},
-		{"id": "discover", "label": "Discover", "labelStringKey": "LabelDiscover", "type": "book", "entities": []any{}, "total": 0},
-		{"id": "listen-again", "label": "Listen Again", "labelStringKey": "LabelListenAgain", "type": "book", "entities": []any{}, "total": 0},
+	isEbook := lib.Type == "ebook" || lib.Type == "ebooks"
+	continueID, continueLabel, continueKey := "continue-listening", "Continue Listening", "LabelContinueListening"
+	againID, againLabel, againKey := "listen-again", "Listen Again", "LabelListenAgain"
+	if isEbook {
+		continueID, continueLabel, continueKey = "continue-reading", "Continue Reading", "LabelContinueReading"
+		againID, againLabel, againKey = "read-again", "Read Again", "LabelReadAgain"
 	}
+	shelves := make([]map[string]any, 0, 5)
 
 	if items, err := h.deps.MediaStore.ListContinueListening(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[0]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
-		shelves[0]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": continueID, "label": continueLabel, "labelStringKey": continueKey, "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	if items, err := h.deps.MediaStore.ListRecentlyAdded(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[2]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
-		shelves[2]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": "recently-added", "label": "Recently Added", "labelStringKey": "LabelRecentlyAdded", "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	libID := audiobookLibraryID(lib)
@@ -673,34 +678,43 @@ func (h *Handler) handlePersonalized(w http.ResponseWriter, r *http.Request) {
 			obj["books"] = books
 			recent = append(recent, obj)
 		}
-		shelves[3]["entities"] = recent
-		shelves[3]["total"] = len(recent)
+		shelves = append(shelves, map[string]any{"id": "recent-series", "label": "Recent Series", "labelStringKey": "LabelRecentSeries", "type": "series", "entities": recent, "total": len(recent)})
 	}
 
 	if items, err := h.deps.MediaStore.ListDiscover(r.Context(), lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
-		shelves[4]["entities"] = h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access)
-		shelves[4]["total"] = len(items)
+		shelves = append(shelves, map[string]any{"id": "discover", "label": "Discover", "labelStringKey": "LabelDiscover", "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
+	}
+
+	if items, err := h.deps.MediaStore.ListFinished(r.Context(), a.UserID, a.ProfileID, lib.ID, shelfLimit, access); err == nil && len(items) > 0 {
+		shelves = append(shelves, map[string]any{"id": againID, "label": againLabel, "labelStringKey": againKey, "type": "book", "entities": h.minifiedShelfSlice(r.Context(), items, lib, baseURL, access), "total": len(items)})
 	}
 
 	writeJSON(w, http.StatusOK, shelves)
 }
 
-// minifiedSlice converts a batch of MediaItems into ABS Minified entries.
+// minifiedShelfSlice converts a batch of MediaItems into ABS Minified entries.
 func (h *Handler) minifiedShelfSlice(ctx context.Context, items []*models.MediaItem, lib AudiobookLibrary, baseURL string, access catalog.AccessFilter) []MinifiedLibraryItem {
 	out := make([]MinifiedLibraryItem, 0, len(items))
 	for _, it := range items {
 		entry := siloItemToLibraryItem(it, lib, baseURL)
 		if it.Type == "ebook" {
-			if files, err := h.deps.MediaStore.GetMediaFiles(ctx, it.ContentID, access); err == nil {
-				primaryID, configured, hasPrimary, primaryErr := h.ebookPrimary(ctx, it.ContentID)
-				if primaryErr == nil {
-					entry = siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
-				}
-			}
+			entry = h.enrichEbookLibraryItem(ctx, entry, access)
 		}
 		out = append(out, Minify(entry))
 	}
 	return out
+}
+
+func (h *Handler) enrichEbookLibraryItem(ctx context.Context, entry LibraryItem, access catalog.AccessFilter) LibraryItem {
+	files, err := h.deps.MediaStore.GetMediaFiles(ctx, entry.ID, access)
+	if err != nil {
+		return entry
+	}
+	primaryID, configured, hasPrimary, err := h.ebookPrimary(ctx, entry.ID)
+	if err != nil {
+		return siloEbookToLibraryItemDetail(entry, files, 0, false, false)
+	}
+	return siloEbookToLibraryItemDetail(entry, files, primaryID, configured, hasPrimary)
 }
 
 // ---------------------------------------------------------------------------
