@@ -140,12 +140,18 @@ func audioRecipeProbeInfrastructureError(err error) error {
 // satisfies the video_to_h264 transformation.
 var h264EncodersV3 = []string{"libx264", "h264_qsv", "h264_vaapi", "h264_nvenc", "h264_videotoolbox"}
 
-const hevcNVENCEncoderV3 = "hevc_nvenc"
+const (
+	hevcSoftwareEncoderV3     = "libx265"
+	hevcQSVEncoderV3          = "hevc_qsv"
+	hevcVAAPIEncoderV3        = "hevc_vaapi"
+	hevcNVENCEncoderV3        = "hevc_nvenc"
+	hevcVideoToolboxEncoderV3 = "hevc_videotoolbox"
+)
 
 // hevcEncodersV3 lists every HEVC encoder the transcode pipeline can select.
 // The actual FFmpeg invocation still resolves its configured hardware backend;
 // this registry only advertises a target when that backend family exists.
-var hevcEncodersV3 = []string{"libx265", "hevc_qsv", "hevc_vaapi", hevcNVENCEncoderV3, "hevc_videotoolbox"}
+var hevcEncodersV3 = []string{hevcSoftwareEncoderV3, hevcQSVEncoderV3, hevcVAAPIEncoderV3, hevcNVENCEncoderV3, hevcVideoToolboxEncoderV3}
 
 func h264EncoderAvailableV3(encoders []byte) bool {
 	for _, encoder := range h264EncodersV3 {

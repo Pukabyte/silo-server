@@ -320,7 +320,7 @@ func (p DeviceProfile) supportsVideoTranscodingOutput(version catalog.FileVersio
 		if !matchesCSV(profile.AudioCodec, compatTargetAudioCodec) {
 			continue
 		}
-		if (requireExplicitProfile && strings.TrimSpace(profile.Container) == "") || (profile.Container != "" && !matchesCSV(profile.Container, container) && !(container == "ts" && matchesCSV(profile.Container, "mpegts"))) {
+		if (requireExplicitProfile && strings.TrimSpace(profile.Container) == "") || (profile.Container != "" && !matchesCSV(profile.Container, container) && (container != "ts" || !matchesCSV(profile.Container, "mpegts"))) {
 			continue
 		}
 		return true
