@@ -305,7 +305,7 @@ func (p DeviceProfile) supportsVideoTranscodingOutput(version catalog.FileVersio
 			continue
 		}
 		protocol := strings.ToLower(strings.TrimSpace(profile.Protocol))
-		if (requireExplicitProfile && protocol != "hls") || (!requireExplicitProfile && protocol != "" && protocol != "hls") {
+		if (requireExplicitProfile && protocol != compatHLSPathSegment) || (!requireExplicitProfile && protocol != "" && protocol != compatHLSPathSegment) {
 			continue
 		}
 		if maxChannels, _ := strconv.Atoi(profile.MaxAudioChannels); maxChannels > 0 && channels > maxChannels {
@@ -320,7 +320,7 @@ func (p DeviceProfile) supportsVideoTranscodingOutput(version catalog.FileVersio
 		if !matchesCSV(profile.AudioCodec, compatTargetAudioCodec) {
 			continue
 		}
-		if (requireExplicitProfile && strings.TrimSpace(profile.Container) == "") || (profile.Container != "" && !matchesCSV(profile.Container, container)) {
+		if (requireExplicitProfile && strings.TrimSpace(profile.Container) == "") || (profile.Container != "" && !matchesCSV(profile.Container, container) && !(container == "ts" && matchesCSV(profile.Container, "mpegts"))) {
 			continue
 		}
 		return true
@@ -347,7 +347,7 @@ func (p DeviceProfile) SupportsHLSRemuxForAudioStream(version catalog.FileVersio
 		if !matchesVideoType(profile.Type) {
 			continue
 		}
-		if protocol := strings.ToLower(strings.TrimSpace(profile.Protocol)); protocol != "" && protocol != "hls" {
+		if protocol := strings.ToLower(strings.TrimSpace(profile.Protocol)); protocol != "" && protocol != compatHLSPathSegment {
 			continue
 		}
 		if !matchesCSV(profile.Container, "mp4") ||
@@ -394,7 +394,7 @@ func (p DeviceProfile) supportsHLSRemuxWithAudioTranscodeForAudioStream(version 
 		if !matchesVideoType(profile.Type) {
 			continue
 		}
-		if protocol := strings.ToLower(strings.TrimSpace(profile.Protocol)); protocol != "" && protocol != "hls" {
+		if protocol := strings.ToLower(strings.TrimSpace(profile.Protocol)); protocol != "" && protocol != compatHLSPathSegment {
 			continue
 		}
 		if !matchesCSV(profile.Container, "mp4") ||

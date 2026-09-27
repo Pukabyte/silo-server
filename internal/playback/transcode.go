@@ -333,7 +333,7 @@ const (
 func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession, error) {
 	if !validVideoSampleEntry(opts.VideoSampleEntry) ||
 		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") &&
-			!(opts.VideoSampleEntry == VideoSampleEntryHVC1 && strings.EqualFold(opts.TargetCodecVideo, transcodeCodecHEVC)) {
+			(opts.VideoSampleEntry != VideoSampleEntryHVC1 || !strings.EqualFold(opts.TargetCodecVideo, transcodeCodecHEVC)) {
 		return nil, fmt.Errorf("unsupported video sample-entry recipe")
 	}
 	if opts.CopyVideoMPEGTS && !strings.EqualFold(opts.TargetCodecVideo, "copy") {

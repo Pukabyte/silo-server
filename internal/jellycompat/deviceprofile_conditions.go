@@ -13,6 +13,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
+const codecProfileTargetVideo = "video"
+
 type codecProfileCompatibility struct {
 	VideoSupported bool
 	AudioSupported bool
@@ -146,7 +148,7 @@ func hlsRemuxDV8HDR10BaseLayerEligible(version catalog.FileVersion) bool {
 	if codec == "" {
 		codec = strings.ToLower(strings.TrimSpace(version.CodecVideo))
 	}
-	if codec != "hevc" && codec != "h265" ||
+	if codec != compatVideoCodecHEVC && codec != compatVideoCodecH265 ||
 		video.DVProfile != 8 || video.DVBLCompatID != 1 ||
 		!video.DVConfigPresent || !video.DVBLCompatIDPresent || !video.DVBLPresent ||
 		video.DVELPresent ||
@@ -157,7 +159,7 @@ func hlsRemuxDV8HDR10BaseLayerEligible(version catalog.FileVersion) bool {
 	// Match native planning: legacy tracks with no EL field are single-layer
 	// only when no EL is present; an explicit unknown, MEL, or FEL fails closed.
 	switch strings.ToLower(strings.TrimSpace(video.DVEnhancementLayer)) {
-	case "", "none":
+	case "", compatClientNone:
 		return true
 	default:
 		return false
@@ -202,7 +204,7 @@ func (p DeviceProfile) codecProfileCompatibilityWithMatcher(
 			continue
 		}
 		conditionsMatchProfile := conditionsMatch
-		if target == "video" {
+		if target == codecProfileTargetVideo {
 			conditionsMatchProfile = matchConditions
 		}
 		if conditionsMatchProfile(profile.Conditions, values) {

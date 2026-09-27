@@ -1149,6 +1149,8 @@ func replaceVideoTransformationV3(plan *PlanV3, codec string) bool {
 	return false
 }
 
+const hevcMainProfileV3 = "main"
+
 // hlsHEVCOutputSupportedV3 requires the selected HLS executor to name HEVC
 // explicitly and verifies its detailed decoder can handle this server's Main
 // 8-bit SDR output at the chosen dimensions and bitrate. Flat codec lists are
@@ -1161,7 +1163,7 @@ func hlsHEVCOutputSupportedV3(request StartRequestV3, quality QualityResultV3, s
 	}
 	output := source
 	output.VideoCodec = transcodeCodecHEVC
-	output.VideoProfile = "main"
+	output.VideoProfile = hevcMainProfileV3
 	output.BitDepth = 8
 	output.Width = quality.Width
 	output.Height = quality.Height

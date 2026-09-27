@@ -167,3 +167,14 @@ func TestHEVCNegotiationRejectsStaleH264Recipe(t *testing.T) {
 		t.Fatal("HEVC source accepted target-less legacy recipe")
 	}
 }
+
+func TestH264TranscodingAcceptsMPEGTSContainerAlias(t *testing.T) {
+	version := catalog.FileVersion{CodecVideo: "vp9", CodecAudio: "eac3", VideoTracks: []models.VideoTrack{{Codec: "vp9", Width: 1920, Height: 1080}}, AudioTracks: []models.AudioTrack{{Codec: "eac3", Channels: 2}}}
+	profile := DeviceProfile{TranscodingProfiles: []TranscodingProfile{{Type: "Video", Protocol: "hls", Container: "mpegts", VideoCodec: "h264", AudioCodec: "aac"}}}
+	if !profile.supportsTranscodingOutput(version, 2, 4000, "1080p") {
+		t.Fatal("H.264 MPEG-TS profile alias was rejected")
+	}
+	if profile.supportsHEVCTranscodingOutput(version, 2, 4000, "1080p") {
+		t.Fatal("MPEG-TS profile authorized HEVC fMP4 output")
+	}
+}

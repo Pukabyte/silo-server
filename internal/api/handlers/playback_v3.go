@@ -6569,11 +6569,13 @@ func videoBitstreamFilterForPlanV3(plan *playback.PlanV3) string {
 	return ""
 }
 
+const playbackVideoCodecHEVC = "hevc"
+
 func videoSampleEntryForPlanV3(plan *playback.PlanV3) string {
 	if plan == nil {
 		return ""
 	}
-	if plan.Delivery == playback.DeliveryTranscodeHLSV3 && plan.EffectiveRecipe.VideoCodec == "hevc" && plan.EffectiveRecipe.VideoSampleEntry == playback.VideoSampleEntryHVC1 {
+	if plan.Delivery == playback.DeliveryTranscodeHLSV3 && plan.EffectiveRecipe.VideoCodec == playbackVideoCodecHEVC && plan.EffectiveRecipe.VideoSampleEntry == playback.VideoSampleEntryHVC1 {
 		return playback.VideoSampleEntryHVC1
 	}
 	if plan.Delivery != playback.DeliveryRemuxHLSV3 {
