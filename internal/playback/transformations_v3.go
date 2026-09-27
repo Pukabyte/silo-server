@@ -26,6 +26,8 @@ type TransformationRegistryV3 struct {
 	entries map[string]TransformationSpecV3
 }
 
+var errHEVCEncoderUnavailableV3 = errors.New("libx265 encoder unavailable")
+
 // ProbeTransformationRegistryV3 builds a registry without optional tone-map executors.
 func ProbeTransformationRegistryV3(ctx context.Context, ffmpegPath string) *TransformationRegistryV3 {
 	return ProbeTransformationRegistryWithToneMapV3(ctx, ffmpegPath, nil)
@@ -55,11 +57,13 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 	cancelEncoders()
 	normalizeRecipeErr, normalizeRecipeContextErr := probeAudioRecipeFilterV3(ctx, ffmpegPath, "stereo", aacTimestampNormalizeFilterV3)
 	downmixRecipeErr, downmixRecipeContextErr := probeAudioRecipeFilterV3(ctx, ffmpegPath, "5.1", stereoDownmixBoostFilterV3)
+	hevcRecipeErr, hevcRecipeContextErr := probeHEVCRecipeV3(ctx, ffmpegPath, encoders)
 	_, ffmpegErr := exec.LookPath(ffmpegPath)
 	registry := NewTransformationRegistryV3([]TransformationSpecV3{
 		{Name: TransformationServerDV7HDR10V3, RecipeVersion: "1", Available: bytes.Contains(bsfs, []byte("dovi_rpu")), RequiredCapability: "ffmpeg_bsf:dovi_rpu", PromisedDynamicRange: DynamicRangeHDR10V3, ValidatedClaims: DV7ToHDR10ClaimsV3(), TerminalReason: TerminalDVConversionUnsupportedV3},
 		{Name: TransformationAudioToAACV3, RecipeVersion: TransformationAudioToAACRecipeVersionV3, Available: ffmpegErr == nil && bytes.Contains(encoders, []byte(" aac ")) && normalizeRecipeErr == nil && downmixRecipeErr == nil, RequiredCapability: "ffmpeg_encoder:aac+ffmpeg_filter_smoke:timestamp_normalization_and_stereo_downmix_v4", ValidatedClaims: []string{ClaimAudioDecodeV3}, TerminalReason: TerminalAudioConversionUnsupportedV3},
 		{Name: TransformationVideoToH264V3, RecipeVersion: TransformationVideoToH264RecipeVersionV3, Available: ffmpegErr == nil && h264EncoderAvailableV3(encoders), RequiredCapability: "ffmpeg_encoder:h264", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimH264DecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
+		{Name: TransformationVideoToHEVCV3, RecipeVersion: TransformationVideoToHEVCRecipeVersionV3, Available: ffmpegErr == nil && hevcEncoderAvailableV3(encoders) && hevcRecipeErr == nil, RequiredCapability: "ffmpeg_encoder:hevc+ffmpeg_encode_smoke:main_8bit_sdr", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimHEVCDecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: len(toneMapCapabilities) > 0, RequiredCapability: "ffmpeg_filter:hdr_to_sdr_tonemap", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimHDRMetadataRemovedV3, ClaimSDRBT709OutputV3}, TerminalReason: TerminalHDRTranscodeUnsupportedV3},
 	})
 	return registry, errors.Join(
@@ -71,6 +75,8 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 		normalizeRecipeContextErr,
 		audioRecipeProbeInfrastructureError(downmixRecipeErr),
 		downmixRecipeContextErr,
+		hevcRecipeProbeInfrastructureError(hevcRecipeErr),
+		hevcRecipeContextErr,
 	)
 }
 
@@ -90,6 +96,34 @@ func probeAudioRecipeFilterV3(ctx context.Context, ffmpegPath, channelLayout, fi
 	return probeErr, probeContextErr
 }
 
+// probeHEVCRecipeV3 verifies a concrete Main 8-bit SDR encode. libx265 is
+// the software fallback selected by appendVideoArgs, so this proves a server
+// can complete the advertised transformation even when a hardware backend is
+// temporarily unavailable. Hardware-specific readiness remains validated by
+// the transcode backend probe before that backend is selected.
+func probeHEVCRecipeV3(ctx context.Context, ffmpegPath string, encoders []byte) (error, error) {
+	if !bytes.Contains(encoders, []byte("libx265")) {
+		return errHEVCEncoderUnavailableV3, nil
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 3*time.Second)
+	probeErr := exec.CommandContext(probeCtx, ffmpegPath,
+		"-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc2=size=64x64:rate=1",
+		"-frames:v", "1", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1", "-pix_fmt", "yuv420p",
+		"-f", "null", "-",
+	).Run()
+	probeContextErr := probeCtx.Err()
+	cancelProbe()
+	return probeErr, probeContextErr
+}
+
+func hevcRecipeProbeInfrastructureError(err error) error {
+	if errors.Is(err, errHEVCEncoderUnavailableV3) {
+		return nil
+	}
+	return audioRecipeProbeInfrastructureError(err)
+}
+
 // An ordinary non-zero FFmpeg exit means the installed filter graph is not a
 // v3 executor; that is a capability result, not a failed inventory. Process
 // startup failures and caller cancellation still make the registry uncacheable.
@@ -106,8 +140,22 @@ func audioRecipeProbeInfrastructureError(err error) error {
 // satisfies the video_to_h264 transformation.
 var h264EncodersV3 = []string{"libx264", "h264_qsv", "h264_vaapi", "h264_nvenc", "h264_videotoolbox"}
 
+// hevcEncodersV3 lists every HEVC encoder the transcode pipeline can select.
+// The actual FFmpeg invocation still resolves its configured hardware backend;
+// this registry only advertises a target when that backend family exists.
+var hevcEncodersV3 = []string{"libx265", "hevc_qsv", "hevc_vaapi", "hevc_nvenc", "hevc_videotoolbox"}
+
 func h264EncoderAvailableV3(encoders []byte) bool {
 	for _, encoder := range h264EncodersV3 {
+		if bytes.Contains(encoders, []byte(encoder)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hevcEncoderAvailableV3(encoders []byte) bool {
+	for _, encoder := range hevcEncodersV3 {
 		if bytes.Contains(encoders, []byte(encoder)) {
 			return true
 		}

@@ -6083,12 +6083,13 @@ func (h *PlaybackHandler) plannerSettingsV3(ctx context.Context) playback.Planne
 func (h *PlaybackHandler) plannerSettingsV3Result(ctx context.Context) (playback.PlannerSettingsV3, error) {
 	settings := playback.PlannerSettingsV3{TranscodeEnabled: h.playbackConfig().TranscodeEnabled}
 	if h.SettingsRepo != nil {
-		var values [3]string
-		var errs [3]error
+		var values [4]string
+		var errs [4]error
 		keys := [...]string{
 			config.Allow4KTranscodeSettingKey,
 			config.PlaybackTranscodeHardwareToneMapSettingKey,
 			config.PlaybackTranscodeSoftwareToneMapSettingKey,
+			config.PlaybackAllowHEVCEncodingSettingKey,
 		}
 		var group sync.WaitGroup
 		group.Add(len(keys))
@@ -6108,9 +6109,13 @@ func (h *PlaybackHandler) plannerSettingsV3Result(ctx context.Context) (playback
 		if errs[2] != nil {
 			return settings, fmt.Errorf("load software tone-map setting: %w", errs[2])
 		}
+		if errs[3] != nil {
+			return settings, fmt.Errorf("load HEVC encoding setting: %w", errs[3])
+		}
 		settings.Allow4KTranscode = strings.EqualFold(values[0], "true")
 		settings.HardwareToneMapEnabled = strings.EqualFold(values[1], "true")
 		settings.SoftwareToneMapEnabled = strings.EqualFold(values[2], "true")
+		settings.AllowHEVCEncoding = strings.EqualFold(values[3], "true")
 	}
 	return settings, nil
 }
@@ -6565,7 +6570,13 @@ func videoBitstreamFilterForPlanV3(plan *playback.PlanV3) string {
 }
 
 func videoSampleEntryForPlanV3(plan *playback.PlanV3) string {
-	if plan == nil || plan.Delivery != playback.DeliveryRemuxHLSV3 {
+	if plan == nil {
+		return ""
+	}
+	if plan.Delivery == playback.DeliveryTranscodeHLSV3 && plan.EffectiveRecipe.VideoCodec == "hevc" && plan.EffectiveRecipe.VideoSampleEntry == playback.VideoSampleEntryHVC1 {
+		return playback.VideoSampleEntryHVC1
+	}
+	if plan.Delivery != playback.DeliveryRemuxHLSV3 {
 		return ""
 	}
 	if plan.EffectiveRecipe.VideoSampleEntry != "" {

@@ -44,6 +44,23 @@ const (
 	compatPlaybackRouteUnboundCode     = "PlaybackRouteUnbound"
 )
 
+func compatSourceTargetVideoCodec(source PlaybackMediaSource) string {
+	if compatHLSCopiesVideo(source) {
+		return compatCopyCodec
+	}
+	if strings.EqualFold(strings.TrimSpace(source.TargetVideoCodec), compatVideoCodecHEVC) {
+		return compatVideoCodecHEVC
+	}
+	return compatTargetVideoCodec
+}
+
+func compatSourceVideoSampleEntry(source PlaybackMediaSource) string {
+	if compatSourceTargetVideoCodec(source) == compatVideoCodecHEVC {
+		return playback.VideoSampleEntryHVC1
+	}
+	return ""
+}
+
 var errServerBitrateScopeUnavailable = errors.New("stream bitrate policy unavailable")
 var errServerBitrateDirectUnavailable = errors.New("direct playback exceeds server bitrate limit")
 
@@ -287,7 +304,8 @@ func compatHLSCopiesVideo(source PlaybackMediaSource) bool {
 }
 
 func compatHLSUsesFMP4(source PlaybackMediaSource) bool {
-	return compatHLSCopiesVideo(source) && !source.HLSRemuxMPEGTS
+	return (compatHLSCopiesVideo(source) && !source.HLSRemuxMPEGTS) ||
+		compatSourceTargetVideoCodec(source) == compatVideoCodecHEVC
 }
 
 func compatWebOSDVMPEGTS(userAgent string, source PlaybackMediaSource) bool {
@@ -330,12 +348,28 @@ func compatSourceHasSurroundAudio(source PlaybackMediaSource) bool {
 func compatRecipeMatchesSource(recipe *playback.RecipeCard, source PlaybackMediaSource) bool {
 	return recipe != nil &&
 		recipe.MediaFileID == source.FileID &&
+		compatRecipeTargetVideoMatchesSource(recipe, source) &&
 		recipe.AudioTrackIndex == compatAudioTrackIndexOrDefault(source) &&
 		recipe.SourceAudioChannels == compatHLSRecipeSourceAudioChannels(source) &&
 		recipe.CopyVideoMPEGTS == source.HLSRemuxMPEGTS &&
 		recipe.SubtitleBurnIn == source.SubtitleBurnIn && (!source.SubtitleBurnIn || (recipe.SubtitleTrackIndex == source.SubtitleTrackIndex && recipe.SubtitleCodec == source.SubtitleCodec)) &&
 		(source.TargetBitrateKbps == 0 || recipe.TargetBitrateKbps == source.TargetBitrateKbps) &&
 		(source.TargetResolution == "" || recipe.TargetResolution == source.TargetResolution)
+}
+
+// compatRecipeTargetVideoMatchesSource accepts target-less cards written
+// before target codec became part of the compat session schema. New HEVC
+// sources always carry a target, so they cannot adopt that legacy H.264/card
+// ambiguity.
+func compatRecipeTargetVideoMatchesSource(recipe *playback.RecipeCard, source PlaybackMediaSource) bool {
+	if recipe == nil {
+		return false
+	}
+	actual := strings.TrimSpace(recipe.TargetCodecVideo)
+	if actual == "" {
+		return strings.TrimSpace(source.TargetVideoCodec) == ""
+	}
+	return strings.EqualFold(actual, compatSourceTargetVideoCodec(source))
 }
 
 // Versioned wrappers put a literal path segment in every byte URL whose
@@ -2781,8 +2815,9 @@ func (h *PlaybackHandler) ensureTranscodeSessionWithToneMapMode(
 		TargetBitrateKbps:      source.TargetBitrateKbps,
 		TargetResolution:       source.TargetResolution,
 		TargetAudioChannels:    source.TargetAudioChannels,
-		TargetCodecVideo:       compatTargetVideoCodec,
+		TargetCodecVideo:       compatSourceTargetVideoCodec(source),
 		TargetCodecAudio:       compatTargetAudioCodec,
+		VideoSampleEntry:       compatSourceVideoSampleEntry(source),
 		FFmpegPath:             h.FFmpegPath,
 		HWAccel:                h.HWAccel,
 		AudioTrackIndex:        audioTrackIndex,
@@ -3441,13 +3476,14 @@ func (h *PlaybackHandler) createStaticPlaySession(ctx context.Context, session *
 		return nil, nil, errServerBitrateScopeUnavailable
 	}
 	allow4KTranscode := h.allow4KVideoTranscode(ctx)
+	allowHEVCEncoding := h.allowHEVCVideoEncoding(ctx) && h.localHEVCEncodingAvailable(ctx)
 	for _, version := range detail.Versions {
 		// Reused requests and reports may omit MediaSourceId. Keep their
 		// default source bound to the file selected by the route.
 		if sourceFromRoute && int64(version.FileID) != routeFileID {
 			continue
 		}
-		source := h.buildPlaybackSource(routeID, playSessionID, version, DeviceProfile{}, playbackInfoRequest{serverBitrateCapKbps: serverBitrateCapKbps, streamLocation: string(streamlocation.FromContext(ctx))}, allow4KTranscode)
+		source := h.buildPlaybackSource(routeID, playSessionID, version, DeviceProfile{}, playbackInfoRequest{serverBitrateCapKbps: serverBitrateCapKbps, streamLocation: string(streamlocation.FromContext(ctx))}, allow4KTranscode, allowHEVCEncoding)
 		sources = append(sources, source)
 	}
 

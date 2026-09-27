@@ -1072,6 +1072,23 @@ func (h *PlaybackHandler) allow4KVideoTranscode(ctx context.Context) bool {
 	return v == "true"
 }
 
+// allowHEVCVideoEncoding reads opt-in HEVC encoding. Missing or unreadable
+// settings fail closed and retain the H.264 ladder.
+func (h *PlaybackHandler) allowHEVCVideoEncoding(ctx context.Context) bool {
+	if h.SettingsRepo == nil {
+		return false
+	}
+	v, _ := h.SettingsRepo.Get(ctx, config.PlaybackAllowHEVCEncodingSettingKey)
+	return strings.EqualFold(strings.TrimSpace(v), "true")
+}
+
+// localHEVCEncodingAvailable requires same validated FFmpeg recipe native
+// planner uses. Probe failure falls back to H.264.
+func (h *PlaybackHandler) localHEVCEncodingAvailable(ctx context.Context) bool {
+	registry, err := h.localAudioTransformationRegistry(ctx)
+	return err == nil && registry != nil && registry.Available(playback.TransformationVideoToHEVCV3)
+}
+
 func is4KResolution(res string) bool {
 	return access.CompareQuality(res, "2160p") >= 0
 }
@@ -1515,6 +1532,7 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		expectedAudioTrackIndex := compatAudioTrackIndexOrDefault(source)
 		if current, ok := h.playbackStore.Get(playSessionID); ok && current.TranscodeStarted && current.Recipe != nil && current.Recipe.TranscodeNodeURL != "" &&
 			current.Recipe.MediaFileID == source.FileID &&
+			compatRecipeTargetVideoMatchesSource(current.Recipe, source) &&
 			current.Recipe.SourceAudioChannels == expectedSourceAudioChannels &&
 			current.Recipe.AudioTrackIndex == expectedAudioTrackIndex &&
 			playback.ValidateCopyFMP4RecipeCard(*current.Recipe) == nil {
@@ -1636,8 +1654,9 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 		TargetBitrateKbps:      source.TargetBitrateKbps,
 		TargetResolution:       source.TargetResolution,
 		TargetAudioChannels:    source.TargetAudioChannels,
-		TargetCodecVideo:       compatTargetVideoCodec,
+		TargetCodecVideo:       compatSourceTargetVideoCodec(source),
 		TargetCodecAudio:       compatTargetAudioCodec,
+		VideoSampleEntry:       compatSourceVideoSampleEntry(source),
 		SegmentDuration:        segmentDuration,
 		HWAccel:                h.remoteDispatchHWAccel(transcodeNodeURL),
 		AudioTrackIndex:        compatAudioTrackIndexOrDefault(source),
@@ -2156,6 +2175,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 	defer cancelAttachmentProbe()
 
 	allow4KTranscode := h.allow4KVideoTranscode(r.Context())
+	allowHEVCEncoding := h.allowHEVCVideoEncoding(r.Context()) && h.localHEVCEncodingAvailable(r.Context())
 	toneMapPolicy := tonemap.PolicyNone
 	toneMapPolicyLoaded := false
 	var toneMapCapabilities tonemap.Capabilities
@@ -2184,7 +2204,7 @@ func (h *PlaybackHandler) HandlePlaybackInfo(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	for _, version := range detail.Versions {
-		source := h.buildPlaybackSource(routeItemID, playSessionID, version, profile, req, allow4KTranscode)
+		source := h.buildPlaybackSource(routeItemID, playSessionID, version, profile, req, allow4KTranscode, allowHEVCEncoding)
 		if req.MediaSourceID != "" && !mediaSourceIDsEqual(source.ID, req.MediaSourceID) {
 			continue
 		}
@@ -2415,6 +2435,7 @@ func (h *PlaybackHandler) buildPlaybackSource(
 	profile DeviceProfile,
 	req playbackInfoRequest,
 	allow4KTranscode bool,
+	allowHEVCEncoding ...bool,
 ) PlaybackMediaSource {
 	sourceID := h.codec.EncodeIntID(EncodedIDMediaSource, int64(version.FileID))
 	enableDirectPlay := boolDefault(req.EnableDirectPlay, true)
@@ -2502,7 +2523,14 @@ func (h *PlaybackHandler) buildPlaybackSource(
 			targetResolution = ""
 		}
 	}
+	targetVideoCodec := compatTargetVideoCodec
 	canEncodeOutput := profile.supportsTranscodingOutput(version, targetAudioChannels, max(targetBitrateKbps, 0), targetResolution)
+	// HEVC needs server opt-in and an explicit compatible HLS fMP4 profile.
+	if len(allowHEVCEncoding) > 0 && allowHEVCEncoding[0] &&
+		profile.supportsHEVCTranscodingOutput(version, targetAudioChannels, max(targetBitrateKbps, 0), targetResolution) {
+		targetVideoCodec = compatVideoCodecHEVC
+		canEncodeOutput = true
+	}
 	supportsTranscoding := enableTranscoding &&
 		(hlsAudioCopy || transcodeAudio || canEncodeOutput)
 	// Don't offer full video encodes of 4K sources when allow_4k_transcode is
@@ -2522,6 +2550,7 @@ func (h *PlaybackHandler) buildPlaybackSource(
 		TargetBitrateKbps:          max(targetBitrateKbps, 0),
 		TargetResolution:           targetResolution,
 		TargetAudioChannels:        targetAudioChannels,
+		TargetVideoCodec:           targetVideoCodec,
 		ID:                         sourceID,
 		FileID:                     version.FileID,
 		Version:                    version,
@@ -2653,6 +2682,8 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 			} else {
 				dto.TranscodingContainer = compatContainerMP4
 			}
+		} else if compatSourceTargetVideoCodec(source) == compatVideoCodecHEVC {
+			dto.TranscodingContainer = compatContainerMP4
 		} else {
 			dto.TranscodingContainer = "ts"
 		}

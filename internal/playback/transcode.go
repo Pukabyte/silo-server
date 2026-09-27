@@ -332,7 +332,8 @@ const (
 // StartTranscode launches an ffmpeg process that produces HLS segments.
 func StartTranscode(ctx context.Context, opts TranscodeOpts) (*TranscodeSession, error) {
 	if !validVideoSampleEntry(opts.VideoSampleEntry) ||
-		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
+		opts.VideoSampleEntry != "" && !strings.EqualFold(opts.TargetCodecVideo, "copy") &&
+			!(opts.VideoSampleEntry == VideoSampleEntryHVC1 && strings.EqualFold(opts.TargetCodecVideo, transcodeCodecHEVC)) {
 		return nil, fmt.Errorf("unsupported video sample-entry recipe")
 	}
 	if opts.CopyVideoMPEGTS && !strings.EqualFold(opts.TargetCodecVideo, "copy") {
@@ -766,14 +767,17 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 		if videoBitstreamFilter != "" {
 			args = append(args, "-bsf:v", videoBitstreamFilter)
 		}
-		switch opts.VideoSampleEntry {
-		case VideoSampleEntryDVH1:
-			args = append(args, "-tag:v", VideoSampleEntryDVH1, "-strict", "unofficial")
-		case VideoSampleEntryHVC1:
-			args = append(args, "-tag:v", VideoSampleEntryHVC1)
-		}
 	} else {
 		args = appendVideoArgs(args, opts)
+	}
+	// Chrome and Edge require HEVC fMP4 tracks to be hvc1-tagged so parameter
+	// sets are carried in the initialization box. hvc1 is valid for copied
+	// HEVC and for server-encoded HEVC; dvh1 remains copy-only.
+	switch opts.VideoSampleEntry {
+	case VideoSampleEntryDVH1:
+		args = append(args, "-tag:v", VideoSampleEntryDVH1, "-strict", "unofficial")
+	case VideoSampleEntryHVC1:
+		args = append(args, "-tag:v", VideoSampleEntryHVC1)
 	}
 
 	// Copy-video sessions only do audio work on the filter/encode side.
@@ -794,7 +798,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	}
 
 	// HLS output options.
-	// Codec-copy sessions usually use fMP4 segments — no transmuxing needed in
+	// Codec-copy and HEVC sessions use fMP4 segments — no transmuxing needed in
 	// hls.js, which avoids Safari MSE compatibility issues with certain codecs
 	// in TS. MPEG-2 video is the exception: Apple consumes it as compatibility
 	// HLS, so package it in MPEG-TS while still copying the video stream.
@@ -802,8 +806,8 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// race with fMP4 (hls.js #6337).
 	var segmentPattern string
 	segmentType := HLSOutputContainer(opts)
-	copyVideoUsesFMP4 := copyVideoUsesFMP4(opts)
-	if copyVideoUsesFMP4 {
+	videoUsesFMP4 := videoUsesFMP4(opts)
+	if videoUsesFMP4 {
 		segmentPattern = filepath.Join(opts.OutputDir, "seg_%05d.m4s")
 	} else {
 		segmentPattern = filepath.Join(opts.OutputDir, "seg_%05d.ts")
@@ -830,7 +834,7 @@ func buildFFmpegArgs(opts TranscodeOpts) []string {
 	// Without this, some browsers (notably Chromium on macOS) can experience
 	// A/V sync issues during copy-mode HLS playback. Matches Jellyfin's
 	// proven fMP4 HLS pipeline.
-	if copyVideoUsesFMP4 {
+	if videoUsesFMP4 {
 		args = append(args, "-hls_segment_options", "movflags=+frag_discont")
 	}
 	if opts.StartSegmentNumber > 0 {
@@ -926,7 +930,7 @@ func appendStreamSelectionArgs(args []string, opts TranscodeOpts) []string {
 // HLSOutputContainer is shared by FFmpeg argument construction and activity
 // reporting so copied MPEG-2/forced-TS streams cannot be mislabeled as fMP4.
 func HLSOutputContainer(opts TranscodeOpts) string {
-	if copyVideoUsesFMP4(opts) {
+	if videoUsesFMP4(opts) {
 		return OutputContainerFMP4
 	}
 	return OutputContainerMPEGTS
@@ -939,6 +943,12 @@ func copyVideoUsesFMP4(opts TranscodeOpts) bool {
 	return strings.EqualFold(opts.TargetCodecVideo, "copy") &&
 		!opts.CopyVideoMPEGTS &&
 		!IsMPEG2VideoCodec(opts.SourceVideoCodec)
+}
+
+// videoUsesFMP4 includes server-encoded HEVC. The negotiated HEVC MSE recipe
+// requires an hvc1-tagged ISO-BMFF track.
+func videoUsesFMP4(opts TranscodeOpts) bool {
+	return copyVideoUsesFMP4(opts) || strings.EqualFold(opts.TargetCodecVideo, transcodeCodecHEVC)
 }
 
 // appendTimestampNormalizationArgs selects timestamp handling based on the
@@ -2539,7 +2549,7 @@ func parseManifestTimeline(manifest []byte) (manifestTimeline, error) {
 }
 
 func hlsSegmentExtension(opts TranscodeOpts) string {
-	if strings.EqualFold(opts.TargetCodecVideo, "copy") && !opts.CopyVideoMPEGTS && !IsMPEG2VideoCodec(opts.SourceVideoCodec) {
+	if videoUsesFMP4(opts) {
 		return ".m4s"
 	}
 	return ".ts"

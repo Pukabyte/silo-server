@@ -254,6 +254,13 @@ variant, listed before the `hvc1` fallback. MPEG-TS remuxes keep the single
 variant. Audio and subtitle streams carry `LocalizedLanguage`, and audio
 streams carry `LocalizedOriginal`, in English.
 
+HEVC Dolby Vision Profile 8 with a proven HDR10 base layer and no enhancement
+layer can use HLS fMP4 remux when a positive video-range condition names both
+`DOVI` and `HDR10`. The source retains its `DOVIWithHDR10` metadata and Dolby
+Vision bitstream. Explicit exclusions and all other codec, audio, sample-entry,
+resolution, and level constraints remain enforced. HDR10-only clients do not
+gain this Dolby Vision-preserving route. Original-file direct play is unchanged.
+
 When a client's `VideoRangeType` conditions reject a Dolby Vision stream with
 an HDR10 base layer (HEVC profile 7, or profile 8 with compatibility ID 1) but
 accept HDR10, `PlaybackInfo` offers an HLS remux that strips the Dolby Vision
@@ -422,3 +429,12 @@ Themes do not create playback sessions or update watched state.
 
 See [local theme songs](catalog-api.md#local-theme-songs-v2) for file conventions,
 ownership, inheritance, and routing.
+
+## HEVC video encoding
+
+`playback.allow_hevc_encoding` enables HEVC output for negotiated HLS
+transcoding profiles that explicitly accept HEVC in fragmented MP4. The selected
+codec is preserved in the playback source, FFmpeg recipe, and restart recovery.
+H.264 remains the fallback when the setting is disabled or the client profile
+cannot accept HEVC output. Existing HEVC direct-play and remux routes are
+unchanged.
