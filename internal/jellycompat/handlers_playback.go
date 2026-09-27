@@ -715,6 +715,17 @@ func compatSupportsAudioBoost(transformations []playback.TransformationV3) bool 
 	return false
 }
 
+func compatSupportsHEVCEncoding(transformations []playback.TransformationV3) bool {
+	for _, transformation := range transformations {
+		if strings.EqualFold(strings.TrimSpace(transformation.Name), playback.TransformationVideoToHEVCV3) &&
+			strings.EqualFold(strings.TrimSpace(transformation.Executor), playback.ExecutorServerV3) &&
+			strings.TrimSpace(transformation.RecipeVersion) == playback.TransformationVideoToHEVCRecipeVersionV3 {
+			return true
+		}
+	}
+	return false
+}
+
 // toneMapCapabilityTimeout bounds one capability sweep. Every caller wraps a
 // single deadline around concurrent per-node fetches (plus the local probe),
 // so the budget has to cover the slowest node in the fan-out, not a typical
@@ -1542,15 +1553,23 @@ func (h *PlaybackHandler) startRemoteTranscodeWithToneMapMode(
 			}
 		}
 	}
-	if sourceAudioChannels := compatHLSRecipeSourceAudioChannels(source); sourceAudioChannels > 0 {
+	sourceAudioChannels := compatHLSRecipeSourceAudioChannels(source)
+	hevcEncoding := compatSourceTargetVideoCodec(source) == compatVideoCodecHEVC
+	if sourceAudioChannels > 0 || hevcEncoding {
 		capabilityCtx, cancelCapabilityFetch := context.WithTimeout(ctx, h.toneMapCapabilityTimeout())
 		info, capabilityErr := h.remoteToneMapCapabilityInfo(capabilityCtx, transcodeNodeURL)
 		cancelCapabilityFetch()
 		if capabilityErr != nil {
-			return fmt.Errorf("load transcode node audio recipe capabilities: %w", capabilityErr)
+			return fmt.Errorf("load transcode node recipe capabilities: %w", capabilityErr)
 		}
-		if !compatSupportsAudioBoost(info.Transformations) {
+		if sourceAudioChannels > 0 && !compatSupportsAudioBoost(info.Transformations) {
 			return fmt.Errorf("transcode node does not support %s recipe %s", playback.TransformationAudioToAACV3, playback.TransformationAudioToAACRecipeVersionV3)
+		}
+		if hevcEncoding && !compatSupportsHEVCEncoding(info.Transformations) {
+			// Keep the negotiated codec and packaging frozen. The caller can
+			// exclude this node and try another executor without sending it a
+			// recipe it cannot run or silently replacing HEVC with H.264.
+			return fmt.Errorf("transcode node does not support %s recipe %s", playback.TransformationVideoToHEVCV3, playback.TransformationVideoToHEVCRecipeVersionV3)
 		}
 	}
 	if source.DVStripToHDR10 && compatHLSCopiesVideo(source) && !h.compatTranscodeNodeCanStrip(transcodeNodeURL) {

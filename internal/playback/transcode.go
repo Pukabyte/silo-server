@@ -1187,9 +1187,13 @@ func appendVideoArgs(args []string, opts TranscodeOpts) []string {
 		args = append(args, "-profile:v", "high")
 		args = appendVideoToolboxRateControl(args, opts)
 	case opts.HWAccel == transcodeHWVideoToolbox && codec == transcodeCodecHEVC:
-		// pix_fmt is left to the input: 10-bit sources encode as p010
-		// (HDR10 passthrough), matching the other hardware HEVC paths.
+		// HLS HEVC delivery promises Main 8-bit SDR output. Hardware tone
+		// mapping already produces an NV12 frame, so do not add a second
+		// format/profile request at the encoder boundary.
 		args = append(args, "-c:v", "hevc_videotoolbox")
+		if opts.ToneMapMode != tonemap.ModeHardware {
+			args = append(args, "-pix_fmt", "yuv420p", "-profile:v", hevcMainProfileV3)
+		}
 		args = appendVideoToolboxRateControl(args, opts)
 	default:
 		// CPU fallback — match Jellyfin's proven browser-compatible settings.
