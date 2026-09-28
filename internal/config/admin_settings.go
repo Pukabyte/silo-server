@@ -135,6 +135,8 @@ var adminSettingDefaults = map[string]string{
 	"markers.lazy_playback":                "true",
 	MarkersDetectionWorkersSettingKey:      "1",
 	"markers.online_storage":               "stored",
+	"markers.detect_intros":                "true",
+	"markers.detect_credits":               "true",
 
 	"playback.ffmpeg_path":                           "",
 	playbackTranscodeDirSettingKey:                   DefaultTranscodeDir,
