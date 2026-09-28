@@ -66,13 +66,13 @@ func TestLocalHEVCEncodingAvailabilityRequiresValidatedRegistry(t *testing.T) {
 			Name: playback.TransformationVideoToHEVCV3, Available: true,
 		}}), nil
 	}}
-	if !h.localHEVCEncodingAvailable(context.Background()) {
+	if !h.compatLocalHEVCSupportsSource(context.Background(), PlaybackMediaSource{}, tonemap.PolicyNone) {
 		t.Fatal("validated HEVC registry was rejected")
 	}
 	h = &PlaybackHandler{compatAudioRegistryProbe: func(context.Context, string, tonemap.Capabilities) (*playback.TransformationRegistryV3, error) {
 		return playback.NewTransformationRegistryV3(nil), nil
 	}}
-	if h.localHEVCEncodingAvailable(context.Background()) {
+	if h.compatLocalHEVCSupportsSource(context.Background(), PlaybackMediaSource{}, tonemap.PolicyNone) {
 		t.Fatal("missing HEVC transformation was accepted")
 	}
 }

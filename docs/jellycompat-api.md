@@ -435,6 +435,12 @@ ownership, inheritance, and routing.
 `playback.allow_hevc_encoding` enables HEVC output for negotiated HLS
 transcoding profiles that explicitly accept HEVC in fragmented MP4. The selected
 codec is preserved in the playback source, FFmpeg recipe, and restart recovery.
+Encoded HEVC playlists and segments use `/Videos/{id}/hevc-v1/...`; older
+API instances reject these routes during rolling upgrades instead of serving
+H.264 bytes for the negotiated HEVC stream.
 H.264 remains the fallback when the setting is disabled or the client profile
-cannot accept HEVC output. Existing HEVC direct-play and remux routes are
-unchanged.
+cannot accept HEVC output, or no executor allowed by routing policy supports
+the complete HEVC recipe. Required audio conversion and tone mapping must be
+available on that same executor. Negotiation reads workers' stored capability
+reports; execution checks the selected worker again. Existing HEVC direct-play
+and remux routes are unchanged.

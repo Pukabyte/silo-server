@@ -2,10 +2,12 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 )
@@ -106,6 +108,9 @@ func TestProbeTransformationRegistryV3AdvertisesValidatedHEVCEncoder(t *testing.
 	if !registry.Available(TransformationVideoToHEVCV3) {
 		t.Fatal("HEVC encoder was not advertised")
 	}
+	if registry.NeedsRefresh(time.Now().Add(time.Hour)) {
+		t.Fatal("complete HEVC inventory should stay cached")
+	}
 }
 
 func TestProbeTransformationRegistryV3DoesNotAdvertiseFailedHEVCSmoke(t *testing.T) {
@@ -117,6 +122,76 @@ func TestProbeTransformationRegistryV3DoesNotAdvertiseFailedHEVCSmoke(t *testing
 	registry := ProbeTransformationRegistryV3(context.Background(), ffmpeg)
 	if registry.Available(TransformationVideoToHEVCV3) {
 		t.Fatal("HEVC transformation advertised despite failed encode smoke")
+	}
+	if registry.NeedsRefresh(time.Now().Add(time.Hour)) {
+		t.Fatal("unsupported HEVC inventory should stay cached")
+	}
+}
+
+func TestProbeTransformationRegistryV3HEVCTimeoutKeepsBaselineInventory(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\ncase \"$2\" in\n-bsfs) : ;;\n-encoders) echo ' V....D libx264 H.264'; echo ' V....D libx265 HEVC'; echo ' A....D aac AAC' ;;\nesac\ncase \" $* \" in\n*' -c:v libx265 '*) exec sleep 30 ;;\nesac\n"
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := ProbeTransformationRegistryWithToneMapV3Result(context.Background(), ffmpeg, nil)
+	if err != nil {
+		t.Fatalf("optional HEVC timeout invalidated baseline inventory: %v", err)
+	}
+	if registry.Available(TransformationVideoToHEVCV3) || !registry.Available(TransformationVideoToH264V3) || !registry.Available(TransformationAudioToAACV3) {
+		t.Fatalf("HEVC timeout changed baseline capabilities: %#v", registry.Advertised())
+	}
+	if registry.NeedsRefresh(time.Now()) || registry.refreshAfter.IsZero() {
+		t.Fatal("incomplete optional probe must keep baseline capabilities cached briefly")
+	}
+	if registry.NeedsRefresh(registry.refreshAfter.Add(-time.Nanosecond)) || !registry.NeedsRefresh(registry.refreshAfter) {
+		t.Fatal("incomplete HEVC probe did not become retryable at its expiry")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = ProbeTransformationRegistryWithToneMapV3Result(ctx, ffmpeg, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller cancellation was swallowed: %v", err)
+	}
+
+	// Recovery changes the fake encoder's behavior; expiry above uses an
+	// explicit timestamp, so no test needs to wait for the retry interval.
+	if err := os.WriteFile(ffmpeg, []byte(strings.Replace(script, "exec sleep 30", "exit 0", 1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := ProbeTransformationRegistryWithToneMapV3Result(context.Background(), ffmpeg, nil)
+	if err != nil || !recovered.Available(TransformationVideoToHEVCV3) ||
+		!recovered.Available(TransformationVideoToH264V3) || !recovered.Available(TransformationAudioToAACV3) ||
+		recovered.NeedsRefresh(time.Now().Add(time.Hour)) {
+		t.Fatalf("HEVC recovery did not restore a complete stable inventory: %v, %#v", err, recovered.Advertised())
+	}
+}
+
+func TestProbeTransformationRegistryV3HEVCStartupFailureExpires(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	// Drop execute permission after the last baseline probe. The optional
+	// HEVC command then fails to start rather than returning an unsupported
+	// encoder result from a running FFmpeg process.
+	script := "#!/bin/sh\ncase \"$2\" in\n-encoders) echo ' V....D libx264 H.264'; echo ' V....D libx265 HEVC'; echo ' A....D aac AAC' ;;\nesac\ncase \" $* \" in\n*'anullsrc=r=8000:cl=5.1'*) chmod -x \"$0\" ;;\nesac\n"
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := ProbeTransformationRegistryWithToneMapV3Result(context.Background(), ffmpeg, nil)
+	if err != nil || registry.Available(TransformationVideoToHEVCV3) || !registry.NeedsRefresh(time.Now().Add(time.Minute)) {
+		t.Fatalf("optional process startup failure did not expire: %v, %#v", err, registry)
+	}
+}
+
+func TestProbeTransformationRegistryV3MissingHEVCEncoderStaysCached(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	script := "#!/bin/sh\ncase \"$2\" in\n-encoders) echo ' V....D libx264 H.264'; echo ' A....D aac AAC' ;;\nesac\n"
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := ProbeTransformationRegistryWithToneMapV3Result(context.Background(), ffmpeg, nil)
+	if err != nil || registry.Available(TransformationVideoToHEVCV3) || registry.NeedsRefresh(time.Now().Add(time.Hour)) {
+		t.Fatalf("missing optional encoder should remain a stable negative result: %v, %#v", err, registry)
 	}
 }
 

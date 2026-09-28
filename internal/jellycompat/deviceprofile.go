@@ -293,7 +293,9 @@ func (p DeviceProfile) supportsVideoTranscodingOutput(version catalog.FileVersio
 	output.VideoTracks = []models.VideoTrack{video}
 	output.AudioTracks = []models.AudioTrack{{Codec: compatTargetAudioCodec, Channels: channels, Bitrate: audioBitrateKbps * 1000}}
 	audioIndex := len(output.VideoTracks)
-	if !p.codecProfileCompatibility(output, &audioIndex).supportsDirectPlay() {
+	// Both encoded outputs use HLS. Apply codec profiles scoped to its
+	// segment container, including Container=hls with SubContainer=mp4/ts.
+	if !p.codecProfileCompatibilityWithValues(output, &audioIndex, buildConditionValues(output, &audioIndex), container, true).supportsDirectPlay() {
 		return false
 	}
 

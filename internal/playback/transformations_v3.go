@@ -23,10 +23,13 @@ type TransformationSpecV3 struct {
 }
 
 type TransformationRegistryV3 struct {
-	entries map[string]TransformationSpecV3
+	entries      map[string]TransformationSpecV3
+	refreshAfter time.Time
 }
 
 var errHEVCEncoderUnavailableV3 = errors.New("libx265 encoder unavailable")
+
+const transformationProbeRetryDelayV3 = 15 * time.Second
 
 // ProbeTransformationRegistryV3 builds a registry without optional tone-map executors.
 func ProbeTransformationRegistryV3(ctx context.Context, ffmpegPath string) *TransformationRegistryV3 {
@@ -40,9 +43,9 @@ func ProbeTransformationRegistryWithToneMapV3(ctx context.Context, ffmpegPath st
 	return registry
 }
 
-// ProbeTransformationRegistryWithToneMapV3Result also reports incomplete
-// command execution so capability endpoints do not advertise a misleading
-// partial inventory after cancellation or a probe deadline.
+// ProbeTransformationRegistryWithToneMapV3Result reports incomplete baseline
+// probing and caller cancellation. An incomplete optional HEVC probe leaves
+// baseline capabilities usable and marks the registry for a later refresh.
 func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegPath string, toneMapCapabilities tonemap.Capabilities) (*TransformationRegistryV3, error) {
 	// Resolve exactly like the execution paths (remux and transcode) so every
 	// capability advertised here holds for the binary that later runs.
@@ -66,6 +69,12 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 		{Name: TransformationVideoToHEVCV3, RecipeVersion: TransformationVideoToHEVCRecipeVersionV3, Available: ffmpegErr == nil && hevcEncoderAvailableV3(encoders) && hevcRecipeErr == nil, RequiredCapability: "ffmpeg_encoder:hevc+ffmpeg_encode_smoke:main_8bit_sdr", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimHEVCDecodeV3}, TerminalReason: TerminalVideoConversionUnsupportedV3},
 		{Name: TransformationHDRToSDRToneMapV3, RecipeVersion: TransformationHDRToSDRToneMapRecipeVersionV3, Available: len(toneMapCapabilities) > 0, RequiredCapability: "ffmpeg_filter:hdr_to_sdr_tonemap", PromisedDynamicRange: DynamicRangeSDRV3, ValidatedClaims: []string{ClaimHDRMetadataRemovedV3, ClaimSDRBT709OutputV3}, TerminalReason: TerminalHDRTranscodeUnsupportedV3},
 	})
+	if hevcRecipeContextErr != nil ||
+		(!errors.Is(hevcRecipeErr, errHEVCEncoderUnavailableV3) && audioRecipeProbeInfrastructureError(hevcRecipeErr) != nil) {
+		// Keep baseline capabilities usable, but retry incomplete optional
+		// probing after a short delay instead of caching HEVC absence forever.
+		registry.refreshAfter = time.Now().Add(transformationProbeRetryDelayV3)
+	}
 	return registry, errors.Join(
 		bsfErr,
 		encoderErr,
@@ -75,8 +84,10 @@ func ProbeTransformationRegistryWithToneMapV3Result(ctx context.Context, ffmpegP
 		normalizeRecipeContextErr,
 		audioRecipeProbeInfrastructureError(downmixRecipeErr),
 		downmixRecipeContextErr,
-		hevcRecipeProbeInfrastructureError(hevcRecipeErr),
-		hevcRecipeContextErr,
+		// Optional HEVC failure, including its own smoke deadline, only
+		// removes HEVC. A canceled inventory caller still invalidates the
+		// snapshot rather than publishing an incomplete capability report.
+		ctx.Err(),
 	)
 }
 
@@ -106,26 +117,23 @@ func probeHEVCRecipeV3(ctx context.Context, ffmpegPath string, encoders []byte) 
 		return errHEVCEncoderUnavailableV3, nil
 	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, 3*time.Second)
-	probeErr := exec.CommandContext(probeCtx, ffmpegPath,
-		"-hide_banner", "-loglevel", "error",
-		"-f", "lavfi", "-i", "testsrc2=size=64x64:rate=1",
-		"-frames:v", "1", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1", "-pix_fmt", "yuv420p",
-		"-f", "null", "-",
-	).Run()
+	probeErr := exec.CommandContext(probeCtx, ffmpegPath, hevcSoftwareSmokeArgsV3()...).Run()
 	probeContextErr := probeCtx.Err()
 	cancelProbe()
 	return probeErr, probeContextErr
 }
 
-func hevcRecipeProbeInfrastructureError(err error) error {
-	if errors.Is(err, errHEVCEncoderUnavailableV3) {
-		return nil
+func hevcSoftwareSmokeArgsV3() []string {
+	return []string{
+		ffmpegFlagHideBanner, ffmpegLogLevelArg, ffmpegLogLevelError,
+		"-f", "lavfi", "-i", "testsrc2=size=64x64:rate=1",
+		"-frames:v", "1", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1", "-pix_fmt", pixelFormatYUV420P,
+		"-f", "null", "-",
 	}
-	return audioRecipeProbeInfrastructureError(err)
 }
 
-// An ordinary non-zero FFmpeg exit means the installed filter graph is not a
-// v3 executor; that is a capability result, not a failed inventory. Process
+// An ordinary non-zero FFmpeg exit means the installed recipe is not a v3
+// executor; that is a capability result, not a failed inventory. Process
 // startup failures and caller cancellation still make the registry uncacheable.
 func audioRecipeProbeInfrastructureError(err error) error {
 	var exitErr *exec.ExitError
@@ -187,6 +195,12 @@ func (r *TransformationRegistryV3) Available(name string) bool {
 	}
 	spec, ok := r.entries[name]
 	return ok && spec.Available
+}
+
+// NeedsRefresh lets capability caches retry an incomplete optional probe while
+// retaining complete positive and negative inventories for their usual lifetime.
+func (r *TransformationRegistryV3) NeedsRefresh(now time.Time) bool {
+	return r == nil || !r.refreshAfter.IsZero() && !now.Before(r.refreshAfter)
 }
 
 // WithAdvertised returns a registry whose known specs are additionally marked
